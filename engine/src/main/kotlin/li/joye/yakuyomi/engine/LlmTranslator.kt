@@ -28,6 +28,7 @@ class LlmTranslator(
     private val model: String = "deepseek-chat",
     private val toLang: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",
     private val temperature: Double = 0.3,
+    private val postProcess: ((String) -> String)? = null, // s2twp 安全網（§12-8）
 ) : Translator {
 
     private val client = OkHttpClient.Builder()
@@ -40,8 +41,11 @@ class LlmTranslator(
         return try {
             val raw = request(buildMessages(queries))
             val parsed = parse(raw)
-            // 漏行保留原文（§11 不變式）
-            queries.mapIndexed { i, q -> parsed[i + 1]?.takeIf { it.isNotBlank() } ?: q }
+            // 成功的譯文過 s2twp（§12-8）；漏行保留原文（§11 不變式，不對日文做 s2twp）
+            queries.mapIndexed { i, q ->
+                val tr = parsed[i + 1]?.takeIf { it.isNotBlank() }
+                if (tr != null) (postProcess?.invoke(tr) ?: tr) else q
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "翻譯失敗，整批保留原文：${t.message}")
             queries // 全失敗 → 全保留原文，不毀進度

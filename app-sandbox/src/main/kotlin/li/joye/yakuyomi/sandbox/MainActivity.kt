@@ -5,7 +5,6 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
@@ -14,14 +13,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
+import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
-import li.joye.yakuyomi.engine.TextLine
+import li.joye.yakuyomi.engine.OpenCCS2twp
+import li.joye.yakuyomi.engine.TextRegion
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
 /**
- * M2 sandbox：一顆按鈕 → 偵測 → OCR(日) → LLM 翻譯(繁中) → overlay。
- * 為省記憶體，偵測與 OCR 兩個 ONNX 依序載入/釋放。翻譯走雲端（需連網 + BYOK key）。
+ * M2 sandbox：偵測 → OCR(日) → 行合併(氣泡) → LLM 翻譯(繁中) → overlay。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -48,21 +48,32 @@ class MainActivity : AppCompatActivity() {
                 val ocrBytes = assets.open(OCR_MODEL).use { it.readBytes() }
                 Ocr(ocrBytes, alphabet).use { it.recognize(page, lines) }
 
-                // 翻譯（BYOK：debug 由 gradle 從 api-keys.properties 注入）
+                // 同氣泡的行先合併再翻
+                val regions = Grouping.group(lines)
+
                 val key = BuildConfig.DEEPSEEK_API_KEY
-                if (key.isNotBlank() && lines.isNotEmpty()) {
+                if (key.isNotBlank() && regions.isNotEmpty()) {
                     withContext(Dispatchers.Main) { binding.statusText.text = "翻譯中（雲端）…" }
-                    val cht = LlmTranslator(key).translate(lines.map { it.text })
-                    lines.forEachIndexed { i, l -> l.translatedText = cht.getOrElse(i) { l.text } }
+                    val s2twp = OpenCCS2twp(
+                        stTexts = listOf(
+                            assets.open("opencc/STPhrases.txt").bufferedReader().use { it.readText() },
+                            assets.open("opencc/STCharacters.txt").bufferedReader().use { it.readText() },
+                        ),
+                        twTexts = listOf(assets.open("opencc/TWVariants.txt").bufferedReader().use { it.readText() }),
+                    )
+                    val cht = LlmTranslator(key, postProcess = { s2twp.convert(it) })
+                        .translate(regions.map { it.sourceText })
+                    regions.forEachIndexed { i, r -> r.translatedText = cht.getOrElse(i) { r.sourceText } }
                 }
-                page to lines
+                Triple(page, lines.size, regions)
             }
             withContext(Dispatchers.Main) {
-                result.onSuccess { (page, lines) ->
-                    binding.imageView.setImageBitmap(drawResult(page, lines))
-                    val translated = lines.count { it.translatedText.isNotBlank() }
+                result.onSuccess { (page, lineCount, regions) ->
+                    binding.imageView.setImageBitmap(drawResult(page, regions))
+                    val translated = regions.count { it.translatedText.isNotBlank() }
                     val keyMsg = if (BuildConfig.DEEPSEEK_API_KEY.isBlank()) "（無 key，略過翻譯）" else ""
-                    binding.statusText.text = "完成：${lines.size} 行；OCR ${lines.count { it.text.isNotBlank() }}、翻譯 $translated $keyMsg"
+                    binding.statusText.text =
+                        "完成：$lineCount 行 → ${regions.size} 區；翻譯 $translated $keyMsg"
                 }.onFailure { t ->
                     Log.e(TAG, "pipeline 失敗", t)
                     binding.statusText.text = "失敗：${t.message}"
@@ -75,7 +86,7 @@ class MainActivity : AppCompatActivity() {
     private fun loadAssetBitmap(path: String): Bitmap =
         assets.open(path).use { BitmapFactory.decodeStream(it) }
 
-    private fun drawResult(src: Bitmap, lines: List<TextLine>): Bitmap {
+    private fun drawResult(src: Bitmap, regions: List<TextRegion>): Bitmap {
         val out = src.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(out)
         val boxPaint = Paint().apply {
@@ -96,21 +107,13 @@ class MainActivity : AppCompatActivity() {
             textSize = 30f
             isAntiAlias = true
         }
-        for (line in lines) {
-            val q = line.quad
-            if (q.size < 4) continue
-            val path = Path().apply {
-                moveTo(q[0].x, q[0].y)
-                for (i in 1..3) lineTo(q[i].x, q[i].y)
-                close()
-            }
-            canvas.drawPath(path, boxPaint)
-            val label = line.translatedText.ifBlank { line.text }
+        for (r in regions) {
+            canvas.drawRect(r.x0, r.y0, r.x1, r.y1, boxPaint)
+            val label = r.translatedText.ifBlank { r.sourceText }
             if (label.isNotBlank()) {
-                val tx = q.minOf { it.x }
-                val ty = (q.minOf { it.y } - 6f).coerceAtLeast(30f)
-                canvas.drawText(label, tx, ty, textStroke)
-                canvas.drawText(label, tx, ty, textFill)
+                val ty = (r.y0 - 6f).coerceAtLeast(30f)
+                canvas.drawText(label, r.x0, ty, textStroke)
+                canvas.drawText(label, r.x0, ty, textFill)
             }
         }
         return out
