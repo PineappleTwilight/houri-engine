@@ -16,6 +16,7 @@ import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
 import li.joye.yakuyomi.engine.OpenCCS2twp
 import li.joye.yakuyomi.engine.Renderer
+import li.joye.yakuyomi.engine.TextOrientation
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
 /**
@@ -36,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
         binding.statusText.text = "載入模型 / 推論中…（首次較久）"
+        val orientation = if (binding.verticalSwitch.isChecked) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL
         lifecycleScope.launch(Dispatchers.Default) {
             val result = runCatching {
                 val page = loadAssetBitmap(TEST_PAGE)
@@ -68,7 +70,7 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { binding.statusText.text = "去字 + 排版…" }
                 val lamaBytes = assets.open(LAMA_MODEL).use { it.readBytes() }
                 val cleaned = Inpainter(lamaBytes).use { it.inpaint(page, regions) }
-                val finalPage = Renderer.render(cleaned, regions)
+                val finalPage = Renderer.render(cleaned, regions, orientation)
 
                 Triple(finalPage, lines.size, regions.size)
             }
