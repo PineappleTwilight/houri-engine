@@ -55,6 +55,11 @@ proguard/
 *.onnx
 *.onnx.data
 
+# --- 字型（大型二進位；OFL/Apache 可散布，但比照模型不入庫，dev 端本機 bundle，BYOF）---
+*.ttc
+*.ttf
+*.otf
+
 # --- OS / 編輯器 ---
 .DS_Store
 Thumbs.db

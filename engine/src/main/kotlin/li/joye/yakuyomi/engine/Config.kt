@@ -41,6 +41,7 @@ data class TranslatorConfig(
     val toLangName: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",
     val temperature: Double = 0.3,
     val concurrency: Int = 4,         // 〔設定〕跨頁並發上限（§10 Semaphore 旋鈕；Pipeline 用）
+    val filterText: String? = null,   // 〔設定〕config.filter_text：regex 命中譯文則濾掉該區（例 ".*badtext.*"）
 )
 
 data class InpainterConfig(
@@ -50,8 +51,12 @@ data class InpainterConfig(
 )
 
 data class RenderConfig(
-    val orientation: TextOrientation = TextOrientation.VERTICAL, // 〔設定〕config.render.direction=auto → CJK 直排
+    val orientation: TextOrientation = TextOrientation.AUTO, // 〔設定〕對應 config.render.direction=auto（CJK→直排）
     val fontBorder: Boolean = true,                              // 〔設定〕config.render.disable_font_border=false
-    val fontSizeMax: Int = 46,
+    val fontSizeMax: Int = 60,
     val fontSizeMin: Int = 9,
+    // 排版幾何（純文字框法，對齊 parity/typeset_parity.py；不常動，留可控空間）
+    val expandW: Float = 1.3f,   // 文字框放大倍率（寬）給呼吸空間
+    val expandH: Float = 1.5f,   // 文字框放大倍率（直欄高 / 橫排列高）
+    val colTrim: Int = 2,        // 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
 )

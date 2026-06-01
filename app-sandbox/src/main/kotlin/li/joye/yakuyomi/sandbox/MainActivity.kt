@@ -2,6 +2,7 @@ package li.joye.yakuyomi.sandbox
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Typeface
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
@@ -18,6 +19,7 @@ import li.joye.yakuyomi.engine.Ocr
 import li.joye.yakuyomi.engine.OpenCCS2twp
 import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.Renderer
+import li.joye.yakuyomi.engine.TextFilter
 import li.joye.yakuyomi.engine.TextOrientation
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
@@ -62,7 +64,8 @@ class MainActivity : AppCompatActivity() {
                 val regions = Grouping.group(lines)
 
                 val key = BuildConfig.DEEPSEEK_API_KEY
-                if (key.isNotBlank() && regions.isNotEmpty()) {
+                val translated = key.isNotBlank() && regions.isNotEmpty()
+                if (translated) {
                     withContext(Dispatchers.Main) { binding.statusText.text = "翻譯中（雲端）…" }
                     val s2twp = OpenCCS2twp(
                         stTexts = listOf(
@@ -76,12 +79,17 @@ class MainActivity : AppCompatActivity() {
                     regions.forEachIndexed { i, r -> r.translatedText = cht.getOrElse(i) { r.sourceText } }
                 }
 
+                // 翻譯後過濾（m-i-t filter chain）：丟掉空白/數字/regex/未譯區 → 不去字、不排版、保留原圖
+                val renderRegions =
+                    if (translated) TextFilter.apply(regions, cfg.translator.filterText) else regions
+
                 withContext(Dispatchers.Main) { binding.statusText.text = "去字 + 排版…" }
                 val lamaBytes = assets.open(LAMA_MODEL).use { it.readBytes() }
-                val cleaned = Inpainter(lamaBytes, cfg.inpainter).use { it.inpaint(page, regions) }
-                val finalPage = Renderer.render(cleaned, regions, cfg.render)
+                val cleaned = Inpainter(lamaBytes, cfg.inpainter).use { it.inpaint(page, renderRegions) }
+                val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
+                val finalPage = Renderer.render(cleaned, renderRegions, cfg.render, tf)
 
-                Triple(finalPage, lines.size, regions.size)
+                Triple(finalPage, lines.size, renderRegions.size)
             }
             withContext(Dispatchers.Main) {
                 result.onSuccess { (finalPage, lineCount, regionCount) ->
@@ -107,5 +115,6 @@ class MainActivity : AppCompatActivity() {
         private const val OCR_MODEL = "models/ocr_48px_ctc.onnx"
         private const val LAMA_MODEL = "models/lama-manga.onnx"
         private const val ALPHABET = "models/alphabet-all-v5.txt"
+        private const val FONT = "fonts/NotoSansMonoCJK.ttc"
     }
 }
