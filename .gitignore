@@ -65,3 +65,7 @@ Thumbs.db
 # --- 日誌 / 暫存 ---
 *.log
 *.tmp
+
+# --- Python（parity 工具）---
+__pycache__/
+*.pyc
