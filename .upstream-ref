@@ -1,0 +1,17 @@
+# manga-image-translator 釘住的參考版本（CLAUDE.md §7）
+# 程式碼以「最新 main」為準；模型用各自最新版
+# （beta-0.3 release 只是 model host，後續僅少數模型更新，一律取最新）。
+
+repo   = https://github.com/zyddnys/manga-image-translator
+branch = main
+commit = d5a3eee4a7b7b7754b71baa2ee82309dfff468bc
+date   = 2026-05-24
+
+# watched paths（最新 layout）：
+#   偵測 = manga_translator/detection/ctd.py (+ ctd_utils/)  ← comic-text-detector
+#          模型 comictextdetector.pt.onnx（comic-text-detector 最新版）
+#   OCR  = manga_translator/ocr/  （48px CTC）               ※ M1
+#   翻譯 = manga_translator/translators/chatgpt.py           ※ M2（最新版已含）
+#
+# 同步紀律：定期對 watched paths 跑  git diff <此 commit>..main，
+#           只追 prompt / 參數 / 模型 / provider 變更（§7）。
