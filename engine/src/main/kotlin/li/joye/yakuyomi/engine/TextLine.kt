@@ -6,5 +6,6 @@ package li.joye.yakuyomi.engine
  */
 class TextLine(val quad: List<Pt>, val score: Float) {
     var direction: String = "h" // 'h' 橫書 / 'v' 直書（由 OCR 的 sortPnts 判定）
-    var text: String = ""
+    var text: String = ""        // OCR 日文
+    var translatedText: String = "" // 翻譯後繁中
 }

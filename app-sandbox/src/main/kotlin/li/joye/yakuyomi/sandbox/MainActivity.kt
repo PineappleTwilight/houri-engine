@@ -14,13 +14,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
+import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
 import li.joye.yakuyomi.engine.TextLine
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
 /**
- * M1 sandbox：一顆按鈕 → 偵測(旋轉框) → OCR(48px CTC) → overlay 畫框 + 辨識的日文。
- * 為省記憶體，偵測與 OCR 兩個模型依序載入/釋放（不同時持有）。
+ * M2 sandbox：一顆按鈕 → 偵測 → OCR(日) → LLM 翻譯(繁中) → overlay。
+ * 為省記憶體，偵測與 OCR 兩個 ONNX 依序載入/釋放。翻譯走雲端（需連網 + BYOK key）。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -40,22 +41,28 @@ class MainActivity : AppCompatActivity() {
             val result = runCatching {
                 val page = loadAssetBitmap(TEST_PAGE)
 
-                // 1) 偵測（用完即釋放）
                 val detBytes = assets.open(DETECTOR_MODEL).use { it.readBytes() }
                 val lines = Detector(detBytes).use { it.detect(page) }
 
-                // 2) OCR
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val ocrBytes = assets.open(OCR_MODEL).use { it.readBytes() }
                 Ocr(ocrBytes, alphabet).use { it.recognize(page, lines) }
 
+                // 翻譯（BYOK：debug 由 gradle 從 api-keys.properties 注入）
+                val key = BuildConfig.DEEPSEEK_API_KEY
+                if (key.isNotBlank() && lines.isNotEmpty()) {
+                    withContext(Dispatchers.Main) { binding.statusText.text = "翻譯中（雲端）…" }
+                    val cht = LlmTranslator(key).translate(lines.map { it.text })
+                    lines.forEachIndexed { i, l -> l.translatedText = cht.getOrElse(i) { l.text } }
+                }
                 page to lines
             }
             withContext(Dispatchers.Main) {
                 result.onSuccess { (page, lines) ->
                     binding.imageView.setImageBitmap(drawResult(page, lines))
-                    val withText = lines.count { it.text.isNotBlank() }
-                    binding.statusText.text = "完成：${lines.size} 行框，OCR 讀出 $withText 行（藍字）"
+                    val translated = lines.count { it.translatedText.isNotBlank() }
+                    val keyMsg = if (BuildConfig.DEEPSEEK_API_KEY.isBlank()) "（無 key，略過翻譯）" else ""
+                    binding.statusText.text = "完成：${lines.size} 行；OCR ${lines.count { it.text.isNotBlank() }}、翻譯 $translated $keyMsg"
                 }.onFailure { t ->
                     Log.e(TAG, "pipeline 失敗", t)
                     binding.statusText.text = "失敗：${t.message}"
@@ -78,15 +85,15 @@ class MainActivity : AppCompatActivity() {
             isAntiAlias = true
         }
         val textFill = Paint().apply {
-            color = Color.rgb(0, 90, 255)
-            textSize = 28f
+            color = Color.rgb(200, 30, 30)
+            textSize = 30f
             isAntiAlias = true
         }
         val textStroke = Paint().apply {
             color = Color.WHITE
             style = Paint.Style.STROKE
-            strokeWidth = 5f
-            textSize = 28f
+            strokeWidth = 6f
+            textSize = 30f
             isAntiAlias = true
         }
         for (line in lines) {
@@ -98,11 +105,12 @@ class MainActivity : AppCompatActivity() {
                 close()
             }
             canvas.drawPath(path, boxPaint)
-            if (line.text.isNotBlank()) {
+            val label = line.translatedText.ifBlank { line.text }
+            if (label.isNotBlank()) {
                 val tx = q.minOf { it.x }
-                val ty = (q.minOf { it.y } - 6f).coerceAtLeast(28f)
-                canvas.drawText(line.text, tx, ty, textStroke)
-                canvas.drawText(line.text, tx, ty, textFill)
+                val ty = (q.minOf { it.y } - 6f).coerceAtLeast(30f)
+                canvas.drawText(label, tx, ty, textStroke)
+                canvas.drawText(label, tx, ty, textFill)
             }
         }
         return out

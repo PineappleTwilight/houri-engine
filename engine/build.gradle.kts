@@ -41,4 +41,5 @@ android {
 dependencies {
     implementation(libs.onnxruntime.android)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
 }

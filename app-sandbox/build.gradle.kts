@@ -1,6 +1,15 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+}
+
+// BYOK：build 時從 repo 根 api-keys.properties（gitignored）讀 key 注入 debug BuildConfig。
+// 缺檔則為空字串，App 端會略過翻譯。正式版走 Android Keystore + 設定頁，不走這裡。
+val apiKeys = Properties().apply {
+    val f = rootProject.file("api-keys.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -12,7 +21,12 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1-m0"
+        versionName = "0.1-m2"
+        buildConfigField(
+            "String",
+            "DEEPSEEK_API_KEY",
+            "\"${apiKeys.getProperty("DEEPSEEK_API_KEY", "")}\"",
+        )
     }
 
     buildTypes {
@@ -35,6 +49,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     sourceSets["main"].java.srcDirs("src/main/kotlin")
