@@ -1,0 +1,67 @@
+# ───────────────────────────────────────────────────────────
+#  Yakuyomi — .gitignore  (Android / Kotlin / Gradle)
+# ───────────────────────────────────────────────────────────
+
+# --- 專案私有 / 不公開 ---
+# 給 AI agent 的專案規格（單一真理來源），不推上 GitHub
+CLAUDE.md
+# Claude Code 的本機覆寫設定（共用設定 settings.json 可入庫，本機的不要）
+.claude/settings.local.json
+
+# --- 機密 / BYOK（API key 一律不入庫）---
+local.properties
+keystore.properties
+secrets.properties
+api-keys.properties
+*.jks
+*.keystore
+!debug.keystore
+
+# --- Gradle ---
+.gradle/
+build/
+**/build/
+gradle-app.setting
+.gradletasknamecache
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# --- Android ---
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+out/
+release/
+captures/
+.cxx/
+proguard/
+
+# --- Android Studio / IntelliJ IDEA ---
+.idea/
+*.iml
+*.ipr
+*.iws
+.navigation/
+
+# --- Kotlin ---
+.kotlin/
+
+# --- 模型權重（大型二進位；依 spec §9 計畫由外部 host 下載並做完整性檢查）---
+# 若想把 M0 的 detector ONNX 一起入庫，註解掉下面這行
+*.onnx
+*.onnx.data
+
+# --- OS / 編輯器 ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+
+# --- 日誌 / 暫存 ---
+*.log
+*.tmp
