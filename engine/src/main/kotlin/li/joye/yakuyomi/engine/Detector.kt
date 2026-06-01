@@ -11,14 +11,13 @@ import kotlin.math.min
  * comic-text-detector 文字行偵測器。
  *
  * ported from manga_translator/detection/ctd.py (+ ctd_utils/, utils/db_utils.py) @ d5a3eee
- *   I/O：input "images"[1,3,1024,1024]；outputs "blk"(YOLO,棄用)/"seg"(mask,M3)/"det"[1,2,1024,1024]
- *   後處理（DB / SegDetectorRepresenter）：det[:,0] 二值化(0.3) → 連通元件 → minAreaRect →
- *     unclip 膨脹(×1.5) → 旋轉四邊形；元件平均機率 > 0.6 才留；座標 ÷ratio 映回原圖。
- *
- * 對齊註記（§4）：上游用 cv2.findContours→minAreaRect；此處用「連通元件邊界點 → 凸包 → minAreaRect」
- *   等價取框；box_score 用元件平均機率近似 box_score_fast（桌面 parity 驗證框數與上游一致）。
+ *   det[:,0] 二值化 → 連通元件 → minAreaRect → unclip 膨脹 → 旋轉四邊形。
+ * 參數由 [DetectorConfig] 提供（§5 第一層）。
  */
-class Detector(modelBytes: ByteArray) : AutoCloseable {
+class Detector(
+    modelBytes: ByteArray,
+    private val cfg: DetectorConfig = DetectorConfig(),
+) : AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
@@ -38,17 +37,18 @@ class Detector(modelBytes: ByteArray) : AutoCloseable {
     }
 
     fun detect(page: Bitmap): List<TextLine> {
+        val size = cfg.inputSize
         val inputName = session.inputNames.first()
-        val pre = ImageOps.toDetectorInput(env, page, INPUT_SIZE)
+        val pre = ImageOps.toDetectorInput(env, page, size)
         pre.tensor.use { input ->
             session.run(mapOf(inputName to input)).use { result ->
                 val det = result.get(OUT_DET).orElseThrow {
                     IllegalStateException("模型缺少輸出 '$OUT_DET'，實際有 ${session.outputNames}")
                 } as OnnxTensor
-                val area = INPUT_SIZE * INPUT_SIZE
+                val area = size * size
                 val prob = FloatArray(area)
-                det.floatBuffer.get(prob, 0, area) // NCHW：channel 0（文字機率圖）
-                val lines = linesFromProbMap(prob, INPUT_SIZE, pre.ratio, page.width, page.height)
+                det.floatBuffer.get(prob, 0, area)
+                val lines = linesFromProbMap(prob, size, pre.ratio, page.width, page.height)
                 Log.i(TAG, "偵測到 ${lines.size} 個文字行")
                 return lines
             }
@@ -62,13 +62,14 @@ class Detector(modelBytes: ByteArray) : AutoCloseable {
         origW: Int,
         origH: Int,
     ): List<TextLine> {
+        val thresh = cfg.textThreshold
         val visited = BooleanArray(prob.size)
         val stack = IntArray(prob.size)
         val out = ArrayList<TextLine>()
         val boundary = ArrayList<Pt>()
 
         for (seed in prob.indices) {
-            if (visited[seed] || prob[seed] <= THRESH) continue
+            if (visited[seed] || prob[seed] <= thresh) continue
 
             var sp = 0
             stack[sp++] = seed
@@ -94,7 +95,7 @@ class Detector(modelBytes: ByteArray) : AutoCloseable {
                             val ny = y + dy
                             if (nx in 0 until size && ny in 0 until size) {
                                 val nidx = ny * size + nx
-                                if (prob[nidx] > THRESH) {
+                                if (prob[nidx] > thresh) {
                                     if (!visited[nidx]) {
                                         visited[nidx] = true
                                         stack[sp++] = nidx
@@ -114,11 +115,11 @@ class Detector(modelBytes: ByteArray) : AutoCloseable {
             }
 
             val score = if (cnt > 0) sum / cnt else 0f
-            if (score < BOX_THRESH) continue
+            if (score < cfg.boxThreshold) continue
             val rect = Geometry.minAreaRect(boundary) ?: continue
-            if (min(rect.w, rect.h) < MIN_SIDE) continue
+            if (min(rect.w, rect.h) < cfg.minSide) continue
 
-            val quad = rect.unclip(UNCLIP_RATIO).corners().map {
+            val quad = rect.unclip(cfg.unclipRatio).corners().map {
                 Pt(
                     (it.x / ratio).coerceIn(0f, origW.toFloat()),
                     (it.y / ratio).coerceIn(0f, origH.toFloat()),
@@ -135,14 +136,7 @@ class Detector(modelBytes: ByteArray) : AutoCloseable {
 
     companion object {
         private const val TAG = "Detector"
-        const val INPUT_SIZE = 1024
         private const val NUM_THREADS = 4
-        private const val OUT_DET = "det"
-
-        // 對齊 ctd.py：SegDetectorRepresenter(thresh=0.3, unclip_ratio=1.5) + 外部 box_thresh=0.6
-        private const val THRESH = 0.3f
-        private const val BOX_THRESH = 0.6f
-        private const val UNCLIP_RATIO = 1.5f
-        private const val MIN_SIDE = 3f
+        private const val OUT_DET = "det" // 文字行圖（DB），channel 0 = 文字機率
     }
 }

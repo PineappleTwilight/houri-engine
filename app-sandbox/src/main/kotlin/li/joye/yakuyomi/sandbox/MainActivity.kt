@@ -10,18 +10,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
+import li.joye.yakuyomi.engine.EngineConfig
 import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.Inpainter
 import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
 import li.joye.yakuyomi.engine.OpenCCS2twp
+import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.Renderer
 import li.joye.yakuyomi.engine.TextOrientation
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
 /**
  * 端到端 sandbox：偵測 → OCR(日) → 行合併 → 翻譯(繁中) → 去字(LaMa) → 排版 → 成品頁。
- * 為省記憶體，三顆 ONNX 依序載入/釋放（不同時持有）。
+ * 引擎參數走 EngineConfig（這裡只覆寫直/橫排，其餘用預設；未來設定頁覆寫更多）。
  */
 class MainActivity : AppCompatActivity() {
 
@@ -37,17 +39,25 @@ class MainActivity : AppCompatActivity() {
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
         binding.statusText.text = "載入模型 / 推論中…（首次較久）"
-        val orientation = if (binding.verticalSwitch.isChecked) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL
+        val cfg = EngineConfig(
+            render = RenderConfig(
+                orientation = if (binding.verticalSwitch.isChecked) {
+                    TextOrientation.VERTICAL
+                } else {
+                    TextOrientation.HORIZONTAL
+                },
+            ),
+        )
         lifecycleScope.launch(Dispatchers.Default) {
             val result = runCatching {
                 val page = loadAssetBitmap(TEST_PAGE)
 
                 val detBytes = assets.open(DETECTOR_MODEL).use { it.readBytes() }
-                val lines = Detector(detBytes).use { it.detect(page) }
+                val lines = Detector(detBytes, cfg.detector).use { it.detect(page) }
 
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val ocrBytes = assets.open(OCR_MODEL).use { it.readBytes() }
-                Ocr(ocrBytes, alphabet).use { it.recognize(page, lines) }
+                Ocr(ocrBytes, alphabet, cfg.ocr).use { it.recognize(page, lines) }
 
                 val regions = Grouping.group(lines)
 
@@ -61,16 +71,15 @@ class MainActivity : AppCompatActivity() {
                         ),
                         twTexts = listOf(assets.open("opencc/TWVariants.txt").bufferedReader().use { it.readText() }),
                     )
-                    val cht = LlmTranslator(key, postProcess = { s2twp.convert(it) })
+                    val cht = LlmTranslator(key, cfg.translator, postProcess = { s2twp.convert(it) })
                         .translate(regions.map { it.sourceText })
                     regions.forEachIndexed { i, r -> r.translatedText = cht.getOrElse(i) { r.sourceText } }
                 }
 
-                // 去字 + 排版
                 withContext(Dispatchers.Main) { binding.statusText.text = "去字 + 排版…" }
                 val lamaBytes = assets.open(LAMA_MODEL).use { it.readBytes() }
-                val cleaned = Inpainter(lamaBytes).use { it.inpaint(page, regions) }
-                val finalPage = Renderer.render(cleaned, regions, orientation)
+                val cleaned = Inpainter(lamaBytes, cfg.inpainter).use { it.inpaint(page, regions) }
+                val finalPage = Renderer.render(cleaned, regions, cfg.render)
 
                 Triple(finalPage, lines.size, regions.size)
             }

@@ -12,14 +12,14 @@ import android.util.Log
 import java.nio.FloatBuffer
 
 /**
- * LaMa 去字（Koharu mayocream/lama-manga.onnx，固定 512×512）。
- *
- * I/O：image[1,3,512,512] + mask[1,1,512,512]（/255、RGB、mask 1=擦）→ output[1,3,512,512]。
- * block-aware（對齊 Koharu BALLOON_WINDOW_RATIO，§4 第二層）：逐氣泡把窗放大 ×1.7 → 裁 → 縮 512 →
- *   LaMa → 縮回 → 只在遮罩處貼回。頁面太大、模型只吃 512，故不整頁一次跑。
+ * LaMa 去字（Koharu mayocream/lama-manga.onnx）。block-aware：逐氣泡裁窗 → tile → LaMa → 貼回。
+ * I/O：image[1,3,N,N] + mask[1,1,N,N]（/255、RGB、mask 1=擦）→ output。參數見 [InpainterConfig]。
  * 對齊 parity/inpaint_parity.py。
  */
-class Inpainter(modelBytes: ByteArray) : AutoCloseable {
+class Inpainter(
+    modelBytes: ByteArray,
+    private val cfg: InpainterConfig = InpainterConfig(),
+) : AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
@@ -36,20 +36,19 @@ class Inpainter(modelBytes: ByteArray) : AutoCloseable {
         session = env.createSession(modelBytes, opts)
     }
 
-    /** 回傳去字後的新 Bitmap（原圖不動）。 */
     fun inpaint(page: Bitmap, regions: List<TextRegion>): Bitmap {
+        val tile = cfg.tileSize
         val w = page.width
         val h = page.height
         val result = page.copy(Bitmap.Config.ARGB_8888, true)
 
-        // 文字遮罩：填充各行 quad（FILL_AND_STROKE 近似膨脹）
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         Canvas(maskBmp).apply {
             drawColor(Color.BLACK)
             val p = Paint().apply {
                 color = Color.WHITE
                 style = Paint.Style.FILL_AND_STROKE
-                strokeWidth = DILATE
+                strokeWidth = cfg.maskDilate
             }
             for (region in regions) {
                 for (line in region.lines) {
@@ -68,29 +67,30 @@ class Inpainter(modelBytes: ByteArray) : AutoCloseable {
         maskBmp.getPixels(maskPx, 0, w, 0, 0, w, h)
 
         for (region in regions) {
-            val rw = (region.x1 - region.x0)
-            val rh = (region.y1 - region.y0)
+            val rw = region.x1 - region.x0
+            val rh = region.y1 - region.y0
             val cx = (region.x0 + region.x1) / 2f
             val cy = (region.y0 + region.y1) / 2f
-            val wx0 = (cx - rw * WIN / 2f).toInt().coerceIn(0, w - 1)
-            val wy0 = (cy - rh * WIN / 2f).toInt().coerceIn(0, h - 1)
-            val wx1 = (cx + rw * WIN / 2f).toInt().coerceIn(wx0 + 1, w)
-            val wy1 = (cy + rh * WIN / 2f).toInt().coerceIn(wy0 + 1, h)
+            val win = cfg.windowRatio
+            val wx0 = (cx - rw * win / 2f).toInt().coerceIn(0, w - 1)
+            val wy0 = (cy - rh * win / 2f).toInt().coerceIn(0, h - 1)
+            val wx1 = (cx + rw * win / 2f).toInt().coerceIn(wx0 + 1, w)
+            val wy1 = (cy + rh * win / 2f).toInt().coerceIn(wy0 + 1, h)
             val ww = wx1 - wx0
             val wh = wy1 - wy0
             if (ww < 8 || wh < 8) continue
 
             val cropBmp = Bitmap.createBitmap(result, wx0, wy0, ww, wh)
-            val crop512 = Bitmap.createScaledBitmap(cropBmp, SIZE, SIZE, true)
+            val crop512 = Bitmap.createScaledBitmap(cropBmp, tile, tile, true)
             val maskCropBmp = Bitmap.createBitmap(maskBmp, wx0, wy0, ww, wh)
-            val mask512 = Bitmap.createScaledBitmap(maskCropBmp, SIZE, SIZE, false)
+            val mask512 = Bitmap.createScaledBitmap(maskCropBmp, tile, tile, false)
 
-            val imgTensor = imageToNCHW(crop512)
-            val maskTensor = maskTo1CH(mask512)
+            val imgTensor = imageToNCHW(crop512, tile)
+            val maskTensor = maskTo1CH(mask512, tile)
             try {
                 session.run(mapOf(INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
-                    val out = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
-                    val res512 = nchwToBitmap(out)
+                    val outT = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
+                    val res512 = nchwToBitmap(outT, tile)
                     val resWin = Bitmap.createScaledBitmap(res512, ww, wh, true)
                     compositeMasked(result, resWin, maskPx, w, wx0, wy0, ww, wh)
                     res512.recycle()
@@ -111,10 +111,10 @@ class Inpainter(modelBytes: ByteArray) : AutoCloseable {
         return result
     }
 
-    private fun imageToNCHW(bmp: Bitmap): OnnxTensor {
-        val px = IntArray(SIZE * SIZE)
-        bmp.getPixels(px, 0, SIZE, 0, 0, SIZE, SIZE)
-        val area = SIZE * SIZE
+    private fun imageToNCHW(bmp: Bitmap, n: Int): OnnxTensor {
+        val px = IntArray(n * n)
+        bmp.getPixels(px, 0, n, 0, 0, n, n)
+        val area = n * n
         val chw = FloatArray(3 * area)
         for (i in 0 until area) {
             val p = px[i]
@@ -122,19 +122,19 @@ class Inpainter(modelBytes: ByteArray) : AutoCloseable {
             chw[area + i] = ((p shr 8) and 0xFF) / 255f
             chw[2 * area + i] = (p and 0xFF) / 255f
         }
-        return OnnxTensor.createTensor(env, FloatBuffer.wrap(chw), longArrayOf(1, 3, SIZE.toLong(), SIZE.toLong()))
+        return OnnxTensor.createTensor(env, FloatBuffer.wrap(chw), longArrayOf(1, 3, n.toLong(), n.toLong()))
     }
 
-    private fun maskTo1CH(bmp: Bitmap): OnnxTensor {
-        val px = IntArray(SIZE * SIZE)
-        bmp.getPixels(px, 0, SIZE, 0, 0, SIZE, SIZE)
-        val m = FloatArray(SIZE * SIZE)
+    private fun maskTo1CH(bmp: Bitmap, n: Int): OnnxTensor {
+        val px = IntArray(n * n)
+        bmp.getPixels(px, 0, n, 0, 0, n, n)
+        val m = FloatArray(n * n)
         for (i in px.indices) m[i] = if ((px[i] and 0xFF) > 127) 1f else 0f
-        return OnnxTensor.createTensor(env, FloatBuffer.wrap(m), longArrayOf(1, 1, SIZE.toLong(), SIZE.toLong()))
+        return OnnxTensor.createTensor(env, FloatBuffer.wrap(m), longArrayOf(1, 1, n.toLong(), n.toLong()))
     }
 
-    private fun nchwToBitmap(t: OnnxTensor): Bitmap {
-        val area = SIZE * SIZE
+    private fun nchwToBitmap(t: OnnxTensor, n: Int): Bitmap {
+        val area = n * n
         val arr = FloatArray(3 * area)
         t.floatBuffer.get(arr, 0, 3 * area)
         val px = IntArray(area)
@@ -144,7 +144,7 @@ class Inpainter(modelBytes: ByteArray) : AutoCloseable {
             val b = (arr[2 * area + i] * 255f).toInt().coerceIn(0, 255)
             px[i] = Color.rgb(r, g, b)
         }
-        return Bitmap.createBitmap(px, SIZE, SIZE, Bitmap.Config.ARGB_8888)
+        return Bitmap.createBitmap(px, n, n, Bitmap.Config.ARGB_8888)
     }
 
     private fun compositeMasked(
@@ -171,10 +171,7 @@ class Inpainter(modelBytes: ByteArray) : AutoCloseable {
 
     companion object {
         private const val TAG = "Inpainter"
-        private const val SIZE = 512
         private const val NUM_THREADS = 4
-        private const val WIN = 1.7f
-        private const val DILATE = 7f
         private const val INPUT_IMAGE = "image"
         private const val INPUT_MASK = "mask"
         private const val OUT_NAME = "output"

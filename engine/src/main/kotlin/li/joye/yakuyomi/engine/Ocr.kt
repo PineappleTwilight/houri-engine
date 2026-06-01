@@ -24,7 +24,11 @@ import kotlin.math.roundToInt
  *   前處理：(x-127.5)/127.5、NCHW、RGB。
  *   解碼：greedy CTC（blank=0、收合重複+去blank）→ 查字典；顏色 head 留 M3。
  */
-class Ocr(modelBytes: ByteArray, private val dictionary: List<String>) : AutoCloseable {
+class Ocr(
+    modelBytes: ByteArray,
+    private val dictionary: List<String>,
+    private val cfg: OcrConfig = OcrConfig(),
+) : AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
@@ -47,7 +51,7 @@ class Ocr(modelBytes: ByteArray, private val dictionary: List<String>) : AutoClo
         for (line in lines) {
             val (ordered, isV) = sortPnts(line.quad)
             line.direction = if (isV) "v" else "h"
-            val strip = transformedRegion(page, ordered, isV, TEXT_HEIGHT) ?: continue
+            val strip = transformedRegion(page, ordered, isV, cfg.textHeight) ?: continue
             try {
                 stripToTensor(strip).use { input ->
                     session.run(mapOf(inputName to input)).use { res ->
@@ -196,7 +200,6 @@ class Ocr(modelBytes: ByteArray, private val dictionary: List<String>) : AutoClo
     companion object {
         private const val TAG = "Ocr"
         private const val NUM_THREADS = 4
-        private const val TEXT_HEIGHT = 48
         private const val BLANK = 0
         private const val OUT_LOGITS = "char_logits"
     }

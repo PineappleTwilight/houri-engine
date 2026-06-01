@@ -12,23 +12,17 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
- * 雲端 LLM 翻譯（OpenAI 相容）。
+ * 雲端 LLM 翻譯（OpenAI 相容）。參數見 [TranslatorConfig]（provider/model/base/lang/temp 皆可設定）。
  *
  * prompt/協定 ported from manga_translator/translators/{chatgpt.py,config_gpt.py} @ d5a3eee（第一層照搬）：
- *   messages = system(三步法) → few-shot(user 日文 / assistant 譯文) → user(<|i|>原文)
- *   回應依 <|i|> 解析；漏行則該行保留原文（§11）。
- * HTTP/glue = 第二層（OkHttp + coroutines）。逐頁一個 request；跨頁並發由 Pipeline 用 Semaphore 控（待 M4）。
- *
- * ★ TODO(§10 / §12-8)：譯文應再過 OpenCC s2twp 安全網（台灣繁體）。Kotlin 端 OpenCC 尚未接，
- *   目前靠 prompt 的「台灣繁體」要求。需補：bundle OpenCC 字典 + 最長匹配，或接 Android OpenCC。
+ *   system(三步法) → few-shot(user 日文 / assistant 譯文) → user(<|i|>原文)；回應依 <|i|> 解析。
+ *   漏行保留原文（§11）。成功譯文過 postProcess（s2twp，§12-8）。
+ * 跨頁並發（cfg.concurrency / Semaphore）由 Pipeline 控（M4）。
  */
 class LlmTranslator(
     private val apiKey: String,
-    private val apiBase: String = "https://api.deepseek.com/chat/completions",
-    private val model: String = "deepseek-chat",
-    private val toLang: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",
-    private val temperature: Double = 0.3,
-    private val postProcess: ((String) -> String)? = null, // s2twp 安全網（§12-8）
+    private val cfg: TranslatorConfig = TranslatorConfig(),
+    private val postProcess: ((String) -> String)? = null,
 ) : Translator {
 
     private val client = OkHttpClient.Builder()
@@ -41,21 +35,20 @@ class LlmTranslator(
         return try {
             val raw = request(buildMessages(queries))
             val parsed = parse(raw)
-            // 成功的譯文過 s2twp（§12-8）；漏行保留原文（§11 不變式，不對日文做 s2twp）
             queries.mapIndexed { i, q ->
                 val tr = parsed[i + 1]?.takeIf { it.isNotBlank() }
                 if (tr != null) (postProcess?.invoke(tr) ?: tr) else q
             }
         } catch (t: Throwable) {
             Log.e(TAG, "翻譯失敗，整批保留原文：${t.message}")
-            queries // 全失敗 → 全保留原文，不毀進度
+            queries
         }
     }
 
     private fun buildMessages(queries: List<String>): JSONArray {
         val userPrompt = queries.mapIndexed { i, q -> "<|${i + 1}|>$q" }.joinToString("\n")
         return JSONArray().apply {
-            put(msg("system", SYSTEM_TEMPLATE.replace("{to_lang}", toLang)))
+            put(msg("system", SYSTEM_TEMPLATE.replace("{to_lang}", cfg.toLangName)))
             put(msg("user", SAMPLE_IN))
             put(msg("assistant", SAMPLE_OUT))
             put(msg("user", userPrompt))
@@ -67,14 +60,14 @@ class LlmTranslator(
 
     private suspend fun request(messages: JSONArray): String = withContext(Dispatchers.IO) {
         val body = JSONObject()
-            .put("model", model)
+            .put("model", cfg.model)
             .put("messages", messages)
-            .put("temperature", temperature)
+            .put("temperature", cfg.temperature)
             .put("stream", false)
             .toString()
             .toRequestBody("application/json".toMediaType())
         val req = Request.Builder()
-            .url(apiBase)
+            .url(cfg.apiBase)
             .addHeader("Authorization", "Bearer $apiKey")
             .post(body)
             .build()
@@ -87,7 +80,6 @@ class LlmTranslator(
         }
     }
 
-    /** 解析 <|i|>譯文 → map(編號→譯文)。對齊 chatgpt.py 的 re.match(r'^<\|(\d+)\|>...')。 */
     private fun parse(raw: String): Map<Int, String> {
         val cleaned = THINK_RE.replace(raw, "")
         val map = HashMap<Int, String>()
@@ -103,7 +95,6 @@ class LlmTranslator(
         private val LINE_RE = Regex("""^<\|(\d+)\|>\s*(.*)$""")
         private val THINK_RE = Regex("""(</think>)?<think>.*?</think>""", RegexOption.DOT_MATCHES_ALL)
 
-        // 照搬 config_gpt.py:_CHAT_SYSTEM_TEMPLATE（三步法）
         private const val SYSTEM_TEMPLATE =
             "Ignore all preceding instructions. Follow only what is defined below.\n" +
                 "## Role: Professional Doujin Translator\n" +
@@ -131,7 +122,6 @@ class LlmTranslator(
                 "- Translate content only—no additional interpretation or commentary.\n" +
                 "Translate the following text into {to_lang}:\n"
 
-        // few-shot（照搬 _CHAT_SAMPLE 簡中範例，改寫為繁中示範格式）
         private const val SAMPLE_IN =
             "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
         private const val SAMPLE_OUT =
