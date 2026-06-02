@@ -143,8 +143,9 @@ class MainActivity : AppCompatActivity() {
                 log("… 準備 detector（${detF.name}，首次複製到 filesDir 較久）")
                 val detPath = ensureLocal(detF)
                 log("✓ detector 就緒（off-heap 路徑載入）")
+                val tDet = System.currentTimeMillis()
                 val lines = Detector(detPath, cfg.detector).use { it.detect(page) }
-                log("✓ 偵測完成：${lines.size} 框")
+                log("✓ 偵測完成：${lines.size} 框 ⏱${System.currentTimeMillis() - tDet}ms")
                 addImage("② 偵測框（${lines.size}）", overlayBoxes(page, lines))
 
                 log("… 準備 OCR（${ocrF.name}）+ 字典 + 字型")
@@ -152,6 +153,7 @@ class MainActivity : AppCompatActivity() {
                 val ocrPath = ensureLocal(ocrF)
                 log("✓ OCR 就緒（off-heap）、字典 ${alphabet.size} 條")
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
+                val tOcr = System.currentTimeMillis()
                 Ocr(ocrPath, alphabet, cfg.ocr).use { ocr ->
                     lines.take(3).forEachIndexed { i, ln ->
                         val d = ocr.debugOne(page, ln)
@@ -161,7 +163,7 @@ class MainActivity : AppCompatActivity() {
                     ocr.recognize(page, lines)
                 }
                 val ocrCount = lines.count { it.text.isNotBlank() }
-                log("✓ OCR：$ocrCount/${lines.size} 行有字")
+                log("✓ OCR：$ocrCount/${lines.size} 行有字 ⏱${System.currentTimeMillis() - tOcr}ms")
                 log("  樣本：" + lines.take(5).joinToString(" ┊ ") { it.text.ifBlank { "∅" } })
                 addImage("③ OCR（綠=有字 紅=無）", overlayOcr(page, lines, tf))
                 if (saveLog) writeLog() // OCR 後先寫 log，萬一後面 OOM 也有檔
@@ -174,10 +176,12 @@ class MainActivity : AppCompatActivity() {
                     log("⚠ 無 API key，跳過翻譯（排版日文）")
                 } else {
                     log("… 翻譯中（DeepSeek，${regions.size} 區）")
+                    val tTr = System.currentTimeMillis()
                     val tr = LlmTranslator(key, cfg.translator)
                     val cht = tr.translate(regions.map { it.sourceText })
                     regions.forEachIndexed { i, r -> r.translatedText = cht.getOrElse(i) { r.sourceText } }
-                    if (tr.lastError != null) log("✗ 翻譯失敗：${tr.lastError}") else log("✓ 翻譯回應 OK")
+                    val trMs = System.currentTimeMillis() - tTr
+                    if (tr.lastError != null) log("✗ 翻譯失敗：${tr.lastError}") else log("✓ 翻譯回應 OK ⏱${trMs}ms")
                 }
                 val tcount = regions.count { it.translatedText.isNotBlank() && it.translatedText != it.sourceText }
                 log("  譯成功 $tcount/${regions.size}")
@@ -185,13 +189,15 @@ class MainActivity : AppCompatActivity() {
                 log("… 準備 LaMa（${lamaF.name}）+ 去字")
                 val lamaPath = ensureLocal(lamaF)
                 log("✓ LaMa 就緒（off-heap）")
+                val tIn = System.currentTimeMillis()
                 val cleaned = Inpainter(lamaPath, cfg.inpainter).use { it.inpaint(page, regions) }
-                log("✓ 去字完成")
+                log("✓ 去字完成 ⏱${System.currentTimeMillis() - tIn}ms")
                 addImage("④ 去字/塗白", cleaned)
 
                 log("… 排版（診斷：未譯則排日文）")
+                val tRn = System.currentTimeMillis()
                 val finalPage = Renderer.render(cleaned, regions, cfg.render, tf)
-                log("✓ 排版完成")
+                log("✓ 排版完成 ⏱${System.currentTimeMillis() - tRn}ms")
                 addImage("⑤ 成品", finalPage)
                 log("■ 全部完成")
             } catch (t: Throwable) {
