@@ -50,10 +50,13 @@ data class TranslatorConfig(
 )
 
 data class InpainterConfig(
-    val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（改了會對不上模型）
-    val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（per-region 模式用）
+    // 〔設定〕去字方法：boxfill＝取氣泡底色填字區（瞬間、平氣泡無損、文字壓畫面時是色塊）；
+    //                  lama＝LaMa 重建（品質好、手機單張 ~11s）。預設 boxfill 取速度。
+    val method: String = "boxfill",
+    val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（lama 模式；改了會對不上模型）
+    val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（lama per-region 模式用）
     val maskDilate: Float = 7f,       // ~ config.kernel_size / mask_dilation_offset
-    val wholeImage: Boolean = true,   // 〔設定〕true＝整張跑一次 LaMa（快、對齊 m-i-t）；false＝逐區（慢、局部較精細）
+    val wholeImage: Boolean = true,   // lama 模式：true＝整張一次（快）；false＝逐區（慢、局部較精細）
 )
 
 data class RenderConfig(

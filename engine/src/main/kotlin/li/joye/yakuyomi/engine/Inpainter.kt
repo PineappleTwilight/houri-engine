@@ -66,8 +66,10 @@ class Inpainter(
         val maskPx = IntArray(w * h)
         maskBmp.getPixels(maskPx, 0, w, 0, 0, w, h)
 
-        if (cfg.wholeImage) {
-            inpaintWindow(result, maskBmp, maskPx, 0, 0, w, h) // 整張一次（快）
+        if (cfg.method == "boxfill") {
+            boxFill(result, regions, maskPx) // 瞬間：取氣泡底色填字區、不跑 LaMa
+        } else if (cfg.wholeImage) {
+            inpaintWindow(result, maskBmp, maskPx, 0, 0, w, h) // LaMa 整張一次
         } else {
             for (region in regions) {
                 val rw = region.x1 - region.x0
@@ -87,6 +89,39 @@ class Inpainter(
         }
         maskBmp.recycle()
         return result
+    }
+
+    /** box-fill 快速去字：每區的遮罩像素換成該區氣泡底色（bbox 內非遮罩像素均值）。無 LaMa、瞬間。 */
+    private fun boxFill(result: Bitmap, regions: List<TextRegion>, maskPx: IntArray) {
+        val w = result.width
+        val h = result.height
+        val px = IntArray(w * h)
+        result.getPixels(px, 0, w, 0, 0, w, h)
+        for (region in regions) {
+            val x0 = region.x0.toInt().coerceIn(0, w - 1)
+            val y0 = region.y0.toInt().coerceIn(0, h - 1)
+            val x1 = region.x1.toInt().coerceIn(x0 + 1, w)
+            val y1 = region.y1.toInt().coerceIn(y0 + 1, h)
+            var sr = 0L; var sg = 0L; var sb = 0L; var cnt = 0L
+            for (y in y0 until y1) {
+                val row = y * w
+                for (x in x0 until x1) {
+                    val i = row + x
+                    if ((maskPx[i] and 0xFF) <= 127) { // 非遮罩＝氣泡底（非文字）
+                        val p = px[i]; sr += (p shr 16) and 0xFF; sg += (p shr 8) and 0xFF; sb += p and 0xFF; cnt++
+                    }
+                }
+            }
+            val bg = if (cnt > 0) Color.rgb((sr / cnt).toInt(), (sg / cnt).toInt(), (sb / cnt).toInt()) else Color.WHITE
+            for (y in y0 until y1) {
+                val row = y * w
+                for (x in x0 until x1) {
+                    val i = row + x
+                    if ((maskPx[i] and 0xFF) > 127) px[i] = bg
+                }
+            }
+        }
+        result.setPixels(px, 0, w, 0, 0, w, h)
     }
 
     /** 對一塊視窗 [wx0,wy0,ww,wh] 跑一次 LaMa（縮 tile→推論→放回），只把遮罩內像素換成結果。 */
