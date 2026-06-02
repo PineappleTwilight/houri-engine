@@ -40,7 +40,9 @@ data class TranslatorConfig(
     val apiBase: String = "https://api.deepseek.com/chat/completions",  // 〔設定〕custom_openai 用
     val toLangName: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",
     val temperature: Double = 0.3,
-    val concurrency: Int = 4,         // 〔設定〕跨頁並發上限（§10 Semaphore 旋鈕；Pipeline 用）
+    // 跨頁批次翻譯（對映 m-i-t --batch-size / --batch-concurrent；§2 翻譯批次策略、§10 並發旋鈕）
+    val batchSize: Int = 8,              // 〔設定〕批次頁數：concurrent 模式＝同時並發的頁數上限；merged 模式＝每 prompt 併幾頁
+    val batchConcurrent: Boolean = true, // 〔設定〕true＝逐頁分開請求、批內並發（防 truncation/幻覺，推薦）；false＝併大 prompt（有風險）
     val filterText: String? = null,   // 〔設定〕config.filter_text：regex 命中譯文則濾掉該區（例 ".*badtext.*"）
 )
 

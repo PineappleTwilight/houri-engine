@@ -68,6 +68,46 @@ def call_deepseek(key, messages):
     return data["choices"][0]["message"]["content"]
 
 
+def translate_page(key, jp_list, s2twp):
+    """一頁：所有區一個 request（<|i|> 協定）→ 對齊 cht 清單；漏行/整頁失敗補原文（§11）。"""
+    if not jp_list:
+        return []
+    user = "\n".join(f"<|{i + 1}|>{q}" for i, q in enumerate(jp_list))
+    msgs = [{"role": "system", "content": CHAT_SYSTEM_TEMPLATE.format(to_lang=TO_LANG)},
+            {"role": "user", "content": SAMPLE_IN}, {"role": "assistant", "content": SAMPLE_OUT},
+            {"role": "user", "content": user}]
+    try:
+        raw = re.sub(r'(</think>)?<think>.*?</think>', '', call_deepseek(key, msgs), flags=re.DOTALL)
+    except Exception:
+        return list(jp_list)  # 整頁失敗 → 留原文
+    trans = {}
+    for line in raw.splitlines():
+        m = re.match(r'^\s*<\|(\d+)\|>\s*(.*)$', line)
+        if m:
+            trans[int(m.group(1))] = m.group(2).strip()
+    return [(s2twp.convert(trans[i + 1]) if trans.get(i + 1) else q) for i, q in enumerate(jp_list)]
+
+
+def translate_pages(key, pages, s2twp, batch_concurrent=True, batch_size=8):
+    """跨頁批次（鏡射 engine/BatchTranslator，對映 m-i-t --batch-size/--batch-concurrent）：
+       concurrent=逐頁分開、ThreadPool 限 batch_size 並發；merged=每 batch_size 頁併一個大 prompt。"""
+    if not pages:
+        return []
+    n = max(1, batch_size)
+    if batch_concurrent:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            return list(ex.map(lambda p: translate_page(key, p, s2twp), pages))
+    out = []
+    for c in range(0, len(pages), n):
+        chunk = pages[c:c + n]
+        res = translate_page(key, [q for pg in chunk for q in pg], s2twp)
+        i = 0
+        for pg in chunk:
+            out.append(res[i:i + len(pg)]); i += len(pg)
+    return out
+
+
 def find_font():
     for c in ["/mnt/c/Windows/Fonts/msjh.ttc", "/mnt/c/Windows/Fonts/msjhl.ttc",
               "/mnt/c/Windows/Fonts/mingliu.ttc", "/mnt/c/Windows/Fonts/msyh.ttc",

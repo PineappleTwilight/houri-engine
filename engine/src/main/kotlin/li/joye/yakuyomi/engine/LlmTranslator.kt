@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  * prompt/協定 ported from manga_translator/translators/{chatgpt.py,config_gpt.py} @ d5a3eee（第一層照搬）：
  *   system(三步法) → few-shot(user 日文 / assistant 譯文) → user(<|i|>原文)；回應依 <|i|> 解析。
  *   漏行保留原文（§11）。成功譯文過 postProcess（s2twp，§12-8）。
- * 跨頁並發（cfg.concurrency / Semaphore）由 Pipeline 控（M4）。
+ * 此類只管「一頁」；跨頁批次與並發（cfg.batchSize / batchConcurrent）由 [BatchTranslator] 控。
  */
 class LlmTranslator(
     private val apiKey: String,
