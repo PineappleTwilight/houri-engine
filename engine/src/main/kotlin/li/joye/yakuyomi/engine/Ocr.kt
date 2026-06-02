@@ -15,6 +15,9 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+/** OCR 單行診斷結果（[Ocr.debugOne]）：裁切圖塊 + 一行資訊。 */
+class OcrDebug(val strip: Bitmap?, val info: String)
+
 /**
  * 48px CTC OCR。
  *
@@ -244,6 +247,26 @@ class Ocr(
             if (dr * dr + dg * dg + db * db > 100) { n++; if (n > 10) return true }
         }
         return false
+    }
+
+    /** 診斷：對單行回傳裁切圖塊 + 資訊（圖塊尺寸/輸出 shape/原始文字/prob 或例外），不丟低信心。 */
+    fun debugOne(page: Bitmap, line: TextLine): OcrDebug {
+        val (ordered, isV) = sortPnts(line.quad)
+        val strip = transformedRegion(page, ordered, isV, cfg.textHeight)
+            ?: return OcrDebug(null, "strip=null（setPolyToPoly 失敗）")
+        val info = try {
+            stripToTensor(strip).use { input ->
+                session.run(mapOf(session.inputNames.first() to input)).use { res ->
+                    val logits = res.get(OUT_LOGITS).orElseThrow { IllegalStateException("缺 char_logits") } as OnnxTensor
+                    val shape = (logits.info as TensorInfo).shape
+                    val (text, prob) = ctcDecode(logits)
+                    "${strip.width}x${strip.height} out=${shape.joinToString("x")} '${text.take(12)}' p=${"%.2f".format(prob)}"
+                }
+            }
+        } catch (t: Throwable) {
+            "✗ ${t.javaClass.simpleName}: ${t.message}"
+        }
+        return OcrDebug(strip, info)
     }
 
     override fun close() {

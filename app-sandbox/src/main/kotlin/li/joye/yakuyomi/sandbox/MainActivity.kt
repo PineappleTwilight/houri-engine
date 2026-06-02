@@ -47,9 +47,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences("yakuyomi", MODE_PRIVATE) }
 
+    // log system：累積純文字 log + 計數，run 結束寫回所選資料夾（log 檔 + debug 圖），方便撈檔分析
+    private val logBuf = StringBuilder()
+    private var runTree: DocumentFile? = null
+    private var runStamp = ""
+    private var runImgIdx = 0
+    private var runSaveImg = false
+
     private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
             prefs.edit().putString(PREF_TREE, uri.toString()).apply()
             binding.logText.text = "已記住資料夾：${DocumentFile.fromTreeUri(this, uri)?.name}\n按「翻譯這一頁（診斷）」開始"
         }
@@ -84,8 +94,14 @@ class MainActivity : AppCompatActivity() {
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
         val vertical = binding.verticalSwitch.isChecked
+        val saveLog = binding.genLogSwitch.isChecked
+        runSaveImg = binding.genImgSwitch.isChecked
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
+            logBuf.clear()
+            runImgIdx = 0
+            runTree = currentTree()
+            runStamp = stamp()
             val cfg = EngineConfig(
                 ocr = OcrConfig(minProb = 0f), // 【診斷】先不丟低信心，看 OCR 原始輸出
                 render = RenderConfig(
@@ -93,7 +109,7 @@ class MainActivity : AppCompatActivity() {
                 ),
             )
             try {
-                val tree = currentTree()
+                val tree = runTree
                 if (tree == null) {
                     log("✗ 請先按「選擇模型資料夾」")
                     return@launch
@@ -127,7 +143,14 @@ class MainActivity : AppCompatActivity() {
                 val ocrBytes = readUri(ocrF.uri)
                 log("✓ OCR ${ocrBytes.size / 1048576}MB、字典 ${alphabet.size} 條")
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
-                Ocr(ocrBytes, alphabet, cfg.ocr).use { it.recognize(page, lines) }
+                Ocr(ocrBytes, alphabet, cfg.ocr).use { ocr ->
+                    lines.take(3).forEachIndexed { i, ln ->
+                        val d = ocr.debugOne(page, ln)
+                        log("  行$i: ${d.info}")
+                        d.strip?.let { addImage("OCR 圖塊 行$i（餵給模型的）", it) }
+                    }
+                    ocr.recognize(page, lines)
+                }
                 val ocrCount = lines.count { it.text.isNotBlank() }
                 log("✓ OCR：$ocrCount/${lines.size} 行有字")
                 log("  樣本：" + lines.take(5).joinToString(" ┊ ") { it.text.ifBlank { "∅" } })
@@ -165,37 +188,77 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "pipeline 失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
             } finally {
+                if (saveLog) {
+                    val ok = writeLog()
+                    withContext(Dispatchers.Main) {
+                        binding.logText.append(
+                            if (ok) "📁 已寫入資料夾：${runStamp}_log.txt（+$runImgIdx 圖）\n"
+                            else "✗ 寫入資料夾失敗：請重按「選擇模型資料夾」重新授權（含寫入）\n",
+                        )
+                    }
+                }
                 withContext(Dispatchers.Main) { binding.detectButton.isEnabled = true }
             }
         }
     }
 
-    private suspend fun log(msg: String) = withContext(Dispatchers.Main) {
-        binding.logText.append("$msg\n")
-        binding.scroll.post { binding.scroll.fullScroll(View.FOCUS_DOWN) }
+    private suspend fun log(msg: String) {
+        logBuf.append(msg).append('\n')
+        withContext(Dispatchers.Main) {
+            binding.logText.append("$msg\n")
+            binding.scroll.post { binding.scroll.fullScroll(View.FOCUS_DOWN) }
+        }
     }
 
-    private suspend fun addImage(label: String, bmp: Bitmap) = withContext(Dispatchers.Main) {
-        val lbl = TextView(this@MainActivity).apply {
-            text = label
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, 24, 0, 4)
+    private suspend fun addImage(label: String, bmp: Bitmap) {
+        if (runSaveImg) runTree?.let { saveImage(it, bmp) } // 寫原始解析度 PNG 回資料夾
+        withContext(Dispatchers.Main) {
+            val lbl = TextView(this@MainActivity).apply {
+                text = label
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(0, 24, 0, 4)
+            }
+            val iv = ImageView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+                )
+                adjustViewBounds = true
+                setImageBitmap(scaledForView(bmp))
+            }
+            binding.container.addView(lbl)
+            binding.container.addView(iv)
         }
-        val iv = ImageView(this@MainActivity).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
-            )
-            adjustViewBounds = true
-            setImageBitmap(scaledForView(bmp))
-        }
-        binding.container.addView(lbl)
-        binding.container.addView(iv)
     }
 
-    /** 清掉上次的圖與 log（保留 pickFolder/detect/switch/logText 四個固定子 view）。 */
+    private fun stamp(): String =
+        java.text.SimpleDateFormat("MMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+
+    /** 存一張 debug 圖（原始解析度 PNG）到所選資料夾。 */
+    private fun saveImage(tree: DocumentFile, bmp: Bitmap) {
+        runImgIdx++
+        val name = "${runStamp}_img${"%02d".format(runImgIdx)}.png"
+        runCatching {
+            tree.findFile(name)?.delete()
+            tree.createFile("image/png", name)?.uri?.let { uri ->
+                contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            }
+        }
+    }
+
+    /** 把本次 run 的純文字 log 寫回所選資料夾；回傳是否成功（失敗多半是沒寫入授權）。 */
+    private fun writeLog(): Boolean = runCatching {
+        val tree = runTree ?: return false
+        val name = "${runStamp}_log.txt"
+        tree.findFile(name)?.delete()
+        val uri = tree.createFile("text/plain", name)?.uri ?: return false
+        contentResolver.openOutputStream(uri)?.use { it.write(logBuf.toString().toByteArray(Charsets.UTF_8)) }
+        true
+    }.getOrDefault(false)
+
+    /** 清掉上次的圖與 log（保留固定的 6 個 view：選資料夾鈕/翻譯鈕/3 開關/logText）。 */
     private suspend fun clearOutputs() = withContext(Dispatchers.Main) {
         binding.logText.text = ""
-        while (binding.container.childCount > 4) binding.container.removeViewAt(4)
+        while (binding.container.childCount > FIXED_VIEWS) binding.container.removeViewAt(FIXED_VIEWS)
     }
 
     private fun scaledForView(src: Bitmap, maxW: Int = 1000): Bitmap {
@@ -247,6 +310,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val FIXED_VIEWS = 6 // 容器內固定子 view 數（選資料夾鈕/翻譯鈕/3 開關/logText），其後為動態圖
         private const val PREF_TREE = "modelTree"
         private const val TEST_PAGE = "test/page.png"
         private const val ALPHABET = "models/alphabet-all-v5.txt"

@@ -33,6 +33,20 @@
             android:checked="true"
             android:text="直排（關閉＝橫排）" />
 
+        <Switch
+            android:id="@+id/genLogSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="產生 log 檔到資料夾" />
+
+        <Switch
+            android:id="@+id/genImgSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true"
+            android:text="產生 debug 圖到資料夾" />
+
         <TextView
             android:id="@+id/logText"
             android:layout_width="match_parent"
