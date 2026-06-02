@@ -16,7 +16,6 @@ import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.Inpainter
 import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
-import li.joye.yakuyomi.engine.OpenCCS2twp
 import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.Renderer
 import li.joye.yakuyomi.engine.TextFilter
@@ -67,14 +66,8 @@ class MainActivity : AppCompatActivity() {
                 val translated = key.isNotBlank() && regions.isNotEmpty()
                 if (translated) {
                     withContext(Dispatchers.Main) { binding.statusText.text = "翻譯中（雲端）…" }
-                    val s2twp = OpenCCS2twp(
-                        stTexts = listOf(
-                            assets.open("opencc/STPhrases.txt").bufferedReader().use { it.readText() },
-                            assets.open("opencc/STCharacters.txt").bufferedReader().use { it.readText() },
-                        ),
-                        twTexts = listOf(assets.open("opencc/TWVariants.txt").bufferedReader().use { it.readText() }),
-                    )
-                    val cht = LlmTranslator(key, cfg.translator, postProcess = { s2twp.convert(it) })
+                    // 繁中靠 LLM prompt（toLangName 指定台灣繁體）；不做 OpenCC 後處理，偶有誤差可接受
+                    val cht = LlmTranslator(key, cfg.translator)
                         .translate(regions.map { it.sourceText })
                     regions.forEachIndexed { i, r -> r.translatedText = cht.getOrElse(i) { r.sourceText } }
                 }

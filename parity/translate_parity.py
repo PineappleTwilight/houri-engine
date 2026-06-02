@@ -68,8 +68,9 @@ def call_deepseek(key, messages):
     return data["choices"][0]["message"]["content"]
 
 
-def translate_page(key, jp_list, s2twp):
-    """一頁：所有區一個 request（<|i|> 協定）→ 對齊 cht 清單；漏行/整頁失敗補原文（§11）。"""
+def translate_page(key, jp_list):
+    """一頁：所有區一個 request（<|i|> 協定）→ 對齊 cht 清單；漏行/整頁失敗補原文（§11）。
+       繁中靠 LLM prompt（TO_LANG 指定台灣繁體）；不做 OpenCC 後處理。"""
     if not jp_list:
         return []
     user = "\n".join(f"<|{i + 1}|>{q}" for i, q in enumerate(jp_list))
@@ -85,10 +86,10 @@ def translate_page(key, jp_list, s2twp):
         m = re.match(r'^\s*<\|(\d+)\|>\s*(.*)$', line)
         if m:
             trans[int(m.group(1))] = m.group(2).strip()
-    return [(s2twp.convert(trans[i + 1]) if trans.get(i + 1) else q) for i, q in enumerate(jp_list)]
+    return [(trans[i + 1] if trans.get(i + 1) else q) for i, q in enumerate(jp_list)]
 
 
-def translate_pages(key, pages, s2twp, batch_concurrent=True, batch_size=8):
+def translate_pages(key, pages, batch_concurrent=True, batch_size=8):
     """跨頁批次（鏡射 engine/BatchTranslator，對映 m-i-t --batch-size/--batch-concurrent）：
        concurrent=逐頁分開、ThreadPool 限 batch_size 並發；merged=每 batch_size 頁併一個大 prompt。"""
     if not pages:
@@ -97,11 +98,11 @@ def translate_pages(key, pages, s2twp, batch_concurrent=True, batch_size=8):
     if batch_concurrent:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=n) as ex:
-            return list(ex.map(lambda p: translate_page(key, p, s2twp), pages))
+            return list(ex.map(lambda p: translate_page(key, p), pages))
     out = []
     for c in range(0, len(pages), n):
         chunk = pages[c:c + n]
-        res = translate_page(key, [q for pg in chunk for q in pg], s2twp)
+        res = translate_page(key, [q for pg in chunk for q in pg])
         i = 0
         for pg in chunk:
             out.append(res[i:i + len(pg)]); i += len(pg)
@@ -118,8 +119,6 @@ def find_font():
 
 
 def main():
-    import opencc
-    s2twp = opencc.OpenCC("s2twp")
     key = read_key()
     results = json.load(open(OCR_JSON, encoding="utf-8"))
     queries = [r["text"] for r in results]
@@ -145,8 +144,7 @@ def main():
 
     out_rows = []
     for i, r in enumerate(results):
-        cn = trans.get(i + 1, "")
-        cht = s2twp.convert(cn) if cn else ""
+        cht = trans.get(i + 1, "")
         out_rows.append({"i": r["i"], "jp": r["text"], "cht": cht, "quad": r["quad"]})
         print(f"[{r['i']:2d}] {r['text']}  →  {cht}")
 

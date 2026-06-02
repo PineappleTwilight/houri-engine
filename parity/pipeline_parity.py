@@ -12,7 +12,6 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import translate_parity as tp
 import typeset_parity as ts
-import opencc
 from ctd_reference import letterbox, import_seg_rep
 from ocr_parity import sort_pnts, transformed_region, ctc_decode, is_ignore
 
@@ -98,7 +97,7 @@ def group(res):
     return regions
 
 
-def translate(regions, key, s2twp, filter_text=None):
+def translate(regions, key, filter_text=None):
     if not regions:
         return regions
     user = "\n".join(f"<|{i + 1}|>{r['jp']}" for i, r in enumerate(regions))
@@ -112,7 +111,7 @@ def translate(regions, key, s2twp, filter_text=None):
         if m:
             trans[int(m.group(1))] = m.group(2).strip()
     for i, r in enumerate(regions):
-        r["cht"] = s2twp.convert(trans.get(i + 1, ""))
+        r["cht"] = trans.get(i + 1, "")
     # 翻譯後過濾（m-i-t filter chain）：被丟的區不進去字、保留原圖
     kept = [r for r in regions if not ts.should_filter(r["jp"], r.get("cht", ""), filter_text)]
     if len(kept) != len(regions):
@@ -172,14 +171,13 @@ def main():
     lama = ort.InferenceSession(f"{MODELS}/lama-manga.onnx", providers=["CPUExecutionProvider"])
     seg_rep = import_seg_rep()(thresh=0.3)
     dic = [s[:-1] for s in open(ALPHABET, encoding="utf-8").readlines()]
-    s2twp = opencc.OpenCC("s2twp")
     key = tp.read_key()
     for path in sys.argv[1:]:
         name = os.path.splitext(os.path.basename(path))[0]
         rgb = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
         quads = detect(det, seg_rep, rgb)
         regions = group(ocr_all(ocr, dic, rgb, quads))
-        regions = translate(regions, key, s2twp, ts.FILTER_TEXT)
+        regions = translate(regions, key, ts.FILTER_TEXT)
         cleaned = inpaint(lama, rgb, regions)
         # 快取中間結果，之後可只重跑排版（retypeset.py）不必重打 DeepSeek
         Image.fromarray(cleaned).save(os.path.join(OUT, f"inpainted_{name}.png"))
