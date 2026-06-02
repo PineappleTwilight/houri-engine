@@ -56,7 +56,10 @@ data class InpainterConfig(
     val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（lama 模式；改了會對不上模型）
     val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（lama 逐區裁窗）
     val maskDilate: Float = 7f,       // ~ config.kernel_size / mask_dilation_offset
-    val concurrency: Int = 2,         // lama 逐區平行數（同時在跑的 LaMa 視窗；× intra-op 執行緒 ≈ 核數）
+    // lama 逐區平行調參：concurrency × intraThreads ≈ 核數（避免 oversubscribe）。
+    // concurrency 也決定同時在跑的 LaMa 數＝記憶體倍數（LaMa 肥，別太大）。
+    val concurrency: Int = 4,         // 同時跑幾個 LaMa 視窗
+    val intraThreads: Int = 2,        // 每個 LaMa session 的 intra-op 執行緒
 )
 
 data class RenderConfig(
