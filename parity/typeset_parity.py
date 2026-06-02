@@ -19,6 +19,7 @@ MODE = sys.argv[1] if len(sys.argv) > 1 else "auto"
 ROTATE = set("ー－—―‐~〜～…‥（）()「」『』【】〔〕［］｛｝〈〉《》＜＞<>｜|：;")
 EXP_W, EXP_H = 1.3, 1.5  # 文字框放大倍率（寬 / 直欄高度）
 COL_TRIM = 2             # 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
+SHRINK = 0.85            # 算好字級後再整體縮放（<1＝更小、更 fit 格子；留邊距）
 FILTER_TEXT = None       # config.filter_text：regex 命中譯文則濾掉該區（預設不啟用）
 COLOR_MODE = "auto"      # 文字色：auto（預設，取去字後背景亮度→黑/白字，最穩）| mono | polarity | hue
 BG_DARK = 110            # auto：去字後背景平均亮度 < 此值＝暗底 → 白字
@@ -133,6 +134,7 @@ def draw_v(im, dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
         cpc = max(1, int(col_room // lh) - COL_TRIM)
         if math.ceil(len(chars) / cpc) * cw <= bw:
             size = s; break
+    size = max(9, int(round(size * SHRINK)))   # 整體縮小、更 fit
     font = ImageFont.truetype(FONT, size)
     lh, cw = size * 1.05, size * 1.1
     cpc = max(1, int(col_room // lh) - COL_TRIM)
@@ -164,7 +166,9 @@ def draw_h(dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
         ls = wrap_h(text, font, bw)
         if len(ls) * s * 1.18 <= row_room and max((font.getlength(l) for l in ls), default=0) <= bw:
             size, lines = s, ls; break
+    size = max(9, int(round(size * SHRINK)))   # 整體縮小、更 fit
     font = ImageFont.truetype(FONT, size)
+    lines = wrap_h(text, font, bw)             # 縮小後重排
     lh = size * 1.18
     tcx = (tx0 + tx1) / 2
     ty = ty0

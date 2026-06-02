@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import kotlin.math.ceil
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** 排版方向。AUTO＝依內容（CJK 直排、純英數橫排），對應 m-i-t config 的 direction:auto。 */
 enum class TextOrientation { VERTICAL, HORIZONTAL, AUTO }
@@ -99,6 +100,7 @@ object Renderer {
             if (ceil(chars.length / cpc.toFloat()).toInt() * cw <= bw) { size = s; break }
             s--
         }
+        size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
         val lh = size * 1.05f; val cw = size * 1.1f
         val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
@@ -131,7 +133,9 @@ object Renderer {
             if (ls.size * s * 1.18f <= rowRoom && maxW <= bw) { size = s; lines = ls; break }
             s--
         }
+        size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
+        lines = wrapCjk(text, fill, bw)  // 縮小後重排
         val lh = size * 1.18f
         val tcx = (r.x0 + r.x1) / 2f
         var baseline = r.y0 + size * ASCENT            // 頂端對齊
