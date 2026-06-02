@@ -47,6 +47,13 @@
             android:checked="true"
             android:text="產生 debug 圖到資料夾" />
 
+        <Switch
+            android:id="@+id/lamaSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="false"
+            android:text="去字用 LaMa（關閉＝box-fill 快）" />
+
         <TextView
             android:id="@+id/logText"
             android:layout_width="match_parent"
