@@ -47,12 +47,17 @@
             android:checked="true"
             android:text="產生 debug 圖到資料夾" />
 
-        <Switch
-            android:id="@+id/lamaSwitch"
+        <TextView
+            android:id="@+id/inpaintLabel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:checked="false"
-            android:text="去字用 LaMa（關閉＝box-fill 快）" />
+            android:layout_marginTop="8dp"
+            android:text="去字方式：" />
+
+        <Spinner
+            android:id="@+id/inpaintSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
 
         <TextView
             android:id="@+id/logText"

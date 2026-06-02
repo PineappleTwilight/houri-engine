@@ -64,10 +64,14 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         binding.pickFolderButton.setOnClickListener { folderPicker.launch(null) }
         binding.detectButton.setOnClickListener { runPipeline() }
+        binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
+        )
+        binding.inpaintSpinner.setSelection(0) // 預設＝boxfill（position 0，真機 A/B 拍板）
         val t = currentTree()
         binding.logText.text =
-            if (t == null) "① 先按「選擇模型資料夾」選含 3 個 *.onnx 的資料夾\n② 切「去字用 LaMa」開關，按翻譯跑全 4 張"
-            else "資料夾：${t.name}（切去字開關 → 按翻譯跑全 4 張批量計時）"
+            if (t == null) "① 先按「選擇模型資料夾」選含 3 個 *.onnx 的資料夾\n② 選去字方式 → 按翻譯跑全 4 張"
+            else "資料夾：${t.name}（選去字方式 → 按翻譯跑全 4 張批量計時）"
     }
 
     private fun runPipeline() {
@@ -75,13 +79,20 @@ class MainActivity : AppCompatActivity() {
         val vertical = binding.verticalSwitch.isChecked
         val saveLog = binding.genLogSwitch.isChecked
         runSaveImg = binding.genImgSwitch.isChecked
-        val method = if (binding.lamaSwitch.isChecked) "lama" else "boxfill"
+        val pos = binding.inpaintSpinner.selectedItemPosition // 0=boxfill 1=lama整頁 2=lama逐格
+        val method = if (pos == 0) "boxfill" else "lama"
+        val whole = pos != 2
+        val modeLabel = when (pos) {
+            0 -> "boxfill"
+            1 -> "lama整頁"
+            else -> "lama逐格"
+        }
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
             val cfg = EngineConfig(
                 ocr = OcrConfig(), // 正式：minProb=0.5 丟低信心誤讀、useXnnpack=false（預設）
-                inpainter = InpainterConfig(method = method),
+                inpainter = InpainterConfig(method = method, wholeImage = whole),
                 render = RenderConfig(
                     orientation = if (vertical) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL,
                 ),
@@ -99,7 +110,7 @@ class MainActivity : AppCompatActivity() {
                     log("✗ 模型不齊（需含 detect/ocr/lama 的 3 個 .onnx）")
                     return@launch
                 }
-                log("▶ 批量測試 ${DEMOS.size} 張｜去字=$method")
+                log("▶ 批量測試 ${DEMOS.size} 張｜去字=$modeLabel")
                 log("… 載入模型（首次複製到 filesDir 較久）")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
@@ -116,7 +127,8 @@ class MainActivity : AppCompatActivity() {
                         val page = loadAssetBitmap(asset)
                         val t0 = System.currentTimeMillis()
                         var ms = System.currentTimeMillis()
-                        val lines = det.detect(page); val detMs = System.currentTimeMillis() - ms
+                        val detection = det.detect(page); val detMs = System.currentTimeMillis() - ms
+                        val lines = detection.lines
                         ms = System.currentTimeMillis()
                         ocr.recognize(page, lines); val ocrMs = System.currentTimeMillis() - ms
                         val regions = Grouping.group(lines)
@@ -130,15 +142,15 @@ class MainActivity : AppCompatActivity() {
                         // 正式過濾：丟空白/數字/譯==原/regex 命中的區（誤判/未譯不去字、保留原圖）
                         val kept = if (translator != null) TextFilter.apply(regions, cfg.translator.filterText) else regions
                         ms = System.currentTimeMillis()
-                        val cleaned = inp.inpaint(page, kept); val inMs = System.currentTimeMillis() - ms
+                        val cleaned = inp.inpaint(page, kept, detection.textMask); val inMs = System.currentTimeMillis() - ms
                         ms = System.currentTimeMillis()
                         val finalPage = Renderer.render(cleaned, kept, cfg.render, tf); val rnMs = System.currentTimeMillis() - ms
                         val pageMs = System.currentTimeMillis() - t0
                         total += pageMs
                         log("[$tag] 偵測$detMs OCR$ocrMs 譯$trMs 去字$inMs 排版$rnMs｜頁$pageMs ms｜${lines.size}行${regions.size}區留${kept.size}")
-                        addImage("$tag 成品（$method）", finalPage)
+                        addImage("$tag 成品（$modeLabel）", finalPage)
                     }
-                    log("★ ${DEMOS.size} 頁總計 $total ms（去字=$method）平均 ${total / DEMOS.size} ms/頁")
+                    log("★ ${DEMOS.size} 頁總計 $total ms（去字=$modeLabel）平均 ${total / DEMOS.size} ms/頁")
                 } finally {
                     det.close(); ocr.close(); inp.close()
                 }
@@ -249,8 +261,14 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val FIXED_VIEWS = 7 // 固定子 view：選資料夾鈕/翻譯鈕/4 開關/logText
+        private const val FIXED_VIEWS = 8 // 固定子 view：選資料夾鈕/翻譯鈕/3 開關/去字標籤/去字選單/logText
         private const val PREF_TREE = "modelTree"
+        // 去字方式選單（順序＝position：0 boxfill / 1 lama整頁 / 2 lama逐格）
+        private val INPAINT_MODES = listOf(
+            "boxfill 就近取色（快·預設）",
+            "LaMa 整頁（~6s·整塊遮罩）",
+            "LaMa 逐格（慢·seg 細筆畫）",
+        )
         private val DEMOS = listOf("test/page.png", "test/demo2.png", "test/demo3.png", "test/demo4.png")
         private const val ALPHABET = "models/alphabet-all-v5.txt"
         private const val FONT = "fonts/NotoSansMonoCJK.ttc"

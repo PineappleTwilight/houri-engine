@@ -26,6 +26,7 @@ data class DetectorConfig(
     val boxThreshold: Float = 0.6f,   // 〔設定〕ctd.py 外部過濾（config.box_threshold=0.7 是 default 偵測器）
     val unclipRatio: Float = 1.5f,    // 〔設定〕ctd unclip（config.unclip_ratio=2.3 是 default 偵測器）
     val minSide: Float = 3f,
+    val segThreshold: Float = 0.3f,   // seg 文字筆畫遮罩二值門檻（去字用；parity/seg_validate.py 驗證 0.3 對齊、覆蓋好）
 )
 
 data class OcrConfig(
@@ -50,16 +51,17 @@ data class TranslatorConfig(
 )
 
 data class InpainterConfig(
-    // 〔設定〕去字方法：boxfill＝取氣泡底色填字區（瞬間、平氣泡無損、文字壓畫面時是色塊）；
-    //                  lama＝LaMa 逐區重建（品質最好、不糊；逐區平行化壓低耗時）。預設 boxfill 取速度。
-    val method: String = "boxfill",
-    val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（lama 模式；改了會對不上模型）
+    // 〔設定〕去字方法（真機實測拍板預設＝lama 整頁：見下）：
+    //   lama+wholeImage＝整頁縮 512 跑一次 LaMa（~6s 去字、~18s/頁）。【預設】從不醜爆（最多輕微暈開），跨整個庫最安全。
+    //   boxfill        ＝取氣泡底色填字區（瞬間、~12s/頁、平/單色泡泡最乾淨）。但多彩/壓在畫面上的字會塗錯色塊＝失敗得很醜，故不當預設。
+    //   lama+逐區       ＝每區各跑一次 LaMa（小泡較銳利，但 N 區＝N× 整頁算力 ⇒ ~81s/頁；大/彩色泡泡仍會糊）。
+    // ※ 不開 concurrency／獨立 session：去字是純 CPU、核數固定，平行切核不增總算力（實測並發≈序列）。逐區慢是「做 N 倍的事」，平行救不了。
+    val method: String = "boxfill",   // 真機 A/B 拍板：boxfill+seg 最快(~11.5s/頁)又乾淨(細筆畫+就近取色)、品質追平最貴的逐格
+    val wholeImage: Boolean = true,   // lama：true＝整頁一次（快）/ false＝逐區（小泡銳利、慢）
+    val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（改了對不上模型）
     val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（lama 逐區裁窗）
     val maskDilate: Float = 7f,       // ~ config.kernel_size / mask_dilation_offset
-    // lama 逐區平行調參：concurrency × intraThreads ≈ 核數（避免 oversubscribe）。
-    // concurrency 也決定同時在跑的 LaMa 數＝記憶體倍數（LaMa 肥，別太大）。
-    val concurrency: Int = 4,         // 同時跑幾個 LaMa 視窗
-    val intraThreads: Int = 2,        // 每個 LaMa session 的 intra-op 執行緒
+    val intraThreads: Int = 4,        // LaMa session intra-op 執行緒（整頁/逐區都用滿 4 核）
 )
 
 data class RenderConfig(
@@ -70,7 +72,7 @@ data class RenderConfig(
     // 排版幾何（純文字框法，對齊 parity/typeset_parity.py；不常動，留可控空間）
     val expandW: Float = 1.3f,   // 文字框放大倍率（寬）給呼吸空間
     val expandH: Float = 1.5f,   // 文字框放大倍率（直欄高 / 橫排列高）
-    val colTrim: Int = 2,        // 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
+    val colTrim: Int = 3,        // 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
     val fontScale: Float = 0.85f, // 算好字級後整體縮放（<1＝更小、更 fit 格子、留邊距）
     // 文字顏色：auto＝取去字後背景亮度判黑/白字（最穩、白底黑字/黑底白字）；mono＝一律黑字白邊
     val colorMode: String = "auto",

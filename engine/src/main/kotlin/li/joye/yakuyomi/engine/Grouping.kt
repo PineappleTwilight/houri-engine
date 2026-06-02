@@ -1,13 +1,15 @@
 package li.joye.yakuyomi.engine
 
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
  * 文字行 → 氣泡區分群（翻譯前合併，避免逐行碎裂）。
  *
- * 對齊 manga_translator/utils/generic.py:quadrilateral_can_merge_region 的精神（§4 第二層）。
- * ★ 簡化（第三層偏離）：用「同方向 + 字級相近 + bbox 間距 < 字高」判合併，
- *   省略上游的多邊形距離 / angle / aspect / 對齊性細節。完整版日後再補。
+ * 對齊 manga_translator/utils/generic.py:quadrilateral_can_merge_region（§4 第二層）。
+ * 移植其「軸對齊分支」：同方向 + 字級相近 + **緊間距(0.6×字高)** + **對齊**（直書頂或底對齊、橫書左或右對齊）才併。
+ * ★ 之前的簡化版只看間距、漏了對齊，會把「靠近但分離」的框錯併（色塊 + 超出框）；補對齊後修正。
+ *   仍省略上游的多邊形距離 / 非軸對齊(angle) 分支（複雜分鏡的旋轉框少見），那部分留第三層偏離。
  */
 class TextRegion(val lines: List<TextLine>, val direction: String) {
     var translatedText: String = ""
@@ -30,7 +32,8 @@ class TextRegion(val lines: List<TextLine>, val direction: String) {
 }
 
 object Grouping {
-    private const val GAP = 1.0f       // bbox 間距 < GAP×字高 → 合併
+    private const val GAP = 0.6f       // 緊間距（m-i-t char_gap_tolerance）：bboxGap < GAP×字高 才考慮合併
+    private const val ALIGN = 1.5f     // 對齊容差（m-i-t char_gap_tolerance2）：直書頂/底、橫書左/右 對齊 < ALIGN×字高
     private const val FS_RATIO = 1.5f  // 字級比上限
 
     fun group(lines: List<TextLine>): List<TextRegion> {
@@ -59,7 +62,15 @@ object Grouping {
                 if (lines[i].direction != lines[j].direction) continue
                 val cs = minOf(fs[i], fs[j])
                 if (cs <= 0f || maxOf(fs[i], fs[j]) / cs > FS_RATIO) continue
-                if (bboxGap(bb[i], bb[j]) < cs * GAP) parent[find(i)] = find(j)
+                if (bboxGap(bb[i], bb[j]) >= cs * GAP) continue          // 不夠近 → 不併
+                // 對齊（m-i-t 軸對齊分支）：直書要頂或底齊、橫書要左或右齊，否則是「靠近但分離」的框、不併
+                val a = bb[i]; val b = bb[j]
+                val aligned = if (lines[i].direction == "v") {
+                    abs(a[1] - b[1]) < cs * ALIGN || abs(a[3] - b[3]) < cs * ALIGN
+                } else {
+                    abs(a[0] - b[0]) < cs * ALIGN || abs(a[2] - b[2]) < cs * ALIGN
+                }
+                if (aligned) parent[find(i)] = find(j)
             }
         }
 

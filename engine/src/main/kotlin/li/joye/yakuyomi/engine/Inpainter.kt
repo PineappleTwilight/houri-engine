@@ -10,12 +10,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.util.Log
 import java.nio.FloatBuffer
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlin.math.roundToInt
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 
 /**
  * LaMa 去字（Koharu mayocream/lama-manga.onnx）。block-aware：逐氣泡裁窗 → tile → LaMa → 貼回。
@@ -42,13 +38,41 @@ class Inpainter(
         session = env.createSession(modelPath, opts) // 路徑載入＝native 記憶體、不佔 JVM heap
     }
 
-    suspend fun inpaint(page: Bitmap, regions: List<TextRegion>): Bitmap = coroutineScope {
+    suspend fun inpaint(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Bitmap = coroutineScope {
         val w = page.width
         val h = page.height
         val result = page.copy(Bitmap.Config.ARGB_8888, true)
 
+        // 遮罩配方法：boxfill / lama逐區＝全解析度 → seg 細筆畫（精準、壓畫面的字只動筆畫不成方塊）；
+        // lama整頁＝整張縮 512、細筆畫會被縮到次像素而殘留 → 改用整塊文字框遮罩（整塊在乾淨泡泡上反而擦得更乾淨）。
+        val useSeg = !(cfg.method == "lama" && cfg.wholeImage)
+        val maskPx = if (useSeg) buildSegMask(regions, textMask, w, h) else buildQuadMask(regions, w, h)
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        Canvas(maskBmp).apply {
+        maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
+
+        if (cfg.method == "boxfill") {
+            boxFill(result, maskPx) // 瞬間：就近取色填字筆畫、不跑 LaMa
+            maskBmp.recycle()
+            return@coroutineScope result
+        }
+        if (cfg.wholeImage) {
+            // lama 整頁：整張縮 512 跑一次（~6s/頁；快、但大/彩色泡泡會糊）
+            runWindow(page, maskBmp, intArrayOf(0, 0, w, h))?.let { compositePixels(result, maskPx, it) }
+            maskBmp.recycle()
+            return@coroutineScope result
+        }
+        // lama 逐區（序列）：各區裁窗 → 跑 LaMa → 貼回。不平行——純 CPU 核數固定，平行切核不增總算力（見 InpainterConfig 註）。
+        for (win in regions.mapNotNull { windowOf(it, w, h) }) {
+            runWindow(page, maskBmp, win)?.let { compositePixels(result, maskPx, it) }
+        }
+        maskBmp.recycle()
+        result
+    }
+
+    /** 整塊遮罩（舊法）：文字行框 FILL_AND_STROKE。lama 整頁專用——縮 512 後細筆畫殘留，整塊在乾淨泡泡上擦得更乾淨。 */
+    private fun buildQuadMask(regions: List<TextRegion>, w: Int, h: Int): IntArray {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(bmp).apply {
             drawColor(Color.BLACK)
             val p = Paint().apply {
                 color = Color.WHITE
@@ -68,55 +92,106 @@ class Inpainter(
                 }
             }
         }
-        val maskPx = IntArray(w * h)
-        maskBmp.getPixels(maskPx, 0, w, 0, 0, w, h)
-
-        if (cfg.method == "boxfill") {
-            boxFill(result, regions, maskPx) // 瞬間：取氣泡底色填字區、不跑 LaMa
-            maskBmp.recycle()
-            return@coroutineScope result
-        }
-        // lama 逐區平行：各區裁窗 → 平行跑 LaMa（只讀原圖+遮罩、唯讀安全）→ 收齊後序列貼回
-        val sem = Semaphore(cfg.concurrency.coerceAtLeast(1))
-        val outs = regions.mapNotNull { windowOf(it, w, h) }
-            .map { win -> async(Dispatchers.Default) { sem.withPermit { runWindow(page, maskBmp, win) } } }
-            .awaitAll()
-        for (o in outs) if (o != null) compositePixels(result, maskPx, o)
-        maskBmp.recycle()
-        result
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        bmp.recycle()
+        return px
     }
 
-    /** box-fill 快速去字：每區的遮罩像素換成該區氣泡底色（bbox 內非遮罩像素均值）。無 LaMa、瞬間。 */
-    private fun boxFill(result: Bitmap, regions: List<TextRegion>, maskPx: IntArray) {
+    /**
+     * seg 細遮罩＝seg 細筆畫 ∩ 已保留區的文字行框（allow），再膨脹。回傳 ARGB 像素（白＝要去字）。
+     * allow 把去字限制在「翻譯過的區」內，故 seg 抓到的 SFX/未譯文字不會被擦（留原圖、合 SFX 政策與 §11）。
+     */
+    private fun buildSegMask(regions: List<TextRegion>, textMask: Bitmap, w: Int, h: Int): IntArray {
+        val allow = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(allow).apply {
+            drawColor(Color.BLACK)
+            val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+            for (region in regions) {
+                for (line in region.lines) {
+                    val q = line.quad
+                    if (q.size < 4) continue
+                    val path = Path().apply {
+                        moveTo(q[0].x, q[0].y)
+                        for (i in 1..3) lineTo(q[i].x, q[i].y)
+                        close()
+                    }
+                    drawPath(path, p)
+                }
+            }
+        }
+        val mask = IntArray(w * h)
+        allow.getPixels(mask, 0, w, 0, 0, w, h)
+        allow.recycle()
+        val seg = IntArray(w * h)
+        textMask.getPixels(seg, 0, w, 0, 0, w, h)
+        for (i in mask.indices) {
+            mask[i] = if ((mask[i] and 0xFF) > 127 && (seg[i] and 0xFF) > 127) Color.WHITE else Color.BLACK
+        }
+        dilate(mask, w, h, (cfg.maskDilate / 2f).roundToInt().coerceAtLeast(1))
+        return mask
+    }
+
+    /** 二值遮罩可分離膨脹（先橫後縱 max-filter），radius 像素。覆蓋筆畫抗鋸齒邊緣、給去字餘裕。 */
+    private fun dilate(px: IntArray, w: Int, h: Int, radius: Int) {
+        if (radius <= 0) return
+        val tmp = IntArray(px.size)
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                var on = false
+                var k = -radius
+                while (k <= radius) {
+                    val xx = x + k
+                    if (xx in 0 until w && (px[row + xx] and 0xFF) > 127) { on = true; break }
+                    k++
+                }
+                tmp[row + x] = if (on) Color.WHITE else Color.BLACK
+            }
+        }
+        for (x in 0 until w) {
+            for (y in 0 until h) {
+                var on = false
+                var k = -radius
+                while (k <= radius) {
+                    val yy = y + k
+                    if (yy in 0 until h && (tmp[yy * w + x] and 0xFF) > 127) { on = true; break }
+                    k++
+                }
+                px[y * w + x] = if (on) Color.WHITE else Color.BLACK
+            }
+        }
+    }
+
+    /**
+     * box-fill 去字（就近取色）：每個遮罩像素換成「上下左右最近的非遮罩像素」均值。瞬間、無 LaMa。
+     * 跟著局部背景走 ⇒ 多色/漸層泡泡、合併到的相鄰異色框、壓在畫面上的字都不會糊成單一色塊
+     * （取代舊「整區一個平均色」；配 seg 細筆畫遮罩，鄰近背景就在筆畫旁、取色準）。
+     */
+    private fun boxFill(result: Bitmap, maskPx: IntArray) {
         val w = result.width
         val h = result.height
         val px = IntArray(w * h)
         result.getPixels(px, 0, w, 0, 0, w, h)
-        for (region in regions) {
-            val x0 = region.x0.toInt().coerceIn(0, w - 1)
-            val y0 = region.y0.toInt().coerceIn(0, h - 1)
-            val x1 = region.x1.toInt().coerceIn(x0 + 1, w)
-            val y1 = region.y1.toInt().coerceIn(y0 + 1, h)
-            var sr = 0L; var sg = 0L; var sb = 0L; var cnt = 0L
-            for (y in y0 until y1) {
-                val row = y * w
-                for (x in x0 until x1) {
-                    val i = row + x
-                    if ((maskPx[i] and 0xFF) <= 127) { // 非遮罩＝氣泡底（非文字）
-                        val p = px[i]; sr += (p shr 16) and 0xFF; sg += (p shr 8) and 0xFF; sb += p and 0xFF; cnt++
-                    }
-                }
-            }
-            val bg = if (cnt > 0) Color.rgb((sr / cnt).toInt(), (sg / cnt).toInt(), (sb / cnt).toInt()) else Color.WHITE
-            for (y in y0 until y1) {
-                val row = y * w
-                for (x in x0 until x1) {
-                    val i = row + x
-                    if ((maskPx[i] and 0xFF) > 127) px[i] = bg
-                }
+        val out = px.copyOf()
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                val i = row + x
+                if ((maskPx[i] and 0xFF) <= 127) continue // 非遮罩，保留原畫面
+                var sr = 0; var sg = 0; var sb = 0; var cnt = 0
+                var k = x - 1; var d = 0 // 左
+                while (k >= 0 && d < FILL_REACH) { val j = row + k; if ((maskPx[j] and 0xFF) <= 127) { val p = px[j]; sr += (p shr 16) and 0xFF; sg += (p shr 8) and 0xFF; sb += p and 0xFF; cnt++; break }; k--; d++ }
+                k = x + 1; d = 0 // 右
+                while (k < w && d < FILL_REACH) { val j = row + k; if ((maskPx[j] and 0xFF) <= 127) { val p = px[j]; sr += (p shr 16) and 0xFF; sg += (p shr 8) and 0xFF; sb += p and 0xFF; cnt++; break }; k++; d++ }
+                k = y - 1; d = 0 // 上
+                while (k >= 0 && d < FILL_REACH) { val j = k * w + x; if ((maskPx[j] and 0xFF) <= 127) { val p = px[j]; sr += (p shr 16) and 0xFF; sg += (p shr 8) and 0xFF; sb += p and 0xFF; cnt++; break }; k--; d++ }
+                k = y + 1; d = 0 // 下
+                while (k < h && d < FILL_REACH) { val j = k * w + x; if ((maskPx[j] and 0xFF) <= 127) { val p = px[j]; sr += (p shr 16) and 0xFF; sg += (p shr 8) and 0xFF; sb += p and 0xFF; cnt++; break }; k++; d++ }
+                if (cnt > 0) out[i] = Color.rgb(sr / cnt, sg / cnt, sb / cnt)
             }
         }
-        result.setPixels(px, 0, w, 0, 0, w, h)
+        result.setPixels(out, 0, w, 0, 0, w, h)
     }
 
     private class WinOut(val x0: Int, val y0: Int, val ww: Int, val wh: Int, val px: IntArray)
@@ -230,5 +305,6 @@ class Inpainter(
         private const val INPUT_IMAGE = "image"
         private const val INPUT_MASK = "mask"
         private const val OUT_NAME = "output"
+        private const val FILL_REACH = 64 // box-fill 就近取色：每方向最遠找幾像素的非遮罩背景
     }
 }

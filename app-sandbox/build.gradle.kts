@@ -27,6 +27,8 @@ android {
             "DEEPSEEK_API_KEY",
             "\"${apiKeys.getProperty("DEEPSEEK_API_KEY", "")}\"",
         )
+        // 只打 arm64-v8a（實機）：砍掉 armeabi-v7a/x86/x86_64 的 ORT native libs ≈ 省 55MB，雲端手動安裝快很多
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
