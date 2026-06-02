@@ -14,7 +14,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Yakuyomi"
+rootProject.name = "yakuyomi-engine"
 
 include(":engine")
 include(":app-sandbox")

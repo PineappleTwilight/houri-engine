@@ -3,6 +3,10 @@ plugins {
     // AGP 9+ 內建 Kotlin 支援，不再套 kotlin.android（見 kotl.in/gradle/agp-built-in-kotlin）
 }
 
+// Yakuyomi fork 以 Gradle composite build（includeBuild）接此引擎，靠 group:name 替換依賴
+group = "li.joye.yakuyomi"
+version = "0.1.0"
+
 android {
     namespace = "li.joye.yakuyomi.engine"
     compileSdk = 37
