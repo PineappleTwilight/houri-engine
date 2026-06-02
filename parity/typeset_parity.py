@@ -17,9 +17,12 @@ REGIONS = os.path.join(OUT, "merged_results.json")
 FONT = os.path.join(tp.ROOT, "engine/src/main/assets/fonts/NotoSansMonoCJK.ttc")
 MODE = sys.argv[1] if len(sys.argv) > 1 else "auto"
 ROTATE = set("ー－—―‐~〜～…‥（）()「」『』【】〔〕［］｛｝〈〉《》＜＞<>｜|：;")
+# 行頭禁則：不可置於欄/行開頭（收尾標點、小假名）→ 併回前一欄/行（kinsoku）
+NO_START = set("、。，．：；！？”’）〕】｝」』》〉…‥ーゝゞヽヾ々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ")
 EXP_W, EXP_H = 1.3, 1.5  # 文字框放大倍率（寬 / 直欄高度）
-COL_TRIM = 2             # 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
+COL_TRIM = 3             # 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）★與 Kotlin RenderConfig.colTrim 同步
 SHRINK = 0.85            # 算好字級後再整體縮放（<1＝更小、更 fit 格子；留邊距）
+STROKE = 0.10            # 描邊寬＝字級×此比例（隨字級縮放，取代固定寬）
 FILTER_TEXT = None       # config.filter_text：regex 命中譯文則濾掉該區（預設不啟用）
 COLOR_MODE = "auto"      # 文字色：auto（預設，取去字後背景亮度→黑/白字，最穩）| mono | polarity | hue
 BG_DARK = 110            # auto：去字後背景平均亮度 < 此值＝暗底 → 白字
@@ -99,11 +102,11 @@ def should_filter(jp, cht, filter_text=None):
     return False
 
 
-def blit_rotated(im, ch, font, cx, cy, size, fg=(0, 0, 0), bg=(255, 255, 255)):
+def blit_rotated(im, ch, font, cx, cy, size, fg=(0, 0, 0), bg=(255, 255, 255), sw=2):
     pad = int(size * 1.6)
     tmp = Image.new("RGBA", (pad * 2, pad * 2), (0, 0, 0, 0))
     ImageDraw.Draw(tmp).text((pad, pad), ch, font=font, fill=tuple(fg), anchor="mm",
-                             stroke_width=2, stroke_fill=tuple(bg))
+                             stroke_width=sw, stroke_fill=tuple(bg))
     im.paste(tmp.rotate(-90, expand=False), (int(cx - pad), int(cy - pad)), tmp.rotate(-90, expand=False))
 
 
@@ -112,12 +115,25 @@ def wrap_h(text, font, maxw):
     for ch in text:
         if ch == "\n":
             lines.append(cur); cur = ""; continue
-        if cur and font.getlength(cur + ch) > maxw:
+        if cur and font.getlength(cur + ch) > maxw and ch not in NO_START:  # 行頭禁則：禁則字不另起行
             lines.append(cur); cur = ""
         cur += ch
     if cur:
         lines.append(cur)
     return lines
+
+
+def split_columns_v(chars, cpc):
+    """直排切欄＋行頭禁則：禁則字不置於欄頭，併回前一欄（最多 +2，避免暴衝）。"""
+    cols, i, n = [], 0, len(chars)
+    while i < n:
+        end = min(i + cpc, n)
+        ext = 0
+        while end < n and chars[end] in NO_START and ext < 2:
+            end += 1; ext += 1
+        cols.append(chars[i:end])
+        i = end
+    return cols
 
 
 def draw_v(im, dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
@@ -138,20 +154,24 @@ def draw_v(im, dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
     font = ImageFont.truetype(FONT, size)
     lh, cw = size * 1.05, size * 1.1
     cpc = max(1, int(col_room // lh) - COL_TRIM)
-    cols = math.ceil(len(chars) / cpc)
-    tcx = (tx0 + tx1) / 2                       # 定位：水平置中於文字框中心
+    columns = split_columns_v(chars, cpc)       # 禁則：欄不以行頭禁則字開頭
+    cols = len(columns)
+    sw = max(2, round(size * STROKE))            # 描邊隨字級
+    tcx = (tx0 + tx1) / 2                        # 定位：水平置中於文字框中心
     right_cx = tcx + cols * cw / 2 - cw / 2
-    for c in range(cols):
+    block_h = max(len(c) for c in columns) * lh  # 垂直置中：以最長欄高為塊高，置中於框
+    start_cy = (ty0 + ty1) / 2 - block_h / 2
+    for c, col in enumerate(columns):
         cx = right_cx - c * cw
-        cy = ty0                                # 定位：頂端對齊文字框頂
-        for ch in chars[c * cpc:(c + 1) * cpc]:
+        cy = start_cy
+        for ch in col:
             cyc = cy + lh / 2
             if ch in ROTATE:
-                blit_rotated(im, ch, font, cx, cyc, size, fg, bg)
+                blit_rotated(im, ch, font, cx, cyc, size, fg, bg, sw)
             else:
                 w = font.getlength(ch)
                 dr.text((cx - w / 2, cyc - size * 0.62), ch, font=font, fill=tuple(fg),
-                        stroke_width=2, stroke_fill=tuple(bg))
+                        stroke_width=sw, stroke_fill=tuple(bg))
             cy += lh
 
 
@@ -171,10 +191,11 @@ def draw_h(dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
     lines = wrap_h(text, font, bw)             # 縮小後重排
     lh = size * 1.18
     tcx = (tx0 + tx1) / 2
-    ty = ty0
+    sw = max(2, round(size * STROKE))
+    ty = (ty0 + ty1) / 2 - len(lines) * lh / 2   # 垂直置中於框
     for ln in lines:
         dr.text((tcx - font.getlength(ln) / 2, ty), ln, font=font, fill=tuple(fg),
-                stroke_width=2, stroke_fill=tuple(bg))
+                stroke_width=sw, stroke_fill=tuple(bg))
         ty += lh
 
 

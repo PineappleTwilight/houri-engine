@@ -102,21 +102,38 @@ object Renderer {
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
+        stroke.strokeWidth = maxOf(2f, size * STROKE_RATIO)  // 描邊隨字級（取代固定寬）
         val lh = size * 1.05f; val cw = size * 1.1f
         val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
-        val cols = ceil(chars.length / cpc.toFloat()).toInt()
+        val columns = splitColumnsV(chars, cpc)       // 禁則：欄不以行頭禁則字開頭
+        val cols = columns.size
         val tcx = (r.x0 + r.x1) / 2f                  // 定位：水平置中於文字框中心
         val rightCx = tcx + cols * cw / 2f - cw / 2f
+        val blockH = columns.maxOf { it.length } * lh // 垂直置中：以最長欄高為塊高，置中於框
+        val startCy = (r.y0 + r.y1) / 2f - blockH / 2f
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
-            var cy = r.y0                              // 定位：頂端對齊文字框頂
-            val start = col * cpc
-            val end = min(start + cpc, chars.length)
-            for (i in start until end) {
-                drawCharVertical(canvas, chars[i], cx, cy + lh / 2f, fill, stroke, cfg.fontBorder)
+            var cy = startCy
+            for (ch in columns[col]) {
+                drawCharVertical(canvas, ch, cx, cy + lh / 2f, fill, stroke, cfg.fontBorder)
                 cy += lh
             }
         }
+    }
+
+    /** 直排切欄＋行頭禁則：禁則字不置於欄頭、併回前一欄（最多 +2，避免暴衝）。 */
+    private fun splitColumnsV(chars: String, cpc: Int): List<String> {
+        val cols = ArrayList<String>()
+        var i = 0
+        val n = chars.length
+        while (i < n) {
+            var end = minOf(i + cpc, n)
+            var ext = 0
+            while (end < n && chars[end] in NO_START && ext < 2) { end++; ext++ }
+            cols.add(chars.substring(i, end))
+            i = end
+        }
+        return cols
     }
 
     /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。 */
@@ -135,10 +152,11 @@ object Renderer {
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
+        stroke.strokeWidth = maxOf(2f, size * STROKE_RATIO)  // 描邊隨字級
         lines = wrapCjk(text, fill, bw)  // 縮小後重排
         val lh = size * 1.18f
         val tcx = (r.x0 + r.x1) / 2f
-        var baseline = r.y0 + size * ASCENT            // 頂端對齊
+        var baseline = (r.y0 + r.y1) / 2f - lines.size * lh / 2f + size * ASCENT  // 垂直置中於框
         for (ln in lines) {
             val tx = tcx - fill.measureText(ln) / 2f
             if (cfg.fontBorder) canvas.drawText(ln, tx, baseline, stroke)
@@ -164,8 +182,8 @@ object Renderer {
         val cur = StringBuilder()
         for (ch in text) {
             if (ch == '\n') { lines.add(cur.toString()); cur.clear(); continue }
-            if (cur.isNotEmpty() && paint.measureText(cur.toString() + ch) > maxW) {
-                lines.add(cur.toString()); cur.clear()
+            if (cur.isNotEmpty() && paint.measureText(cur.toString() + ch) > maxW && ch !in NO_START) {
+                lines.add(cur.toString()); cur.clear()  // 行頭禁則：禁則字不另起行
             }
             cur.append(ch)
         }
@@ -174,5 +192,8 @@ object Renderer {
     }
 
     private const val ASCENT = 0.82f
+    private const val STROKE_RATIO = 0.10f  // 描邊寬＝字級×此比例（隨字級縮放）
     private const val ROTATE_CHARS = "ー－—―‐~〜～…‥（）()「」『』【】〔〕［］｛｝〈〉《》＜＞<>｜|：;"
+    // 行頭禁則：不可置於欄/行開頭（收尾標點、小假名）→ 併回前一欄/行（kinsoku）
+    private const val NO_START = "、。，．：；！？”’）〕】｝」』》〉…‥ーゝゞヽヾ々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ"
 }
