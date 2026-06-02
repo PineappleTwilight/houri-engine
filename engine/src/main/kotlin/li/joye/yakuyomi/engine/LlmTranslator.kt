@@ -78,7 +78,7 @@ class LlmTranslator(
             .post(body)
             .build()
         client.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
+            val text = resp.body.string() // okhttp5：body 非空
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
             JSONObject(text)
                 .getJSONArray("choices").getJSONObject(0)

@@ -2,7 +2,7 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
+    // AGP 9+ 內建 Kotlin 支援，不再套 kotlin.android
 }
 
 // BYOK：build 時從 repo 根 api-keys.properties（gitignored）讀 key 注入 debug BuildConfig。
@@ -14,12 +14,12 @@ val apiKeys = Properties().apply {
 
 android {
     namespace = "li.joye.yakuyomi.sandbox"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "li.joye.yakuyomi.sandbox"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1-m2"
         buildConfigField(
@@ -45,10 +45,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         viewBinding = true
         buildConfig = true
@@ -58,8 +54,13 @@ android {
     androidResources {
         ignoreAssetsPattern = "*.onnx"
     }
+}
 
-    sourceSets["main"].java.srcDirs("src/main/kotlin")
+// AGP 9 內建 Kotlin：jvmTarget 改在 kotlin{} 設
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
 
 dependencies {
