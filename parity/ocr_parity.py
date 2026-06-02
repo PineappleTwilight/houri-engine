@@ -63,19 +63,33 @@ def transformed_region(img, pts, direction, th):
     return region
 
 
-def ctc_decode(logits, dictionary):
+def ctc_decode(logits, dictionary, colors=None):
+    """greedy CTC（blank=0、收合重複+去blank）。
+    傳入 colors（[T,6]＝fg_rgb+bg_rgb，未 clamp）則回傳 (text, prob, fg, bg)；
+    色＝保留的非空白 char 對應 timestep 取色、clip 0..1、整行平均 ×255（對齊 model_48px_ctc.decode_ctc_top1）。"""
     lp = logits - logits.max(1, keepdims=True)
     lp = lp - np.log(np.exp(lp).sum(1, keepdims=True))  # log_softmax
     idx = lp.argmax(1)
     chars, probs, last = [], [], BLANK
+    fgs, bgs = [], []
     for t in range(len(idx)):
         c = int(idx[t])
         if c != last and c != BLANK:
             ch = dictionary[c]
-            chars.append(' ' if ch == '<SP>' else ch)
+            sp = ch == '<SP>'
+            chars.append(' ' if sp else ch)
             probs.append(lp[t, c])
+            if colors is not None and not sp:
+                cv = np.clip(colors[t], 0.0, 1.0)
+                fgs.append(cv[:3]); bgs.append(cv[3:6])
         last = c
-    return ''.join(chars), (float(np.exp(np.mean(probs))) if probs else 0.0)
+    text = ''.join(chars)
+    prob = float(np.exp(np.mean(probs))) if probs else 0.0
+    if colors is None:
+        return text, prob
+    fg = tuple(int(round(v * 255)) for v in (np.mean(fgs, axis=0) if fgs else (0.0, 0.0, 0.0)))
+    bg = tuple(int(round(v * 255)) for v in (np.mean(bgs, axis=0) if bgs else (1.0, 1.0, 1.0)))
+    return text, prob, fg, bg
 
 
 def find_font():

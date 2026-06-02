@@ -41,10 +41,10 @@ def ocr_all(sess, dic, rgb, quads):
         if reg is None or reg.shape[1] < 2:
             continue
         x = np.transpose((reg.astype(np.float32) - 127.5) / 127.5, (2, 0, 1))[None]
-        cl, _ = sess.run(["char_logits", "color"], {"image": x})
-        t, _ = ctc_decode(cl[0], dic)
+        cl, col = sess.run(["char_logits", "color"], {"image": x})
+        t, _, fg, bg = ctc_decode(cl[0], dic, col[0])
         if t.strip():
-            out.append({"dir": d, "text": t, "quad": np.array(b).tolist()})
+            out.append({"dir": d, "text": t, "quad": np.array(b).tolist(), "fg": list(fg), "bg": list(bg)})
     return out
 
 
@@ -87,6 +87,9 @@ def group(res):
             "bbox": [min(bb[i][0] for i in mem), min(bb[i][1] for i in mem),
                      max(bb[i][2] for i in mem), max(bb[i][3] for i in mem)],
             "quads": [res[i]["quad"] for i in mem],
+            # region 色＝各成員行平均（對齊 m-i-t update_font_colors 的逐行平均）
+            "fg": [int(np.mean([res[i]["fg"][k] for i in mem])) for k in range(3)],
+            "bg": [int(np.mean([res[i]["bg"][k] for i in mem])) for k in range(3)],
         })
     return regions
 
@@ -144,16 +147,18 @@ def inpaint(sess, rgb, regions):
 def typeset(rgb, regions):
     im = Image.fromarray(rgb)
     dr = ImageDraw.Draw(im)
+    npimg = np.asarray(im)
     for r in regions:
         cht = r.get("cht", "")
         x0, y0, x1, y1 = r["bbox"]
         if (x1 - x0) < 8 or (y1 - y0) < 8 or ts.should_filter(r.get("jp", ""), cht, ts.FILTER_TEXT):
             continue
         tb = (x0, y0, x1, y1)
+        fg, bg = ts.resolve_colors(npimg, tb, r.get("fg") or (0, 0, 0), r.get("bg") or (255, 255, 255))
         if ts.is_cjk(cht):
-            ts.draw_v(im, dr, cht, tb)
+            ts.draw_v(im, dr, cht, tb, fg, bg)
         else:
-            ts.draw_h(dr, cht, tb)
+            ts.draw_h(dr, cht, tb, fg, bg)
     return im
 
 
@@ -174,7 +179,8 @@ def main():
         cleaned = inpaint(lama, rgb, regions)
         # 快取中間結果，之後可只重跑排版（retypeset.py）不必重打 DeepSeek
         Image.fromarray(cleaned).save(os.path.join(OUT, f"inpainted_{name}.png"))
-        json.dump([{"dir": r["dir"], "jp": r["jp"], "n": r["n"], "bbox": r["bbox"], "cht": r.get("cht", "")} for r in regions],
+        json.dump([{"dir": r["dir"], "jp": r["jp"], "n": r["n"], "bbox": r["bbox"], "cht": r.get("cht", ""),
+                    "fg": r.get("fg"), "bg": r.get("bg")} for r in regions],
                   open(os.path.join(OUT, f"cache_{name}.json"), "w", encoding="utf-8"), ensure_ascii=False)
         final = typeset(cleaned, regions)
         dst = os.path.join(OUT, f"final_{name}.png")

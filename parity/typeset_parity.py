@@ -5,6 +5,8 @@ M3 排版 parity（純文字框，可靠）：定位 + 大小都用文字框，�
 用法：python3 typeset_parity.py [v|h|auto]
 """
 import os, sys, json, math, re
+import numpy as np
+import cv2
 from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import translate_parity as tp
@@ -18,11 +20,68 @@ ROTATE = set("ー－—―‐~〜～…‥（）()「」『』【】〔〕［］
 EXP_W, EXP_H = 1.3, 1.5  # 文字框放大倍率（寬 / 直欄高度）
 COL_TRIM = 2             # 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
 FILTER_TEXT = None       # config.filter_text：regex 命中譯文則濾掉該區（預設不啟用）
+COLOR_MODE = "auto"      # 文字色：auto（預設，取去字後背景亮度→黑/白字，最穩）| mono | polarity | hue
+BG_DARK = 110            # auto：去字後背景平均亮度 < 此值＝暗底 → 白字
 
 
 def is_cjk(text):
     return any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF
                or 0x3400 <= ord(c) <= 0x4DBF or 0xFF00 <= ord(c) <= 0xFFEF for c in text)
+
+
+def color_difference(rgb1, rgb2):
+    """CIE76 ΔE（cv2 LAB，L 權重 0.392）。對齊 m-i-t utils/generic2.py:color_difference。"""
+    c1 = np.array(rgb1, np.uint8).reshape(1, 1, 3)
+    c2 = np.array(rgb2, np.uint8).reshape(1, 1, 3)
+    d = cv2.cvtColor(c1, cv2.COLOR_RGB2LAB).astype(np.float32) - cv2.cvtColor(c2, cv2.COLOR_RGB2LAB).astype(np.float32)
+    d[..., 0] *= 0.392
+    return float(np.linalg.norm(d, axis=2).item())
+
+
+def fg_bg_compare(fg, bg):
+    """對齊 m-i-t rendering/__init__.py:fg_bg_compare：fg/bg 太近就把 bg 翻白(fg暗)/黑(fg亮)。"""
+    fg = tuple(int(v) for v in fg)
+    bg = tuple(int(v) for v in bg)
+    if color_difference(fg, bg) < 30:
+        bg = (255, 255, 255) if (sum(fg) / 3) <= 127 else (0, 0, 0)
+    return fg, bg
+
+
+def _lum(c):
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+def auto_colors(npimg, bbox):
+    """取去字後背景在 bbox 內的平均亮度 → 暗底白字、亮底黑字（最穩，保證可讀）。"""
+    x0, y0, x1, y1 = (int(v) for v in bbox)
+    crop = npimg[max(0, y0):max(y0 + 1, y1), max(0, x0):max(x0 + 1, x1)]
+    if crop.size == 0:
+        return (0, 0, 0), (255, 255, 255)
+    lum = 0.299 * crop[..., 0] + 0.587 * crop[..., 1] + 0.114 * crop[..., 2]
+    return ((255, 255, 255), (0, 0, 0)) if lum.mean() < BG_DARK else ((0, 0, 0), (255, 255, 255))
+
+
+def resolve_colors(npimg, bbox, fg, bg):
+    """依 COLOR_MODE 回傳 (fill, outline)。auto 用背景亮度；其餘走 text_colors（OCR color head）。"""
+    if COLOR_MODE == "auto":
+        return auto_colors(npimg, bbox)
+    return text_colors(fg, bg)
+
+
+def text_colors(fg, bg):
+    """回傳 (fill, outline)。COLOR_MODE：
+       mono     = 一律黑字白邊（不看 color head）
+       polarity = color head 只判明暗極性 → 純黑或純白字（乾淨、看齊 m-i-t；白底黑字/黑底白字都對）
+       hue      = 保留 m-i-t 原始色相 + fg_bg_compare 安全網（忠實，但彩底易染濁）"""
+    fg = tuple(int(v) for v in fg)
+    bg = tuple(int(v) for v in bg)
+    if COLOR_MODE == "mono":
+        return (0, 0, 0), (255, 255, 255)
+    if COLOR_MODE == "hue":
+        return fg_bg_compare(fg, bg)
+    lf, lb = _lum(fg), _lum(bg)
+    dark = lf < lb if abs(lf - lb) > 20 else lf < 128
+    return ((0, 0, 0), (255, 255, 255)) if dark else ((255, 255, 255), (0, 0, 0))
 
 
 def should_filter(jp, cht, filter_text=None):
@@ -39,11 +98,11 @@ def should_filter(jp, cht, filter_text=None):
     return False
 
 
-def blit_rotated(im, ch, font, cx, cy, size):
+def blit_rotated(im, ch, font, cx, cy, size, fg=(0, 0, 0), bg=(255, 255, 255)):
     pad = int(size * 1.6)
     tmp = Image.new("RGBA", (pad * 2, pad * 2), (0, 0, 0, 0))
-    ImageDraw.Draw(tmp).text((pad, pad), ch, font=font, fill=(0, 0, 0), anchor="mm",
-                             stroke_width=2, stroke_fill=(255, 255, 255))
+    ImageDraw.Draw(tmp).text((pad, pad), ch, font=font, fill=tuple(fg), anchor="mm",
+                             stroke_width=2, stroke_fill=tuple(bg))
     im.paste(tmp.rotate(-90, expand=False), (int(cx - pad), int(cy - pad)), tmp.rotate(-90, expand=False))
 
 
@@ -60,7 +119,7 @@ def wrap_h(text, font, maxw):
     return lines
 
 
-def draw_v(im, dr, text, textbox):
+def draw_v(im, dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
     tx0, ty0, tx1, ty1 = textbox
     tw, th = tx1 - tx0, ty1 - ty0
     bw = tw * EXP_W
@@ -86,15 +145,15 @@ def draw_v(im, dr, text, textbox):
         for ch in chars[c * cpc:(c + 1) * cpc]:
             cyc = cy + lh / 2
             if ch in ROTATE:
-                blit_rotated(im, ch, font, cx, cyc, size)
+                blit_rotated(im, ch, font, cx, cyc, size, fg, bg)
             else:
                 w = font.getlength(ch)
-                dr.text((cx - w / 2, cyc - size * 0.62), ch, font=font, fill=(0, 0, 0),
-                        stroke_width=2, stroke_fill=(255, 255, 255))
+                dr.text((cx - w / 2, cyc - size * 0.62), ch, font=font, fill=tuple(fg),
+                        stroke_width=2, stroke_fill=tuple(bg))
             cy += lh
 
 
-def draw_h(dr, text, textbox):
+def draw_h(dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
     tx0, ty0, tx1, ty1 = textbox
     tw, th = tx1 - tx0, ty1 - ty0
     bw = tw * EXP_W
@@ -110,24 +169,26 @@ def draw_h(dr, text, textbox):
     tcx = (tx0 + tx1) / 2
     ty = ty0
     for ln in lines:
-        dr.text((tcx - font.getlength(ln) / 2, ty), ln, font=font, fill=(0, 0, 0),
-                stroke_width=2, stroke_fill=(255, 255, 255))
+        dr.text((tcx - font.getlength(ln) / 2, ty), ln, font=font, fill=tuple(fg),
+                stroke_width=2, stroke_fill=tuple(bg))
         ty += lh
 
 
 def main():
     im = Image.open(INPAINTED).convert("RGB")
     dr = ImageDraw.Draw(im)
+    npimg = np.array(im)
     for r in json.load(open(REGIONS, encoding="utf-8")):
         cht = r.get("cht", "")
         x0, y0, x1, y1 = r["bbox"]
         if (x1 - x0) < 8 or (y1 - y0) < 8 or should_filter(r.get("jp", ""), cht, FILTER_TEXT):
             continue
+        fg, bg = resolve_colors(npimg, (x0, y0, x1, y1), r.get("fg") or (0, 0, 0), r.get("bg") or (255, 255, 255))
         mode = "v" if (MODE == "auto" and is_cjk(cht)) else ("h" if MODE == "auto" else MODE)
         if mode == "v":
-            draw_v(im, dr, cht, (x0, y0, x1, y1))
+            draw_v(im, dr, cht, (x0, y0, x1, y1), fg, bg)
         else:
-            draw_h(dr, cht, (x0, y0, x1, y1))
+            draw_h(dr, cht, (x0, y0, x1, y1), fg, bg)
     im.save(os.path.join(OUT, f"translated_{MODE}.png"))
     print(f"排版完成（{MODE}）")
 
