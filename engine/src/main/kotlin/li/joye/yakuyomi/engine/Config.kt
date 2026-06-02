@@ -32,6 +32,7 @@ data class OcrConfig(
     val textHeight: Int = 48,         // 48px CTC
     val minTextLength: Int = 0,       // config.ocr.min_text_length
     val ignoreBubble: Int = 0,        // 〔設定〕config.ocr.ignore_bubble：1–50 開啟，跳過彩色/非氣泡 SFX 類文字（預設 0＝關）
+    val minProb: Float = 0.5f,        // config.ocr.prob：OCR 平均信心 < 此值就丟（剃除低信心誤讀；m-i-t 預設 0.5）
 )
 
 data class TranslatorConfig(

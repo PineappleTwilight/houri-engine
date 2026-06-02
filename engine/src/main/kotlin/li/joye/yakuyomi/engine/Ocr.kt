@@ -64,7 +64,8 @@ class Ocr(
                         val logits = res.get(OUT_LOGITS).orElseThrow {
                             IllegalStateException("缺輸出 $OUT_LOGITS")
                         } as OnnxTensor
-                        line.text = ctcDecode(logits)
+                        val (text, prob) = ctcDecode(logits)
+                        if (prob >= cfg.minProb) line.text = text  // 低信心誤讀 → 丟（text 留空）
                     }
                 }
             } catch (t: Throwable) {
@@ -173,8 +174,8 @@ class Ocr(
         )
     }
 
-    /** greedy CTC（blank=0、收合重複），對齊 decode_ctc_top1。 */
-    private fun ctcDecode(logits: OnnxTensor): String {
+    /** greedy CTC（blank=0、收合重複）+ 平均信心，對齊 decode_ctc_top1。回傳 (text, prob)。 */
+    private fun ctcDecode(logits: OnnxTensor): Pair<String, Float> {
         val shape = (logits.info as TensorInfo).shape // [1, T, dict]
         val t = shape[1].toInt()
         val d = shape[2].toInt()
@@ -182,6 +183,8 @@ class Ocr(
         logits.floatBuffer.get(arr, 0, t * d)
         val sb = StringBuilder()
         var last = BLANK
+        var logpSum = 0.0
+        var nChars = 0
         for (ti in 0 until t) {
             val base = ti * d
             var best = 0
@@ -193,10 +196,16 @@ class Ocr(
             if (best != last && best != BLANK) {
                 val ch = dictionary[best]
                 sb.append(if (ch == "<SP>") " " else ch)
+                // top-1 的 log_softmax＝bestV − logsumexp(row)＝−ln(Σ exp(x−bestV))
+                var s = 0.0
+                for (c in 0 until d) s += Math.exp((arr[base + c] - bestV).toDouble())
+                logpSum += -Math.log(s)
+                nChars++
             }
             last = best
         }
-        return sb.toString()
+        val prob = if (nChars > 0) Math.exp(logpSum / nChars).toFloat() else 0f
+        return sb.toString() to prob
     }
 
     /** SFX/非氣泡文字判定（ported from utils/bubble.py:is_ignore @ d5a3eee）：邊框混色（非乾淨氣泡底）或彩色 → 跳過。 */

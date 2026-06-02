@@ -21,6 +21,7 @@ MODELS = os.path.join(ROOT, "engine/src/main/assets/models")
 ALPHABET = "/tmp/ocr-ctc/alphabet-all-v5.txt"
 INPUT, BOX_THRESH, TEXT_H, LAMA, WIN, GAP, FS_RATIO = 1024, 0.6, 48, 512, 1.7, 1.0, 1.5
 IGNORE_BUBBLE = 0  # config.ocr.ignore_bubble：1–50 開啟，跳過彩色/非氣泡 SFX 類文字（預設 0＝關）
+OCR_PROB = 0.5     # config.ocr.prob：OCR 平均信心 < 此值就丟（剃除低信心誤讀；m-i-t 預設 0.5）
 
 
 def detect(sess, seg_rep, rgb):
@@ -45,8 +46,8 @@ def ocr_all(sess, dic, rgb, quads):
             continue
         x = np.transpose((reg.astype(np.float32) - 127.5) / 127.5, (2, 0, 1))[None]
         cl, col = sess.run(["char_logits", "color"], {"image": x})
-        t, _, fg, bg = ctc_decode(cl[0], dic, col[0])
-        if t.strip():
+        t, prob, fg, bg = ctc_decode(cl[0], dic, col[0])
+        if t.strip() and prob >= OCR_PROB:  # 低信心誤讀（如把 SFX 框成文字）剃除
             out.append({"dir": d, "text": t, "quad": np.array(b).tolist(), "fg": list(fg), "bg": list(bg)})
     return out
 
