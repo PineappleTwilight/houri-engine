@@ -23,12 +23,11 @@ class Detector(
     private val session: OrtSession
 
     init {
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8) // 用滿核數（原本固定 4）
         val options = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(threads)
+            setIntraOpNumThreads(NUM_THREADS)
             try {
-                addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
-                Log.i(TAG, "XNNPACK 已啟用（threads=$threads）")
+                addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
+                Log.i(TAG, "XNNPACK 已啟用")
             } catch (t: Throwable) {
                 Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
             }
@@ -137,6 +136,7 @@ class Detector(
 
     companion object {
         private const val TAG = "Detector"
+        private const val NUM_THREADS = 4
         private const val OUT_DET = "det" // 文字行圖（DB），channel 0 = 文字機率
     }
 }

@@ -25,11 +25,10 @@ class Inpainter(
     private val session: OrtSession
 
     init {
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8) // 用滿核數（原本固定 4）
         val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(threads)
+            setIntraOpNumThreads(NUM_THREADS)
             try {
-                addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+                addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
             } catch (t: Throwable) {
                 Log.w(TAG, "XNNPACK 不可用：${t.message}")
             }
@@ -181,6 +180,7 @@ class Inpainter(
 
     companion object {
         private const val TAG = "Inpainter"
+        private const val NUM_THREADS = 4
         private const val INPUT_IMAGE = "image"
         private const val INPUT_MASK = "mask"
         private const val OUT_NAME = "output"
