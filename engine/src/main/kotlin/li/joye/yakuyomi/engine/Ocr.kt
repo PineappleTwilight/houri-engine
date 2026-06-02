@@ -39,11 +39,12 @@ class Ocr(
     private val session: OrtSession
 
     init {
+        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8) // 用滿核數（原本固定 4）
         val options = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(NUM_THREADS)
+            setIntraOpNumThreads(threads)
             if (cfg.useXnnpack) {
                 try {
-                    addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
+                    addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
                 } catch (t: Throwable) {
                     Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
                 }
@@ -301,7 +302,6 @@ class Ocr(
 
     companion object {
         private const val TAG = "Ocr"
-        private const val NUM_THREADS = 4
         private const val BLANK = 0
         private const val OUT_LOGITS = "char_logits"
         private const val PAD_MARGIN = 16  // 每條右側白邊：讓 CTC 有 context、不截尾字
