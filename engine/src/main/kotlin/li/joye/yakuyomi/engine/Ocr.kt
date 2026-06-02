@@ -22,7 +22,9 @@ import kotlin.math.roundToInt
  *   裁切：sortPnts 定直/橫書 + get_transformed_region（findHomography→warpPerspective→48px 條，直書轉90°）
  *         此處用 Android Matrix.setPolyToPoly 取代 cv2 透視（§6）。
  *   前處理：(x-127.5)/127.5、NCHW、RGB。
- *   解碼：greedy CTC（blank=0、收合重複+去blank）→ 查字典；顏色 head 留 M3。
+ *   解碼：greedy CTC（blank=0、收合重複+去blank）→ 查字典。
+ *   ignore_bubble（cfg.ignoreBubble，ported from utils/bubble.py）：跳過彩色/非氣泡 SFX 類文字。
+ *   顏色 head 不採用（彩底太雜）；文字色改由 [Renderer] 取去字後背景亮度判黑/白。
  */
 class Ocr(
     modelBytes: ByteArray,
@@ -52,6 +54,10 @@ class Ocr(
             val (ordered, isV) = sortPnts(line.quad)
             line.direction = if (isV) "v" else "h"
             val strip = transformedRegion(page, ordered, isV, cfg.textHeight) ?: continue
+            if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
+                strip.recycle()  // 彩色/非氣泡 SFX 類文字 → 跳過（不 OCR、不譯、不去字）
+                continue
+            }
             try {
                 stripToTensor(strip).use { input ->
                     session.run(mapOf(inputName to input)).use { res ->
@@ -191,6 +197,44 @@ class Ocr(
             last = best
         }
         return sb.toString()
+    }
+
+    /** SFX/非氣泡文字判定（ported from utils/bubble.py:is_ignore @ d5a3eee）：邊框混色（非乾淨氣泡底）或彩色 → 跳過。 */
+    private fun isIgnore(strip: Bitmap, ignoreBubble: Int): Boolean {
+        val w = strip.width
+        val h = strip.height
+        if (w < 4 || h < 4) return false
+        val px = IntArray(w * h)
+        strip.getPixels(px, 0, w, 0, 0, w, h)
+        fun dark(i: Int): Boolean {
+            val p = px[i]
+            return 0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF) < 127f
+        }
+        var black = 0
+        var total = 0
+        for (y in 0..1) for (x in 0 until w) { if (dark(y * w + x)) black++; total++ }
+        for (y in h - 2 until h) for (x in 0 until w) { if (dark(y * w + x)) black++; total++ }
+        for (y in 2 until h - 2) for (x in 0..1) { if (dark(y * w + x)) black++; total++ }
+        for (y in 2 until h - 2) for (x in w - 2 until w) { if (dark(y * w + x)) black++; total++ }
+        val ratio = if (total > 0) black.toDouble() / total * 100 else 0.0
+        if (ratio >= ignoreBubble && ratio <= 100 - ignoreBubble) return true
+        return checkColor(px)
+    }
+
+    /** 彩色文字判定（ported from utils/bubble.py:check_color）：>10 個非灰階像素 → True。 */
+    private fun checkColor(px: IntArray): Boolean {
+        var n = 0
+        for (p in px) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val gray = 0.299 * r + 0.587 * g + 0.114 * b
+            val dr = r - gray
+            val dg = g - gray
+            val db = b - gray
+            if (dr * dr + dg * dg + db * db > 100) { n++; if (n > 10) return true }
+        }
+        return false
     }
 
     override fun close() {

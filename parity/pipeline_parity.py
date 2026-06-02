@@ -14,12 +14,13 @@ import translate_parity as tp
 import typeset_parity as ts
 import opencc
 from ctd_reference import letterbox, import_seg_rep
-from ocr_parity import sort_pnts, transformed_region, ctc_decode
+from ocr_parity import sort_pnts, transformed_region, ctc_decode, is_ignore
 
 ROOT, OUT = tp.ROOT, tp.OUT
 MODELS = os.path.join(ROOT, "engine/src/main/assets/models")
 ALPHABET = "/tmp/ocr-ctc/alphabet-all-v5.txt"
 INPUT, BOX_THRESH, TEXT_H, LAMA, WIN, GAP, FS_RATIO = 1024, 0.6, 48, 512, 1.7, 1.0, 1.5
+IGNORE_BUBBLE = 0  # config.ocr.ignore_bubble：1–50 開啟，跳過彩色/非氣泡 SFX 類文字（預設 0＝關）
 
 
 def detect(sess, seg_rep, rgb):
@@ -39,6 +40,8 @@ def ocr_all(sess, dic, rgb, quads):
         d = "v" if is_v else "h"
         reg = transformed_region(rgb, pts, d, TEXT_H)
         if reg is None or reg.shape[1] < 2:
+            continue
+        if is_ignore(reg, IGNORE_BUBBLE):  # 跳過彩色/非氣泡 SFX 類文字（預設關）
             continue
         x = np.transpose((reg.astype(np.float32) - 127.5) / 127.5, (2, 0, 1))[None]
         cl, col = sess.run(["char_logits", "color"], {"image": x})

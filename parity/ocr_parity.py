@@ -63,6 +63,31 @@ def transformed_region(img, pts, direction, th):
     return region
 
 
+def check_color(region_img):
+    """彩色文字判定（對齊 m-i-t utils/bubble.py:check_color）：>10 個非灰階像素 → True。"""
+    img = region_img.astype(np.float32)
+    gray = img @ np.array([0.299, 0.587, 0.114], np.float32)
+    d = ((img - gray[..., None]) ** 2).sum(-1)
+    return int((d > 100).sum()) > 10
+
+
+def is_ignore(region_img, ignore_bubble=0):
+    """SFX/非氣泡文字判定（對齊 m-i-t utils/bubble.py:is_ignore）：
+       邊框 2px 黑比例落在 [ignore_bubble, 100-ignore_bubble] 之間（混色＝非乾淨氣泡），或彩色文字 → 跳過。
+       ignore_bubble 有效範圍 1–50（其他值＝關閉）。"""
+    if ignore_bubble < 1 or ignore_bubble > 50:
+        return False
+    _, b = cv2.threshold(region_img, 127, 255, cv2.THRESH_BINARY)
+    h, w = b.shape[:2]
+    val0 = total = 0
+    for sl in (b[0:2, 0:w], b[h - 2:h, 0:w], b[2:h - 2, 0:2], b[2:h - 2, w - 2:w]):
+        val0 += int((sl.ravel() == 0).sum()); total += sl.size
+    ratio = round(val0 / total, 6) * 100 if total else 0
+    if ignore_bubble <= ratio <= 100 - ignore_bubble:
+        return True
+    return check_color(region_img)
+
+
 def ctc_decode(logits, dictionary, colors=None):
     """greedy CTC（blank=0、收合重複+去blank）。
     傳入 colors（[T,6]＝fg_rgb+bg_rgb，未 clamp）則回傳 (text, prob, fg, bg)；
