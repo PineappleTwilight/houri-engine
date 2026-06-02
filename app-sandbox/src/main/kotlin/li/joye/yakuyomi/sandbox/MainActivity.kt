@@ -20,15 +20,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
 import li.joye.yakuyomi.engine.EngineConfig
-import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.Inpainter
 import li.joye.yakuyomi.engine.InpainterConfig
 import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
 import li.joye.yakuyomi.engine.OcrConfig
+import li.joye.yakuyomi.engine.PageResult
+import li.joye.yakuyomi.engine.Pipeline
 import li.joye.yakuyomi.engine.RenderConfig
-import li.joye.yakuyomi.engine.Renderer
-import li.joye.yakuyomi.engine.TextFilter
 import li.joye.yakuyomi.engine.TextOrientation
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
@@ -119,36 +118,29 @@ class MainActivity : AppCompatActivity() {
                 val inp = Inpainter(ensureLocal(lamaF), cfg.inpainter)
                 val key = BuildConfig.DEEPSEEK_API_KEY
                 val translator = if (key.isNotBlank()) LlmTranslator(key, cfg.translator) else null
+                val pipeline = Pipeline(det, ocr, translator, inp, cfg, tf) // 引擎收斂：整條 pipeline 進 :engine
                 log("✓ 模型就緒，開跑")
                 try {
                     var total = 0L
                     DEMOS.forEachIndexed { i, asset ->
                         val tag = "demo${i + 1}"
                         val page = loadAssetBitmap(asset)
-                        val t0 = System.currentTimeMillis()
-                        var ms = System.currentTimeMillis()
-                        val detection = det.detect(page); val detMs = System.currentTimeMillis() - ms
-                        val lines = detection.lines
-                        ms = System.currentTimeMillis()
-                        ocr.recognize(page, lines); val ocrMs = System.currentTimeMillis() - ms
-                        val regions = Grouping.group(lines)
-                        var trMs = 0L
-                        if (translator != null && regions.isNotEmpty()) {
-                            ms = System.currentTimeMillis()
-                            val cht = translator.translate(regions.map { it.sourceText })
-                            regions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
-                            trMs = System.currentTimeMillis() - ms
+                        when (val r = pipeline.translatePage(page)) { // §11：略過/失敗都保留原圖、不覆蓋
+                            is PageResult.Translated -> {
+                                val s = r.stats; total += s.totalMs
+                                log("[$tag] 偵測${s.detectMs} OCR${s.ocrMs} 譯${s.translateMs} 去字${s.inpaintMs} 排版${s.renderMs}｜頁${s.totalMs} ms｜${s.lines}行${s.regions}區留${s.kept}")
+                                addImage("$tag 成品（$modeLabel）", r.page)
+                            }
+                            is PageResult.Skipped -> {
+                                val s = r.stats; total += s.totalMs
+                                log("[$tag] 略過：${r.reason}｜偵測${s.detectMs} OCR${s.ocrMs}｜${s.lines}行${s.regions}區（保留原圖、不覆蓋）")
+                                addImage("$tag 原圖（略過：${r.reason}）", page)
+                            }
+                            is PageResult.Failed -> {
+                                log("[$tag] ✗ 失敗：${r.reason}（保留原圖、不覆蓋、可重試）")
+                                addImage("$tag 原圖（失敗：${r.reason}）", page)
+                            }
                         }
-                        // 正式過濾：丟空白/數字/譯==原/regex 命中的區（誤判/未譯不去字、保留原圖）
-                        val kept = if (translator != null) TextFilter.apply(regions, cfg.translator.filterText) else regions
-                        ms = System.currentTimeMillis()
-                        val cleaned = inp.inpaint(page, kept, detection.textMask); val inMs = System.currentTimeMillis() - ms
-                        ms = System.currentTimeMillis()
-                        val finalPage = Renderer.render(cleaned, kept, cfg.render, tf); val rnMs = System.currentTimeMillis() - ms
-                        val pageMs = System.currentTimeMillis() - t0
-                        total += pageMs
-                        log("[$tag] 偵測$detMs OCR$ocrMs 譯$trMs 去字$inMs 排版$rnMs｜頁$pageMs ms｜${lines.size}行${regions.size}區留${kept.size}")
-                        addImage("$tag 成品（$modeLabel）", finalPage)
                     }
                     log("★ ${DEMOS.size} 頁總計 $total ms（去字=$modeLabel）平均 ${total / DEMOS.size} ms/頁")
                 } finally {
