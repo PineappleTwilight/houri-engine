@@ -30,17 +30,23 @@ class LlmTranslator(
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /** 最近一次失敗原因（診斷用；成功為 null）。 */
+    var lastError: String? = null
+        private set
+
     override suspend fun translate(queries: List<String>): List<String> {
         if (queries.isEmpty()) return emptyList()
         return try {
             val raw = request(buildMessages(queries))
             val parsed = parse(raw)
+            lastError = null
             queries.mapIndexed { i, q ->
                 val tr = parsed[i + 1]?.takeIf { it.isNotBlank() }
                 if (tr != null) (postProcess?.invoke(tr) ?: tr) else q
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "翻譯失敗，整批保留原文：${t.message}")
+            lastError = "${t.javaClass.simpleName}: ${t.message}"
+            Log.e(TAG, "翻譯失敗，整批保留原文：${t.message}", t)
             queries
         }
     }

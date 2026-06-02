@@ -1,11 +1,23 @@
 package li.joye.yakuyomi.sandbox
 
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import android.view.View
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -16,86 +28,218 @@ import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.Inpainter
 import li.joye.yakuyomi.engine.LlmTranslator
 import li.joye.yakuyomi.engine.Ocr
+import li.joye.yakuyomi.engine.OcrConfig
+import li.joye.yakuyomi.engine.Pt
 import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.Renderer
 import li.joye.yakuyomi.engine.TextFilter
+import li.joye.yakuyomi.engine.TextLine
 import li.joye.yakuyomi.engine.TextOrientation
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
 /**
- * 端到端 sandbox：偵測 → OCR(日) → 行合併 → 翻譯(繁中) → 去字(LaMa) → 排版 → 成品頁。
- * 引擎參數走 EngineConfig（這裡只覆寫直/橫排，其餘用預設；未來設定頁覆寫更多）。
+ * 診斷 sandbox（BYOM）：模型不內建，由使用者用 SAF 選一個含 *.onnx 的資料夾，記住偏好。
+ * 逐步印 log（載入/各關數量/翻譯錯誤/OCR 樣本）+ 每步出圖（原圖→偵測→OCR→去字→成品），可滾動截圖。
+ * 診斷期 OCR 信心門檻設 0（看原始輸出）。字典/字型/測試頁仍在 assets。
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private val prefs by lazy { getSharedPreferences("yakuyomi", MODE_PRIVATE) }
+
+    private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            prefs.edit().putString(PREF_TREE, uri.toString()).apply()
+            binding.logText.text = "已記住資料夾：${DocumentFile.fromTreeUri(this, uri)?.name}\n按「翻譯這一頁（診斷）」開始"
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        binding.pickFolderButton.setOnClickListener { folderPicker.launch(null) }
         binding.detectButton.setOnClickListener { runPipeline() }
+        val t = currentTree()
+        binding.logText.text =
+            if (t == null) "① 先按「選擇模型資料夾」，選含 3 個 *.onnx 的資料夾（OneDrive/下載皆可）\n② 再按「翻譯這一頁（診斷）」"
+            else "模型資料夾：${t.name}（已記住，可直接按翻譯）"
     }
+
+    private fun currentTree(): DocumentFile? {
+        val s = prefs.getString(PREF_TREE, null) ?: return null
+        return runCatching { DocumentFile.fromTreeUri(this, Uri.parse(s)) }.getOrNull()
+    }
+
+    private fun findOnnx(tree: DocumentFile, vararg keywords: String): DocumentFile? =
+        tree.listFiles().firstOrNull { f ->
+            val n = f.name?.lowercase() ?: return@firstOrNull false
+            n.endsWith(".onnx") && keywords.any { n.contains(it) }
+        }
+
+    private fun readUri(uri: Uri): ByteArray =
+        contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("讀取失敗 $uri")
 
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
-        binding.statusText.text = "載入模型 / 推論中…（首次較久）"
-        val cfg = EngineConfig(
-            render = RenderConfig(
-                orientation = if (binding.verticalSwitch.isChecked) {
-                    TextOrientation.VERTICAL
-                } else {
-                    TextOrientation.HORIZONTAL
-                },
-            ),
-        )
+        val vertical = binding.verticalSwitch.isChecked
         lifecycleScope.launch(Dispatchers.Default) {
-            val result = runCatching {
+            clearOutputs()
+            val cfg = EngineConfig(
+                ocr = OcrConfig(minProb = 0f), // 【診斷】先不丟低信心，看 OCR 原始輸出
+                render = RenderConfig(
+                    orientation = if (vertical) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL,
+                ),
+            )
+            try {
+                val tree = currentTree()
+                if (tree == null) {
+                    log("✗ 請先按「選擇模型資料夾」")
+                    return@launch
+                }
+                val detF = findOnnx(tree, "detect", "comictext")
+                val ocrF = findOnnx(tree, "ocr")
+                val lamaF = findOnnx(tree, "lama")
+                log("模型資料夾：${tree.name}")
+                log("  detector: ${detF?.name ?: "✗ 缺"}")
+                log("  ocr     : ${ocrF?.name ?: "✗ 缺"}")
+                log("  lama    : ${lamaF?.name ?: "✗ 缺"}")
+                if (detF == null || ocrF == null || lamaF == null) {
+                    log("✗ 模型不齊（資料夾要有含 detect/ocr/lama 的 3 個 .onnx），停止")
+                    return@launch
+                }
+
+                log("▶ 開始")
                 val page = loadAssetBitmap(TEST_PAGE)
+                log("✓ 載入測試頁 ${page.width}×${page.height}")
+                addImage("① 原圖", page)
 
-                val detBytes = assets.open(DETECTOR_MODEL).use { it.readBytes() }
+                log("… 載入 detector（${detF.name}）")
+                val detBytes = readUri(detF.uri)
+                log("✓ detector ${detBytes.size / 1048576}MB 讀入")
                 val lines = Detector(detBytes, cfg.detector).use { it.detect(page) }
+                log("✓ 偵測完成：${lines.size} 框")
+                addImage("② 偵測框（${lines.size}）", overlayBoxes(page, lines))
 
+                log("… 載入 OCR（${ocrF.name}）+ 字典 + 字型")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
-                val ocrBytes = assets.open(OCR_MODEL).use { it.readBytes() }
+                val ocrBytes = readUri(ocrF.uri)
+                log("✓ OCR ${ocrBytes.size / 1048576}MB、字典 ${alphabet.size} 條")
+                val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
                 Ocr(ocrBytes, alphabet, cfg.ocr).use { it.recognize(page, lines) }
+                val ocrCount = lines.count { it.text.isNotBlank() }
+                log("✓ OCR：$ocrCount/${lines.size} 行有字")
+                log("  樣本：" + lines.take(5).joinToString(" ┊ ") { it.text.ifBlank { "∅" } })
+                addImage("③ OCR（綠=有字 紅=無）", overlayOcr(page, lines, tf))
 
                 val regions = Grouping.group(lines)
+                log("✓ 分區：${regions.size} 區")
 
                 val key = BuildConfig.DEEPSEEK_API_KEY
-                val translated = key.isNotBlank() && regions.isNotEmpty()
-                if (translated) {
-                    withContext(Dispatchers.Main) { binding.statusText.text = "翻譯中（雲端）…" }
-                    // 繁中靠 LLM prompt（toLangName 指定台灣繁體）；不做 OpenCC 後處理，偶有誤差可接受
-                    val cht = LlmTranslator(key, cfg.translator)
-                        .translate(regions.map { it.sourceText })
+                if (key.isBlank()) {
+                    log("⚠ 無 API key，跳過翻譯（排版日文）")
+                } else {
+                    log("… 翻譯中（DeepSeek，${regions.size} 區）")
+                    val tr = LlmTranslator(key, cfg.translator)
+                    val cht = tr.translate(regions.map { it.sourceText })
                     regions.forEachIndexed { i, r -> r.translatedText = cht.getOrElse(i) { r.sourceText } }
+                    if (tr.lastError != null) log("✗ 翻譯失敗：${tr.lastError}") else log("✓ 翻譯回應 OK")
                 }
+                val tcount = regions.count { it.translatedText.isNotBlank() && it.translatedText != it.sourceText }
+                log("  譯成功 $tcount/${regions.size}")
 
-                // 翻譯後過濾（m-i-t filter chain）：丟掉空白/數字/regex/未譯區 → 不去字、不排版、保留原圖
-                val renderRegions =
-                    if (translated) TextFilter.apply(regions, cfg.translator.filterText) else regions
+                log("… 載入 LaMa（${lamaF.name}）+ 去字")
+                val lamaBytes = readUri(lamaF.uri)
+                log("✓ LaMa ${lamaBytes.size / 1048576}MB 讀入")
+                val cleaned = Inpainter(lamaBytes, cfg.inpainter).use { it.inpaint(page, regions) }
+                log("✓ 去字完成")
+                addImage("④ 去字/塗白", cleaned)
 
-                withContext(Dispatchers.Main) { binding.statusText.text = "去字 + 排版…" }
-                val lamaBytes = assets.open(LAMA_MODEL).use { it.readBytes() }
-                val cleaned = Inpainter(lamaBytes, cfg.inpainter).use { it.inpaint(page, renderRegions) }
-                val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
-                val finalPage = Renderer.render(cleaned, renderRegions, cfg.render, tf)
-
-                Triple(finalPage, lines.size, renderRegions.size)
-            }
-            withContext(Dispatchers.Main) {
-                result.onSuccess { (finalPage, lineCount, regionCount) ->
-                    binding.imageView.setImageBitmap(finalPage)
-                    val keyMsg = if (BuildConfig.DEEPSEEK_API_KEY.isBlank()) "（無 key：排版日文）" else ""
-                    binding.statusText.text = "完成：$lineCount 行 → $regionCount 區，去字+排版 $keyMsg"
-                }.onFailure { t ->
-                    Log.e(TAG, "pipeline 失敗", t)
-                    binding.statusText.text = "失敗：${t.message}"
-                }
-                binding.detectButton.isEnabled = true
+                log("… 排版（診斷：未譯則排日文）")
+                val finalPage = Renderer.render(cleaned, regions, cfg.render, tf)
+                log("✓ 排版完成")
+                addImage("⑤ 成品", finalPage)
+                log("■ 全部完成")
+            } catch (t: Throwable) {
+                Log.e(TAG, "pipeline 失敗", t)
+                log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                withContext(Dispatchers.Main) { binding.detectButton.isEnabled = true }
             }
         }
+    }
+
+    private suspend fun log(msg: String) = withContext(Dispatchers.Main) {
+        binding.logText.append("$msg\n")
+        binding.scroll.post { binding.scroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private suspend fun addImage(label: String, bmp: Bitmap) = withContext(Dispatchers.Main) {
+        val lbl = TextView(this@MainActivity).apply {
+            text = label
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, 24, 0, 4)
+        }
+        val iv = ImageView(this@MainActivity).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            adjustViewBounds = true
+            setImageBitmap(scaledForView(bmp))
+        }
+        binding.container.addView(lbl)
+        binding.container.addView(iv)
+    }
+
+    /** 清掉上次的圖與 log（保留 pickFolder/detect/switch/logText 四個固定子 view）。 */
+    private suspend fun clearOutputs() = withContext(Dispatchers.Main) {
+        binding.logText.text = ""
+        while (binding.container.childCount > 4) binding.container.removeViewAt(4)
+    }
+
+    private fun scaledForView(src: Bitmap, maxW: Int = 1000): Bitmap {
+        if (src.width <= maxW) return src
+        val h = (src.height.toLong() * maxW / src.width).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(src, maxW, h, true)
+    }
+
+    private fun polyPath(quad: List<Pt>): Path = Path().apply {
+        if (quad.isEmpty()) return@apply
+        moveTo(quad[0].x, quad[0].y)
+        for (i in 1 until quad.size) lineTo(quad[i].x, quad[i].y)
+        close()
+    }
+
+    private fun overlayBoxes(page: Bitmap, lines: List<TextLine>): Bitmap {
+        val out = page.copy(Bitmap.Config.ARGB_8888, true)
+        val c = Canvas(out)
+        val p = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 5f; color = Color.RED; isAntiAlias = true }
+        for (ln in lines) c.drawPath(polyPath(ln.quad), p)
+        return out
+    }
+
+    private fun overlayOcr(page: Bitmap, lines: List<TextLine>, tf: Typeface?): Bitmap {
+        val out = page.copy(Bitmap.Config.ARGB_8888, true)
+        val c = Canvas(out)
+        val box = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 4f; isAntiAlias = true }
+        val halo = Paint().apply {
+            color = Color.WHITE; style = Paint.Style.FILL_AND_STROKE; strokeWidth = 6f
+            textSize = 30f; isAntiAlias = true; typeface = tf
+        }
+        val ink = Paint().apply { color = Color.rgb(0, 110, 0); textSize = 30f; isAntiAlias = true; typeface = tf }
+        for (ln in lines) {
+            val has = ln.text.isNotBlank()
+            box.color = if (has) Color.rgb(0, 170, 0) else Color.RED
+            c.drawPath(polyPath(ln.quad), box)
+            if (has && ln.quad.isNotEmpty()) {
+                val x = ln.quad.minOf { it.x }
+                val y = ln.quad.minOf { it.y } - 6f
+                c.drawText(ln.text, x, y, halo)
+                c.drawText(ln.text, x, y, ink)
+            }
+        }
+        return out
     }
 
     private fun loadAssetBitmap(path: String): Bitmap =
@@ -103,10 +247,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val PREF_TREE = "modelTree"
         private const val TEST_PAGE = "test/page.png"
-        private const val DETECTOR_MODEL = "models/comictextdetector.pt.onnx"
-        private const val OCR_MODEL = "models/ocr_48px_ctc.onnx"
-        private const val LAMA_MODEL = "models/lama-manga.onnx"
         private const val ALPHABET = "models/alphabet-all-v5.txt"
         private const val FONT = "fonts/NotoSansMonoCJK.ttc"
     }

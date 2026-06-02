@@ -52,6 +52,11 @@ android {
         buildConfig = true
     }
 
+    // 模型分離（BYOM）：*.onnx 不打進 APK，改由 app 從使用者選的資料夾載入 → APK 變小
+    androidResources {
+        ignoreAssetsPattern = "*.onnx"
+    }
+
     sourceSets["main"].java.srcDirs("src/main/kotlin")
 }
 
@@ -61,4 +66,6 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    implementation("androidx.documentfile:documentfile:1.0.1") // SAF 資料夾讀檔
+    implementation("androidx.activity:activity-ktx:1.8.2")      // registerForActivityResult / OpenDocumentTree
 }
