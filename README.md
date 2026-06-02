@@ -2,124 +2,147 @@
 
 # Yakuyomi（訳読み）
 
-**漫畫 AI 翻譯 Reader — 裝置端偵測 / OCR / 去字，雲端 LLM 翻譯**
+**Manga AI-translation reader — on-device detection / OCR / text-removal, cloud-LLM translation**
 
-日本語 → 繁體中文（CHT）
+Japanese → Traditional Chinese (CHT)
 
-> ⚠️ **狀態：規劃中 / 起步階段（M0）** — 尚未有可用版本，介面與細節都可能變動。
+**English** ｜ [中文](README_zh.md)
+
+> **Status: the engine works end-to-end (M0–M3).** The full detect→OCR→translate→text-removal→typeset
+> pipeline runs on a real device; integration into the yokai reader (M4) hasn't started. Still in
+> development — UI and details may change.
 
 </div>
 
 ---
 
-## 這是什麼
+## What it is
 
-Yakuyomi 是一個加上 AI 翻譯能力的漫畫閱讀器，fork 自 [yokai](https://github.com/null2264/yokai)。
+Yakuyomi is a manga reader with AI translation bolted on, planned as a fork of [yokai](https://github.com/null2264/yokai).
 
-它把翻譯流程拆成兩半：
+It splits translation in two:
 
-- **文字偵測、OCR、去字** → 在**裝置上**離線執行（ONNX Runtime）。
-- **翻譯** → 交給**雲端 LLM**（預設 DeepSeek，OpenAI 相容）。
+- **Text detection, OCR, text removal** → run **on-device**, offline (ONNX Runtime).
+- **Translation** → handed to a **cloud LLM** (DeepSeek by default, OpenAI-compatible).
 
-整條 pipeline 在**行為與決策上對齊** [manga-image-translator](https://github.com/zyddnys/manga-image-translator)（以下簡稱 m-i-t）——對齊的是它的判斷與參數，不是逐行複製它的 Python。
+The top priority is **efficiency / throughput**: a chapter's pages are translated concurrently to minimize end-to-end time.
 
-最高目標是**效率 / 吞吐**：一章多頁的翻譯並發送出，盡量壓低端到端時間。
+## How it's built: vibecoding
 
-## 為什麼是「半離線」
+This project is built by **vibecoding** — a human drives direction, trade-offs and review; the code is written mostly by AI ([Claude Code](https://claude.com/claude-code)).
 
-偵測 / OCR / 去字都在裝置上跑，所以這幾步離線可用；唯獨翻譯那一步走雲端 LLM，因此**翻譯當下需要連網**。這是刻意的取捨——換來其餘階段離線、引擎可獨立發佈，代價是接受翻譯半離線。
+The engine is a from-scratch Kotlin + ONNX Runtime implementation, and **this repo contains no manga-image-translator source code**; what it aligns to m-i-t is its behaviour and prompts (see [below](#aligning-with-manga-image-translator)), while the models are third-party (see [Models & sources](#models--sources)).
 
-## 核心特性
+## Why "semi-offline"
 
-- 🔍 **裝置端偵測**：comic-text-detector，輸出文字區塊 bbox（去字遮罩留待後期）。
-- 🔠 **裝置端 OCR**：以 48px CTC 模型為主、manga-ocr 為品質備案。
-- 🌐 **雲端 LLM 翻譯**：移植 m-i-t 的 prompt 與協定（行數對齊、漏行重試、詞彙表掛勾）。
-- 🧹 **去字 / 重排**：先用白塊蓋字頂著（M2），之後換 LaMa inpaint + 氣泡 typesetting（M3）。
-- 🇹🇼 **繁體中文輸出**：prompt 強制台灣繁體用語，再過一道 OpenCC `s2twp` 當安全網。
-- 🔑 **BYOK（自帶金鑰）**：provider / model / API base / 金鑰 / 目標語言全可設定，**不內建任何 key**；金鑰存在 Android Keystore。
-- 💾 **就地覆蓋、可續傳**：僅在翻譯成功時覆蓋原頁、以頁為單位記錄完成狀態；失敗則保留原圖，**永不用比原圖更糟的東西覆蓋下載庫**。
+Detection / OCR / text removal run on-device, so those steps work offline; only translation goes to a cloud LLM, so **translation needs a network connection while it runs**. A deliberate trade-off — the other stages stay offline and the engine can ship independently, at the cost of semi-offline translation.
 
-## 一頁的資料流
+## Highlights
+
+- 🔍 **On-device detection**: comic-text-detector, emitting text-line boxes **plus a per-pixel text-stroke mask (seg)**.
+- 🔠 **On-device OCR**: 48px CTC model (CPU-only; XNNPACK miscomputes this model, so it's disabled).
+- 🌐 **Cloud-LLM translation**: reuses m-i-t's prompt and protocol; per-page, in-batch concurrency, `Semaphore` rate-limiting (avoids 429s).
+- 🧹 **On-device text removal**: default **box-fill nearest-colour** — uses the seg thin-stroke mask, fills only the glyph strokes, each pixel taking its nearest background colour (multi-colour / gradient / text-over-art never smear into a colour block); **LaMa** (whole-page / per-region) is also selectable.
+- ✍️ **Typesetting**: pure text-box layout — vertical / horizontal, adaptive font size, **vertical centering, stroke width scaled to font size, line-head kinsoku**, punctuation rotation, automatic black/white text (by post-removal background luminance).
+- 🇹🇼 **Traditional-Chinese output**: the prompt enforces Taiwan-style Traditional Chinese, entirely via the LLM (**no OpenCC post-processing**; occasional wording slips accepted).
+- 🔑 **BYOK (bring your own key)**: provider / model / API base / key / target language are all configurable; **no key is bundled**; keys live in the Android Keystore.
+- 📦 **BYOM (bring your own model)**: ONNX weights aren't packed into the APK; the user points the app at a local folder (loaded off-heap, dodging the JVM heap cap).
+- 💾 **Overwrite-in-place, resumable**: a page is overwritten only when translation succeeds, with per-page completion state; on failure / no text the original is kept — **never overwrite the library with something worse than the original**.
+
+## A page's data flow
 
 ```
-頁 Bitmap
- → 偵測 (ONNX)   → blocks：bbox (+ mask)，依 m-i-t 的 text_region 啟發式排序
- → OCR  (ONNX)   → 每塊整塊辨識 → 日文 sourceText
- → 翻譯 (LLM)    → 逐頁、並發、無滾動上文 → targetText（依 block ID 貼回）
- → 渲染 (Canvas) → M2：白塊蓋字 ／ M3：LaMa inpaint + 氣泡排版
- → 翻好的 Bitmap
+Page Bitmap
+ → Detect (ONNX)    → text-line boxes + seg stroke mask; sorted by m-i-t's coordinate heuristic
+ → OCR    (ONNX)    → whole-block recognition per box → Japanese sourceText
+ → Group            → merge nearby, aligned lines into bubble regions (ported m-i-t merge rule)
+ → Translate (LLM)  → per-page, concurrent, no rolling context → targetText (pasted back by block ID)
+ → Remove (ONNX/CV) → box-fill nearest-colour (default) / LaMa inpaint
+ → Typeset (Canvas) → vertical / horizontal, centered, stroke, kinsoku
+ → Translated Bitmap
 ```
 
-並發發生在「翻譯」這一格：一章 N 頁各開一個 coroutine 同時送出，用 `Semaphore` 限制同時在飛的請求數（避免 provider 429）。
+The engine exposes a single entry point, `translatePage(page): PageResult` (translated / skipped / failed); **overwriting the original, markers, resume, and cross-page batch concurrency** are the caller's job (the future yokai download worker).
 
-## 技術選型
+## Tech choices
 
-| 項目 | 選擇 | 備註 |
+| Item | Choice | Notes |
 |---|---|---|
-| Base fork | **yokai** | 整合點在下載層、不動 reader |
-| 推論引擎 | **純 Kotlin + ONNX Runtime**（`onnxruntime-android`，含 XNNPACK） | NNAPI 已棄用，不採用 |
-| 加速路線 | XNNPACK/CPU → int8 量化 → 需要時再 QNN / LiteRT | — |
-| 偵測 | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) | 已有 ONNX |
-| OCR | 48px CTC（主）／ [manga-ocr](https://github.com/kha-white/manga-ocr)（備案） | CTC 單次前向、好搬 |
-| 去字 | [LaMa](https://github.com/advimman/lama)（漫畫微調版，ONNX） | M3 才上 |
-| 翻譯 | 雲端 LLM，移植 m-i-t `chatgpt.py` 的 prompt + 協定 | OpenAI 相容 |
-| 預設 provider | **DeepSeek** | 全可改（BYOK） |
+| Base fork | **yokai** | integration sits at the download layer; the reader is untouched |
+| Inference | **pure Kotlin + ONNX Runtime** (`onnxruntime-android`, with XNNPACK) | NNAPI deprecated, not used |
+| Acceleration | XNNPACK/CPU → int8 quantization → QNN / LiteRT (NPU/GPU) when needed | NPU is the future lever to cut LaMa's cost |
+| Text removal (default) | **box-fill nearest-colour** | instant, follows local background, no colour block |
+| Text removal (optional) | **LaMa** (whole-page / per-region) | see [Models & sources](#models--sources) |
+| Translation | cloud LLM, reusing m-i-t `chatgpt.py`'s prompt + protocol | OpenAI-compatible |
+| Default provider | **DeepSeek** | fully changeable (BYOK) |
 
-ONNX 匯出與 pipeline 細節參考 [Koharu](https://github.com/mayocream/koharu)（Rust + ONNX）。
+## Translation providers (BYOK)
 
-## 翻譯 Provider（BYOK）
+v1 first supports the **OpenAI-compatible** group (one HTTP client covers all):
 
-v1 先支援 **OpenAI 相容**那一組（一個 HTTP client 通吃）：
+- `openai`, `deepseek`, `groq`, `custom_openai` (OpenRouter / LM Studio / self-hosted)
+- then `gemini`, and later the non-LLM cloud MTs (DeepL / Caiyun / Youdao / Baidu / Papago) as separate adapters.
 
-- `openai`、`deepseek`、`groq`、`custom_openai`（OpenRouter / LM Studio / 自架）
-- 之後：`gemini`，再來才是非 LLM 的雲端 MT（DeepL / Caiyun / Youdao / Baidu / Papago）當獨立 adapter。
+The settings screen exposes: provider, model, API base (for custom_openai), API key (one slot per provider, stored in Keystore), and target language. DeepSeek by default, all changeable.
 
-設定頁會暴露：provider、model、API base（custom_openai 用）、API key（每個 provider 一格，存 Keystore）、目標語言。預設 DeepSeek，但全可改。
+## Models & sources
+
+ONNX weights are **not committed and not packed into the APK** (BYOM). Provenance:
+
+| Stage | Model | Source |
+|---|---|---|
+| Detection | comic-text-detector (outputs `blk` / `seg` / `det`) | ONNX from [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) (manga-image-translator ecosystem) |
+| OCR | 48px CTC | weights from [manga-image-translator](https://github.com/zyddnys/manga-image-translator), exported to ONNX by us via `torch.onnx.export` |
+| Text removal | LaMa (manga fine-tune) | **`lama-manga.onnx` from [Koharu (mayocream/koharu)](https://github.com/mayocream/koharu)**; underlying architecture [advimman/LaMa](https://github.com/advimman/lama) |
+| Fonts | Noto Sans / Serif CJK TC, Source Han | for CJK rendering, redistributable (OFL / Apache) |
+
+ONNX export and pipeline details were informed by [Koharu](https://github.com/mayocream/koharu) (Rust + ONNX). Redistribution terms for each model / font are pending the [licensing audit](#license).
+
+## Aligning with manga-image-translator
+
+m-i-t is the spec, not a master to be copied line-for-line. We pin one upstream commit (see `.upstream-ref`) and align in three layers:
+
+1. **Copy verbatim** — prompt & protocol, per-stage parameters / thresholds, config schema, model selection & processing order, provider scope.
+2. **Match behaviour, implement freely** — detection post-processing, coordinate back-projection, seg mask generation, line grouping, reading order, concurrent translation (criterion: same input → near-identical output).
+3. **Informed divergence (recorded)** — platform-forced or deliberate trade-offs, e.g. ORT inference, dropping CUDA, box-fill nearest-colour for removal, rolling context off by default.
+
+Every ported file is headed with `// ported from <python path> @ <commit>`, and is validated against the Python output by the `parity/` harness before being wired into the pipeline.
 
 ## Roadmap
 
-開發在獨立的 sandbox app 內進行，引擎為解耦的 Gradle module（`:engine`，對外只有 `translatePage(bitmap): bitmap`），最後一步才掛進 yokai fork。
+Development happens in a standalone sandbox app; the engine is a decoupled Gradle module (`:engine`, exposing only `translatePage`) and is hooked into the yokai fork only as the final step.
 
-| 里程碑 | 內容 |
-|---|---|
-| **M0** | sandbox app + ONNX 載入 detector，對一頁畫出文字框（真機驗證 XNNPACK） |
-| **M1** | 接 OCR（48px CTC），debug overlay 印出辨識的日文 |
-| **M2** | 接 LLM 翻譯（DeepSeek，逐頁並發）+ 白塊蓋字 → **第一個端到端能動版本** |
-| **M3** | 白塊換 LaMa inpaint、陽春排版換氣泡 typesetting → 拚品質 |
-| **M4** | 接進 yokai 下載管線、模型下載管理、量化 / 效能、快速 / 品質模式 |
+| Milestone | Scope | Status |
+|---|---|---|
+| **M0** | sandbox + ONNX detector, draw text boxes on a page (verify XNNPACK on a real device) | ✅ |
+| **M1** | wire OCR (48px CTC), overlay the recognized Japanese | ✅ |
+| **M2** | wire LLM translation (DeepSeek, per-page concurrency) + cover text → end-to-end working | ✅ |
+| **M3** | text removal (box-fill nearest-colour / LaMa) + typesetting (centering / stroke / kinsoku); engine consolidated into `translatePage` | ✅ |
+| **M4** | hook into yokai's download pipeline, model download management, quantization / perf, fast / quality modes | ⏳ |
 
-## 隱私
+## Privacy
 
-- **BYOK**：不內建任何 API key，金鑰由你自己提供並存於 Android Keystore。
-- **裝置端處理**：偵測 / OCR / 去字不離開裝置。
-- **翻譯會連網**：OCR 出來的文字會送往**你所設定的** LLM provider 進行翻譯。請自行確認該 provider 的資料政策。
+- **BYOK**: no API key is bundled; you provide your own, stored in the Android Keystore.
+- **On-device processing**: detection / OCR / text removal never leave the device.
+- **Translation goes online**: the OCR'd text is sent to **the LLM provider you configure** for translation — check that provider's data policy yourself.
 
-## 對齊 manga-image-translator
+## Credits
 
-m-i-t 是規格，不是要被 1:1 複寫的母本。對齊分三層：
+This project stands on the shoulders of:
 
-1. **照搬** — prompt 與協定、各階段參數 / 閾值、config schema、模型選擇與處理順序、provider 範圍。
-2. **對齊行為、自由實作** — 偵測後處理、座標反算、遮罩生成、閱讀順序排序、並發翻譯（判準：同輸入給相近輸出）。
-3. **知情偏離（留紀錄）** — 平台逼的或刻意的取捨，例如 ORT 量化、丟掉 CUDA、M2 白塊先頂著、預設不啟用滾動上文。
+- [yokai](https://github.com/null2264/yokai) (the reader planned as the base, Apache-2.0)
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (behavioural spec & prompts for the translation pipeline)
+- [Koharu (mayocream/koharu)](https://github.com/mayocream/koharu) (the `lama-manga.onnx` removal model; ONNX-export / pipeline reference)
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector), [manga-ocr](https://github.com/kha-white/manga-ocr), [LaMa](https://github.com/advimman/lama) (models / architectures)
+- Noto Sans / Serif CJK, Source Han (CJK rendering fonts)
+- [Claude Code](https://claude.com/claude-code) (vibecoding development)
 
-每個移植檔的檔頭都會標 `// ported from <python 路徑> @ <commit>`，並以 parity harness 對 Python 輸出比對驗證。
+## License
 
-## 致謝
-
-本專案站在這些前人的肩膀上：
-
-- [yokai](https://github.com/null2264/yokai)（base reader）
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator)（翻譯 pipeline 規格）
-- [Koharu](https://github.com/mayocream/koharu)（ONNX 匯出 / pipeline 參考）
-- [comic-text-detector](https://github.com/dmMaze/comic-text-detector)、[manga-ocr](https://github.com/kha-white/manga-ocr)、[LaMa](https://github.com/advimman/lama)（模型）
-- Noto Sans / Serif CJK、Source Han（繁中算繪字型）
-
-## 授權
-
-**待確認。** Yakuyomi fork 自 yokai（Apache-2.0），並使用 m-i-t 與多個第三方模型權重 / 字型。公開發佈前會逐一完成授權稽核（散布條款、模型 host、字型授權），屆時補上正式 `LICENSE`。在此之前請勿假設任何散布授權。
+**TBD.** The code in this repo is **self-implemented in Kotlin / ORT** (not a port of m-i-t source), but the project as a whole still **reuses m-i-t's prompts and parameter defaults**, is planned as a fork of yokai (Apache-2.0), and uses several third-party model weights / fonts. A licensing audit (m-i-t terms, each model / font license, model hosting) will be completed before any public release, at which point a proper `LICENSE` will be added. Until then, assume no distribution license.
 
 ---
 
 <div align="center">
-<sub>訳読み — 讀懂那些還沒被翻譯的格子。</sub>
+<sub>訳読み — read the panels that haven't been translated yet.</sub>
 </div>
