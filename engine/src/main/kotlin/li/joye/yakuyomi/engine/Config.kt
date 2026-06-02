@@ -51,8 +51,9 @@ data class TranslatorConfig(
 
 data class InpainterConfig(
     val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（改了會對不上模型）
-    val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO
+    val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（per-region 模式用）
     val maskDilate: Float = 7f,       // ~ config.kernel_size / mask_dilation_offset
+    val wholeImage: Boolean = true,   // 〔設定〕true＝整張跑一次 LaMa（快、對齊 m-i-t）；false＝逐區（慢、局部較精細）
 )
 
 data class RenderConfig(

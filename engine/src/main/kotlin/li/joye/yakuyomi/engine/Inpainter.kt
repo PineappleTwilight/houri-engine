@@ -66,49 +66,58 @@ class Inpainter(
         val maskPx = IntArray(w * h)
         maskBmp.getPixels(maskPx, 0, w, 0, 0, w, h)
 
-        for (region in regions) {
-            val rw = region.x1 - region.x0
-            val rh = region.y1 - region.y0
-            val cx = (region.x0 + region.x1) / 2f
-            val cy = (region.y0 + region.y1) / 2f
-            val win = cfg.windowRatio
-            val wx0 = (cx - rw * win / 2f).toInt().coerceIn(0, w - 1)
-            val wy0 = (cy - rh * win / 2f).toInt().coerceIn(0, h - 1)
-            val wx1 = (cx + rw * win / 2f).toInt().coerceIn(wx0 + 1, w)
-            val wy1 = (cy + rh * win / 2f).toInt().coerceIn(wy0 + 1, h)
-            val ww = wx1 - wx0
-            val wh = wy1 - wy0
-            if (ww < 8 || wh < 8) continue
-
-            val cropBmp = Bitmap.createBitmap(result, wx0, wy0, ww, wh)
-            val crop512 = Bitmap.createScaledBitmap(cropBmp, tile, tile, true)
-            val maskCropBmp = Bitmap.createBitmap(maskBmp, wx0, wy0, ww, wh)
-            val mask512 = Bitmap.createScaledBitmap(maskCropBmp, tile, tile, false)
-
-            val imgTensor = imageToNCHW(crop512, tile)
-            val maskTensor = maskTo1CH(mask512, tile)
-            try {
-                session.run(mapOf(INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
-                    val outT = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
-                    val res512 = nchwToBitmap(outT, tile)
-                    val resWin = Bitmap.createScaledBitmap(res512, ww, wh, true)
-                    compositeMasked(result, resWin, maskPx, w, wx0, wy0, ww, wh)
-                    res512.recycle()
-                    resWin.recycle()
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "去字單區失敗：${t.message}")
-            } finally {
-                imgTensor.close()
-                maskTensor.close()
-                cropBmp.recycle()
-                crop512.recycle()
-                maskCropBmp.recycle()
-                mask512.recycle()
+        if (cfg.wholeImage) {
+            inpaintWindow(result, maskBmp, maskPx, 0, 0, w, h) // 整張一次（快）
+        } else {
+            for (region in regions) {
+                val rw = region.x1 - region.x0
+                val rh = region.y1 - region.y0
+                val cx = (region.x0 + region.x1) / 2f
+                val cy = (region.y0 + region.y1) / 2f
+                val win = cfg.windowRatio
+                val wx0 = (cx - rw * win / 2f).toInt().coerceIn(0, w - 1)
+                val wy0 = (cy - rh * win / 2f).toInt().coerceIn(0, h - 1)
+                val wx1 = (cx + rw * win / 2f).toInt().coerceIn(wx0 + 1, w)
+                val wy1 = (cy + rh * win / 2f).toInt().coerceIn(wy0 + 1, h)
+                val ww = wx1 - wx0
+                val wh = wy1 - wy0
+                if (ww < 8 || wh < 8) continue
+                inpaintWindow(result, maskBmp, maskPx, wx0, wy0, ww, wh)
             }
         }
         maskBmp.recycle()
         return result
+    }
+
+    /** 對一塊視窗 [wx0,wy0,ww,wh] 跑一次 LaMa（縮 tile→推論→放回），只把遮罩內像素換成結果。 */
+    private fun inpaintWindow(result: Bitmap, maskBmp: Bitmap, maskPx: IntArray, wx0: Int, wy0: Int, ww: Int, wh: Int) {
+        val tile = cfg.tileSize
+        val w = result.width
+        val cropBmp = Bitmap.createBitmap(result, wx0, wy0, ww, wh)
+        val crop512 = Bitmap.createScaledBitmap(cropBmp, tile, tile, true)
+        val maskCropBmp = Bitmap.createBitmap(maskBmp, wx0, wy0, ww, wh)
+        val mask512 = Bitmap.createScaledBitmap(maskCropBmp, tile, tile, false)
+        val imgTensor = imageToNCHW(crop512, tile)
+        val maskTensor = maskTo1CH(mask512, tile)
+        try {
+            session.run(mapOf(INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
+                val outT = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
+                val res512 = nchwToBitmap(outT, tile)
+                val resWin = Bitmap.createScaledBitmap(res512, ww, wh, true)
+                compositeMasked(result, resWin, maskPx, w, wx0, wy0, ww, wh)
+                res512.recycle()
+                resWin.recycle()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "去字單窗失敗：${t.message}")
+        } finally {
+            imgTensor.close()
+            maskTensor.close()
+            cropBmp.recycle()
+            crop512.recycle()
+            maskCropBmp.recycle()
+            mask512.recycle()
+        }
     }
 
     private fun imageToNCHW(bmp: Bitmap, n: Int): OnnxTensor {
