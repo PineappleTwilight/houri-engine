@@ -17,7 +17,7 @@ import java.nio.FloatBuffer
  * 對齊 parity/inpaint_parity.py。
  */
 class Inpainter(
-    modelBytes: ByteArray,
+    modelPath: String,
     private val cfg: InpainterConfig = InpainterConfig(),
 ) : AutoCloseable {
 
@@ -33,7 +33,7 @@ class Inpainter(
                 Log.w(TAG, "XNNPACK 不可用：${t.message}")
             }
         }
-        session = env.createSession(modelBytes, opts)
+        session = env.createSession(modelPath, opts) // 路徑載入＝native 記憶體、不佔 JVM heap
     }
 
     fun inpaint(page: Bitmap, regions: List<TextRegion>): Bitmap {

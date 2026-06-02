@@ -15,7 +15,7 @@ import kotlin.math.min
  * 參數由 [DetectorConfig] 提供（§5 第一層）。
  */
 class Detector(
-    modelBytes: ByteArray,
+    modelPath: String,
     private val cfg: DetectorConfig = DetectorConfig(),
 ) : AutoCloseable {
 
@@ -32,7 +32,7 @@ class Detector(
                 Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
             }
         }
-        session = env.createSession(modelBytes, options)
+        session = env.createSession(modelPath, options) // 從路徑載入＝native 記憶體、不佔 JVM heap
         Log.i(TAG, "session inputs=${session.inputNames} outputs=${session.outputNames}")
     }
 

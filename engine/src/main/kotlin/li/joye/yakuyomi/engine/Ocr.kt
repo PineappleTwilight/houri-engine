@@ -30,7 +30,7 @@ class OcrDebug(val strip: Bitmap?, val info: String)
  *   顏色 head 不採用（彩底太雜）；文字色改由 [Renderer] 取去字後背景亮度判黑/白。
  */
 class Ocr(
-    modelBytes: ByteArray,
+    modelPath: String,
     private val dictionary: List<String>,
     private val cfg: OcrConfig = OcrConfig(),
 ) : AutoCloseable {
@@ -41,13 +41,15 @@ class Ocr(
     init {
         val options = OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(NUM_THREADS)
-            try {
-                addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
-            } catch (t: Throwable) {
-                Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
+            if (cfg.useXnnpack) {
+                try {
+                    addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
+                } catch (t: Throwable) {
+                    Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
+                }
             }
         }
-        session = env.createSession(modelBytes, options)
+        session = env.createSession(modelPath, options) // 路徑載入＝native 記憶體、不佔 JVM heap
     }
 
     /** 對每條文字行做 OCR，就地填入 direction 與 text。 */
@@ -254,13 +256,24 @@ class Ocr(
         val (ordered, isV) = sortPnts(line.quad)
         val strip = transformedRegion(page, ordered, isV, cfg.textHeight)
             ?: return OcrDebug(null, "strip=null（setPolyToPoly 失敗）")
+        val px = IntArray(strip.width * strip.height)
+        strip.getPixels(px, 0, strip.width, 0, 0, strip.width, strip.height)
+        val mean = if (px.isEmpty()) 0 else px.sumOf { (it shr 16 and 0xFF) + (it shr 8 and 0xFF) + (it and 0xFF) } / (px.size * 3)
         val info = try {
             stripToTensor(strip).use { input ->
                 session.run(mapOf(session.inputNames.first() to input)).use { res ->
                     val logits = res.get(OUT_LOGITS).orElseThrow { IllegalStateException("缺 char_logits") } as OnnxTensor
-                    val shape = (logits.info as TensorInfo).shape
+                    val shp = (logits.info as TensorInfo).shape
+                    val tt = shp[1].toInt(); val dd = shp[2].toInt()
+                    val a = FloatArray(tt * dd); logits.floatBuffer.get(a, 0, tt * dd)
+                    var nb = 0
+                    for (ti in 0 until tt) {
+                        var b = 0; var bv = a[ti * dd]
+                        for (c in 1 until dd) if (a[ti * dd + c] > bv) { bv = a[ti * dd + c]; b = c }
+                        if (b != BLANK) nb++
+                    }
                     val (text, prob) = ctcDecode(logits)
-                    "${strip.width}x${strip.height} out=${shape.joinToString("x")} '${text.take(12)}' p=${"%.2f".format(prob)}"
+                    "${strip.width}x${strip.height} 均值$mean out=${shp.joinToString("x")} 非空$nb/$tt '${text.take(10)}' p=${"%.2f".format(prob)}"
                 }
             }
         } catch (t: Throwable) {

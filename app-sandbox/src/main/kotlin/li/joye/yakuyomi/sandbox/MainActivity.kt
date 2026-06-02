@@ -88,8 +88,17 @@ class MainActivity : AppCompatActivity() {
             n.endsWith(".onnx") && keywords.any { n.contains(it) }
         }
 
-    private fun readUri(uri: Uri): ByteArray =
-        contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("讀取失敗 $uri")
+    /** 把 SAF 模型串流複製到 app filesDir（64KB 緩衝、不佔 JVM heap），回傳本機路徑；
+     *  已存在且大小相同則跳過複製。之後 createSession(路徑) 走 native 記憶體、避開 512MB heap 上限。 */
+    private fun ensureLocal(doc: DocumentFile): String {
+        val name = doc.name ?: "model.onnx"
+        val out = java.io.File(filesDir, name)
+        if (out.exists() && out.length() == doc.length()) return out.absolutePath
+        contentResolver.openInputStream(doc.uri)!!.use { input ->
+            out.outputStream().use { o -> input.copyTo(o, 1 shl 16) }
+        }
+        return out.absolutePath
+    }
 
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
@@ -103,7 +112,7 @@ class MainActivity : AppCompatActivity() {
             runTree = currentTree()
             runStamp = stamp()
             val cfg = EngineConfig(
-                ocr = OcrConfig(minProb = 0f), // 【診斷】先不丟低信心，看 OCR 原始輸出
+                ocr = OcrConfig(minProb = 0f, useXnnpack = false), // 【診斷】不丟低信心 + OCR 關 XNNPACK 排查
                 render = RenderConfig(
                     orientation = if (vertical) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL,
                 ),
@@ -131,19 +140,19 @@ class MainActivity : AppCompatActivity() {
                 log("✓ 載入測試頁 ${page.width}×${page.height}")
                 addImage("① 原圖", page)
 
-                log("… 載入 detector（${detF.name}）")
-                val detBytes = readUri(detF.uri)
-                log("✓ detector ${detBytes.size / 1048576}MB 讀入")
-                val lines = Detector(detBytes, cfg.detector).use { it.detect(page) }
+                log("… 準備 detector（${detF.name}，首次複製到 filesDir 較久）")
+                val detPath = ensureLocal(detF)
+                log("✓ detector 就緒（off-heap 路徑載入）")
+                val lines = Detector(detPath, cfg.detector).use { it.detect(page) }
                 log("✓ 偵測完成：${lines.size} 框")
                 addImage("② 偵測框（${lines.size}）", overlayBoxes(page, lines))
 
-                log("… 載入 OCR（${ocrF.name}）+ 字典 + 字型")
+                log("… 準備 OCR（${ocrF.name}）+ 字典 + 字型")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
-                val ocrBytes = readUri(ocrF.uri)
-                log("✓ OCR ${ocrBytes.size / 1048576}MB、字典 ${alphabet.size} 條")
+                val ocrPath = ensureLocal(ocrF)
+                log("✓ OCR 就緒（off-heap）、字典 ${alphabet.size} 條")
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
-                Ocr(ocrBytes, alphabet, cfg.ocr).use { ocr ->
+                Ocr(ocrPath, alphabet, cfg.ocr).use { ocr ->
                     lines.take(3).forEachIndexed { i, ln ->
                         val d = ocr.debugOne(page, ln)
                         log("  行$i: ${d.info}")
@@ -155,6 +164,7 @@ class MainActivity : AppCompatActivity() {
                 log("✓ OCR：$ocrCount/${lines.size} 行有字")
                 log("  樣本：" + lines.take(5).joinToString(" ┊ ") { it.text.ifBlank { "∅" } })
                 addImage("③ OCR（綠=有字 紅=無）", overlayOcr(page, lines, tf))
+                if (saveLog) writeLog() // OCR 後先寫 log，萬一後面 OOM 也有檔
 
                 val regions = Grouping.group(lines)
                 log("✓ 分區：${regions.size} 區")
@@ -172,10 +182,10 @@ class MainActivity : AppCompatActivity() {
                 val tcount = regions.count { it.translatedText.isNotBlank() && it.translatedText != it.sourceText }
                 log("  譯成功 $tcount/${regions.size}")
 
-                log("… 載入 LaMa（${lamaF.name}）+ 去字")
-                val lamaBytes = readUri(lamaF.uri)
-                log("✓ LaMa ${lamaBytes.size / 1048576}MB 讀入")
-                val cleaned = Inpainter(lamaBytes, cfg.inpainter).use { it.inpaint(page, regions) }
+                log("… 準備 LaMa（${lamaF.name}）+ 去字")
+                val lamaPath = ensureLocal(lamaF)
+                log("✓ LaMa 就緒（off-heap）")
+                val cleaned = Inpainter(lamaPath, cfg.inpainter).use { it.inpaint(page, regions) }
                 log("✓ 去字完成")
                 addImage("④ 去字/塗白", cleaned)
 
