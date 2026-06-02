@@ -53,78 +53,33 @@ class Ocr(
     }
 
     /**
-     * 對每條文字行做 OCR，就地填入 direction 與 text。**批次推論**（每 [BATCH] 條一批、
-     * pad 到批內最大寬 + [PAD_MARGIN] 白邊）：比逐行快 ~3-4×，且 pad 寬讓 CTC 不截尾字＝更完整。
+     * 對每條文字行做 OCR，就地填入 direction 與 text。**逐行**推論（真機是 compute-bound，
+     * 批次的 padding 多餘運算反而更慢——實測）。每條右側加 [PAD_MARGIN] 白邊（見 [stripToTensor]）讓 CTC 不截尾字。
      */
     fun recognize(page: Bitmap, lines: List<TextLine>) {
         val inputName = session.inputNames.first()
-        val h = cfg.textHeight
-        val items = ArrayList<Pair<TextLine, Bitmap>>()
         for (line in lines) {
             val (ordered, isV) = sortPnts(line.quad)
             line.direction = if (isV) "v" else "h"
-            val strip = transformedRegion(page, ordered, isV, h) ?: continue
+            val strip = transformedRegion(page, ordered, isV, cfg.textHeight) ?: continue
             if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
                 strip.recycle()  // 彩色/非氣泡 SFX 類文字 → 跳過
                 continue
             }
-            items.add(line to strip)
-        }
-        var i = 0
-        while (i < items.size) {
-            val batch = items.subList(i, minOf(i + BATCH, items.size))
             try {
-                recognizeBatch(inputName, batch, h)
+                stripToTensor(strip).use { input ->
+                    session.run(mapOf(inputName to input)).use { res ->
+                        val logits = res.get(OUT_LOGITS).orElseThrow {
+                            IllegalStateException("缺輸出 $OUT_LOGITS")
+                        } as OnnxTensor
+                        val (text, prob) = ctcDecode(logits)
+                        if (prob >= cfg.minProb) line.text = text  // 低信心誤讀 → 丟
+                    }
+                }
             } catch (t: Throwable) {
-                Log.w(TAG, "OCR 批次失敗：${t.message}")
-            }
-            i += BATCH
-        }
-        items.forEach { it.second.recycle() }
-    }
-
-    /** 一批多條：pad 到批內最大寬+邊距、堆成 [N,3,48,W]、一次 session.run、逐條解碼。 */
-    private fun recognizeBatch(inputName: String, batch: List<Pair<TextLine, Bitmap>>, h: Int) {
-        val n = batch.size
-        val padW = batch.maxOf { it.second.width } + PAD_MARGIN
-        val area = h * padW
-        val chw = FloatArray(n * 3 * area) { 1f } // 白底 padding（(255-127.5)/127.5=1.0）
-        for (bi in 0 until n) {
-            val strip = batch[bi].second
-            val sw = strip.width
-            val px = IntArray(sw * h)
-            strip.getPixels(px, 0, sw, 0, 0, sw, h)
-            val base = bi * 3 * area
-            for (y in 0 until h) {
-                val inRow = y * sw
-                val outRow = y * padW
-                for (x in 0 until sw) {
-                    val p = px[inRow + x]
-                    chw[base + outRow + x] = (((p shr 16) and 0xFF) - 127.5f) / 127.5f
-                    chw[base + area + outRow + x] = (((p shr 8) and 0xFF) - 127.5f) / 127.5f
-                    chw[base + 2 * area + outRow + x] = ((p and 0xFF) - 127.5f) / 127.5f
-                }
-            }
-        }
-        val tensor = OnnxTensor.createTensor(
-            env, FloatBuffer.wrap(chw), longArrayOf(n.toLong(), 3, h.toLong(), padW.toLong()),
-        )
-        tensor.use { input ->
-            session.run(mapOf(inputName to input)).use { res ->
-                val logits = res.get(OUT_LOGITS).orElseThrow {
-                    IllegalStateException("缺輸出 $OUT_LOGITS")
-                } as OnnxTensor
-                val shape = (logits.info as TensorInfo).shape // [N, T, d]
-                val t = shape[1].toInt()
-                val d = shape[2].toInt()
-                val buf = logits.floatBuffer
-                val arr = FloatArray(t * d)
-                for (bi in 0 until n) {
-                    buf.position(bi * t * d)
-                    buf.get(arr, 0, t * d)
-                    val (text, prob) = ctcDecodeArr(arr, t, d)
-                    if (prob >= cfg.minProb) batch[bi].first.text = text
-                }
+                Log.w(TAG, "OCR 單行失敗：${t.message}")
+            } finally {
+                strip.recycle()
             }
         }
     }
@@ -210,17 +165,22 @@ class Ocr(
     }
 
     private fun stripToTensor(strip: Bitmap): OnnxTensor {
-        val w = strip.width
+        val sw = strip.width
         val h = strip.height
-        val px = IntArray(w * h)
-        strip.getPixels(px, 0, w, 0, 0, w, h)
-        val area = w * h
-        val chw = FloatArray(3 * area)
-        for (i in 0 until area) {
-            val p = px[i]
-            chw[i] = (((p shr 16) and 0xFF) - 127.5f) / 127.5f
-            chw[area + i] = (((p shr 8) and 0xFF) - 127.5f) / 127.5f
-            chw[2 * area + i] = ((p and 0xFF) - 127.5f) / 127.5f
+        val w = sw + PAD_MARGIN // 右側白邊：避免 CTC 截掉尾字（坂→坂本、ねえね→ねえねえ）
+        val px = IntArray(sw * h)
+        strip.getPixels(px, 0, sw, 0, 0, sw, h)
+        val area = h * w
+        val chw = FloatArray(3 * area) { 1f } // 白底（(255-127.5)/127.5=1.0），右邊維持白
+        for (y in 0 until h) {
+            val inRow = y * sw
+            val outRow = y * w
+            for (x in 0 until sw) {
+                val p = px[inRow + x]
+                chw[outRow + x] = (((p shr 16) and 0xFF) - 127.5f) / 127.5f
+                chw[area + outRow + x] = (((p shr 8) and 0xFF) - 127.5f) / 127.5f
+                chw[2 * area + outRow + x] = ((p and 0xFF) - 127.5f) / 127.5f
+            }
         }
         return OnnxTensor.createTensor(
             env, FloatBuffer.wrap(chw), longArrayOf(1, 3, h.toLong(), w.toLong()),
@@ -344,7 +304,6 @@ class Ocr(
         private const val NUM_THREADS = 4
         private const val BLANK = 0
         private const val OUT_LOGITS = "char_logits"
-        private const val BATCH = 8        // 每批幾條（輸出 [N,T,19265] 約 N×5MB，8 條 ~46MB native，安全）
-        private const val PAD_MARGIN = 16  // pad 寬時多加的白邊（讓最寬那條也有右側 context、不截尾字）
+        private const val PAD_MARGIN = 16  // 每條右側白邊：讓 CTC 有 context、不截尾字
     }
 }
