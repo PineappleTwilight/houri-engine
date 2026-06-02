@@ -1,16 +1,18 @@
 <div align="center">
 
-# Yakuyomi（訳読み）
+# Yakuyomi（訳読み）— Engine
 
-**Manga AI-translation reader — on-device detection / OCR / text-removal, cloud-LLM translation**
+**On-device manga-translation engine — detection / OCR / text-removal (ONNX Runtime) + cloud-LLM translation**
 
 Japanese → Traditional Chinese (CHT)
 
 **English** ｜ [中文](README_zh.md)
 
-> **Status: the engine works end-to-end (M0–M3).** The full detect→OCR→translate→text-removal→typeset
-> pipeline runs on a real device; integration into the yokai reader (M4) hasn't started. Still in
-> development — UI and details may change.
+> **This repo (`yakuyomi-engine`) is the translation engine.** The reader app — **Yakuyomi**, a
+> [mihon](https://github.com/mihonapp/mihon) fork — is a separate repo that pulls this engine in as a
+> submodule (see [Repository layout](#repository-layout)).
+>
+> **Status: the engine works end-to-end (M0–M3)** on a real device; reader integration (M4) is in progress.
 
 </div>
 
@@ -18,14 +20,23 @@ Japanese → Traditional Chinese (CHT)
 
 ## What it is
 
-Yakuyomi is a manga reader with AI translation bolted on, planned as a fork of [yokai](https://github.com/null2264/yokai).
+Yakuyomi is a manga reader with **built-in AI translation**, based on [mihon](https://github.com/mihonapp/mihon). The work splits in two:
 
-It splits translation in two:
-
-- **Text detection, OCR, text removal** → run **on-device**, offline (ONNX Runtime).
+- **Text detection, OCR, text removal** → run **on-device**, offline (ONNX Runtime) — this is the **engine** (this repo).
 - **Translation** → handed to a **cloud LLM** (DeepSeek by default, OpenAI-compatible).
 
 The top priority is **efficiency / throughput**: a chapter's pages are translated concurrently to minimize end-to-end time.
+
+## Repository layout
+
+The project spans two repos:
+
+| Repo | Role |
+|---|---|
+| **`yakuyomi-engine`** (this repo) | the on-device translation engine: `:engine` (detection / OCR / translation / text-removal / typesetting, exposing only `translatePage(page): PageResult`) + a throwaway `:app-sandbox` for isolated testing + the `parity/` validation harness. Reader-agnostic, independently testable. |
+| **`Yakuyomi`** — a [mihon](https://github.com/mihonapp/mihon) fork | the reader app: mihon rebranded, with the download-pipeline hook + translation settings + model management. It pulls in `yakuyomi-engine` as a **git submodule**, built from source via Gradle `includeBuild`. |
+
+Why split: the engine stays clean and testable on its own, while the app is a genuine mihon fork (so it's eligible for mihon's fork network). Engine changes are committed here; the app bumps the submodule pointer.
 
 ## How it's built: vibecoding
 
@@ -62,13 +73,13 @@ Page Bitmap
  → Translated Bitmap
 ```
 
-The engine exposes a single entry point, `translatePage(page): PageResult` (translated / skipped / failed); **overwriting the original, markers, resume, and cross-page batch concurrency** are the caller's job (the future yokai download worker).
+The engine exposes a single entry point, `translatePage(page): PageResult` (translated / skipped / failed); **overwriting the original, markers, resume, and cross-page batch concurrency** are the reader app's job (the Yakuyomi fork's download worker).
 
 ## Tech choices
 
 | Item | Choice | Notes |
 |---|---|---|
-| Base fork | **yokai** | integration sits at the download layer; the reader is untouched |
+| Reader base | **mihon** (the Yakuyomi app is a fork) | integration sits at the download layer; the reader is untouched |
 | Inference | **pure Kotlin + ONNX Runtime** (`onnxruntime-android`, with XNNPACK) | NNAPI deprecated, not used |
 | Acceleration | XNNPACK/CPU → int8 quantization → QNN / LiteRT (NPU/GPU) when needed | NPU is the future lever to cut LaMa's cost |
 | Text removal (default) | **box-fill nearest-colour** | instant, follows local background, no colour block |
@@ -110,7 +121,7 @@ Every ported file is headed with `// ported from <python path> @ <commit>`, and 
 
 ## Roadmap
 
-Development happens in a standalone sandbox app; the engine is a decoupled Gradle module (`:engine`, exposing only `translatePage`) and is hooked into the yokai fork only as the final step.
+Development happens in this engine repo (with a standalone `:app-sandbox`); the engine is decoupled (`:engine`, exposing only `translatePage`) and is consumed by the **Yakuyomi** mihon fork as a submodule.
 
 | Milestone | Scope | Status |
 |---|---|---|
@@ -118,7 +129,7 @@ Development happens in a standalone sandbox app; the engine is a decoupled Gradl
 | **M1** | wire OCR (48px CTC), overlay the recognized Japanese | ✅ |
 | **M2** | wire LLM translation (DeepSeek, per-page concurrency) + cover text → end-to-end working | ✅ |
 | **M3** | text removal (box-fill nearest-colour / LaMa) + typesetting (centering / stroke / kinsoku); engine consolidated into `translatePage` | ✅ |
-| **M4** | hook into yokai's download pipeline, model download management, quantization / perf, fast / quality modes | ⏳ |
+| **M4** | hook the engine into the **Yakuyomi** (mihon) fork's download pipeline, model download management, quantization / perf, fast / quality modes | ⏳ |
 
 ## Privacy
 
@@ -130,7 +141,7 @@ Development happens in a standalone sandbox app; the engine is a decoupled Gradl
 
 This project stands on the shoulders of:
 
-- [yokai](https://github.com/null2264/yokai) (the reader planned as the base, Apache-2.0)
+- [mihon](https://github.com/mihonapp/mihon) (the reader the Yakuyomi app is forked from, Apache-2.0)
 - [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (behavioural spec & prompts for the translation pipeline)
 - [Koharu (mayocream/koharu)](https://github.com/mayocream/koharu) (the `lama-manga.onnx` removal model; ONNX-export / pipeline reference)
 - [comic-text-detector](https://github.com/dmMaze/comic-text-detector), [manga-ocr](https://github.com/kha-white/manga-ocr), [LaMa](https://github.com/advimman/lama) (models / architectures)
@@ -139,7 +150,7 @@ This project stands on the shoulders of:
 
 ## License
 
-**TBD.** The code in this repo is **self-implemented in Kotlin / ORT** (not a port of m-i-t source), but the project as a whole still **reuses m-i-t's prompts and parameter defaults**, is planned as a fork of yokai (Apache-2.0), and uses several third-party model weights / fonts. A licensing audit (m-i-t terms, each model / font license, model hosting) will be completed before any public release, at which point a proper `LICENSE` will be added. Until then, assume no distribution license.
+**TBD.** The code in this repo is **self-implemented in Kotlin / ORT** (not a port of m-i-t source), but the project as a whole still **reuses m-i-t's prompts and parameter defaults**, ships as a fork of mihon (Apache-2.0), and uses several third-party model weights / fonts. A licensing audit (m-i-t terms, each model / font license, model hosting) will be completed before any public release, at which point a proper `LICENSE` will be added. Until then, assume no distribution license.
 
 ---
 

@@ -1,15 +1,17 @@
 <div align="center">
 
-# Yakuyomi（訳読み）
+# Yakuyomi（訳読み）— Engine
 
-**漫畫 AI 翻譯 Reader — 裝置端偵測 / OCR / 去字，雲端 LLM 翻譯**
+**漫畫翻譯引擎 — 裝置端偵測 / OCR / 去字（ONNX Runtime）＋ 雲端 LLM 翻譯**
 
 日本語 → 繁體中文（CHT）
 
 [English](README.md) ｜ **中文**
 
-> **狀態：引擎端到端可動（M0–M3）。** 偵測→OCR→翻譯→去字→排版整條已在真機跑通；
-> 接進 yokai 閱讀器（M4）尚未開始。仍在開發、介面與細節可能變動。
+> **本 repo（`yakuyomi-engine`）是翻譯引擎。** 閱讀器本體 —— **Yakuyomi**（一個
+> [mihon](https://github.com/mihonapp/mihon) fork）—— 是另一個 repo，以 submodule 引入本引擎（見[倉庫架構](#倉庫架構)）。
+>
+> **狀態：引擎端到端可動（M0–M3）** 已在真機跑通；接進 reader（M4）進行中。
 
 </div>
 
@@ -17,14 +19,23 @@
 
 ## 這是什麼
 
-Yakuyomi 是一個加上 AI 翻譯能力的漫畫閱讀器，計畫 fork 自 [yokai](https://github.com/null2264/yokai)。
+Yakuyomi 是一個**內建 AI 翻譯**、以 [mihon](https://github.com/mihonapp/mihon) 為基底的漫畫閱讀器。工作拆成兩半：
 
-它把翻譯流程拆成兩半：
-
-- **文字偵測、OCR、去字** → 在**裝置上**離線執行（ONNX Runtime）。
+- **文字偵測、OCR、去字** → 在**裝置上**離線執行（ONNX Runtime）—— 這就是**引擎**（本 repo）。
 - **翻譯** → 交給**雲端 LLM**（預設 DeepSeek，OpenAI 相容）。
 
 最高目標是**效率 / 吞吐**：一章多頁的翻譯並發送出，盡量壓低端到端時間。
+
+## 倉庫架構
+
+專案分成兩個 repo：
+
+| Repo | 角色 |
+|---|---|
+| **`yakuyomi-engine`**（本 repo） | 裝置端翻譯引擎：`:engine`（偵測 / OCR / 翻譯 / 去字 / 排版，對外只有 `translatePage(page): PageResult`）＋ 丟棄式 `:app-sandbox`（單獨測試）＋ `parity/` 驗證 harness。reader 無關、可單獨測。 |
+| **`Yakuyomi`** —— 一個 [mihon](https://github.com/mihonapp/mihon) fork | 閱讀器本體：mihon 改品牌，加上下載管線 hook ＋ 翻譯設定 ＋ 模型管理。以 **git submodule** 引入 `yakuyomi-engine`，透過 Gradle `includeBuild` 從原始碼建。 |
+
+為什麼分：引擎保持乾淨、可獨立測；app 是**真的 mihon fork**（才進得了 mihon 的 fork 網路）。引擎改動 commit 在這裡，app 端 bump submodule 指標即可。
 
 ## 怎麼做的：vibecoding
 
@@ -61,13 +72,13 @@ Yakuyomi 是一個加上 AI 翻譯能力的漫畫閱讀器，計畫 fork 自 [yo
  → 翻好的 Bitmap
 ```
 
-引擎對外只有一個進入點 `translatePage(page): PageResult`（成功 / 略過 / 失敗）；**覆蓋原檔、marker、續傳、跨頁批次併發**都是呼叫端（之後的 yokai 下載 worker）的事。
+引擎對外只有一個進入點 `translatePage(page): PageResult`（成功 / 略過 / 失敗）；**覆蓋原檔、marker、續傳、跨頁批次併發**都是 reader app（Yakuyomi fork 的下載 worker）的事。
 
 ## 技術選型
 
 | 項目 | 選擇 | 備註 |
 |---|---|---|
-| Base fork | **yokai** | 整合點在下載層、不動 reader |
+| Reader 基底 | **mihon**（Yakuyomi app 是它的 fork） | 整合點在下載層、不動 reader |
 | 推論引擎 | **純 Kotlin + ONNX Runtime**（`onnxruntime-android`，含 XNNPACK） | NNAPI 已棄用，不採用 |
 | 加速路線 | XNNPACK/CPU → int8 量化 → 需要時再 QNN / LiteRT（NPU/GPU） | 去字 NPU 化是未來壓低 LaMa 耗時的槓桿 |
 | 去字（預設） | **box-fill 就近取色** | 瞬間、跟著局部背景、不糊色塊 |
@@ -109,7 +120,7 @@ m-i-t 是規格，不是要被 1:1 複寫的母本。釘住一個上游 commit�
 
 ## Roadmap
 
-開發在獨立的 sandbox app 內進行，引擎為解耦的 Gradle module（`:engine`，對外只有 `translatePage`），最後一步才掛進 yokai fork。
+開發在本引擎 repo 內進行（附一個獨立的 `:app-sandbox`）；引擎解耦（`:engine`、對外只有 `translatePage`），由 **Yakuyomi** mihon fork 以 submodule 消費。
 
 | 里程碑 | 內容 | 狀態 |
 |---|---|---|
@@ -117,7 +128,7 @@ m-i-t 是規格，不是要被 1:1 複寫的母本。釘住一個上游 commit�
 | **M1** | 接 OCR（48px CTC），overlay 印出日文 | ✅ |
 | **M2** | 接 LLM 翻譯（DeepSeek，逐頁並發）＋ 蓋字 → 端到端能動 | ✅ |
 | **M3** | 去字（box-fill 就近取色 / LaMa）＋ 排版（置中 / 描邊 / 禁則）拚品質；引擎收斂成 `translatePage` | ✅ |
-| **M4** | 接進 yokai 下載管線、模型下載管理、量化 / 效能、快速 / 品質模式 | ⏳ |
+| **M4** | 把引擎接進 **Yakuyomi**（mihon）fork 的下載管線、模型下載管理、量化 / 效能、快速 / 品質模式 | ⏳ |
 
 ## 隱私
 
@@ -129,7 +140,7 @@ m-i-t 是規格，不是要被 1:1 複寫的母本。釘住一個上游 commit�
 
 本專案站在這些前人的肩膀上：
 
-- [yokai](https://github.com/null2264/yokai)（規劃 base 的閱讀器，Apache-2.0）
+- [mihon](https://github.com/mihonapp/mihon)（Yakuyomi app fork 自它，Apache-2.0）
 - [manga-image-translator](https://github.com/zyddnys/manga-image-translator)（翻譯 pipeline 的行為規格與 prompt）
 - [Koharu（mayocream/koharu）](https://github.com/mayocream/koharu)（`lama-manga.onnx` 去字模型、ONNX 匯出 / pipeline 參考）
 - [comic-text-detector](https://github.com/dmMaze/comic-text-detector)、[manga-ocr](https://github.com/kha-white/manga-ocr)、[LaMa](https://github.com/advimman/lama)（模型 / 架構）
@@ -138,7 +149,7 @@ m-i-t 是規格，不是要被 1:1 複寫的母本。釘住一個上游 commit�
 
 ## 授權
 
-**待確認。** 本 repo 的**程式碼為自行以 Kotlin / ORT 實作**（非移植 m-i-t 原始碼），但專案整體仍**沿用 m-i-t 的 prompt 與參數預設**、計畫 fork 自 yokai（Apache-2.0），並使用多個第三方模型權重 / 字型。公開發佈前會逐一完成授權稽核（m-i-t 條款、各模型 / 字型授權、模型 host），屆時補上正式 `LICENSE`。在此之前請勿假設任何散布授權。
+**待確認。** 本 repo 的**程式碼為自行以 Kotlin / ORT 實作**（非移植 m-i-t 原始碼），但專案整體仍**沿用 m-i-t 的 prompt 與參數預設**、以 mihon（Apache-2.0）的 fork 形式發佈，並使用多個第三方模型權重 / 字型。公開發佈前會逐一完成授權稽核（m-i-t 條款、各模型 / 字型授權、模型 host），屆時補上正式 `LICENSE`。在此之前請勿假設任何散布授權。
 
 ---
 
