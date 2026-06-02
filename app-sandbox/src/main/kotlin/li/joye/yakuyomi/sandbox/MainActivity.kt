@@ -28,6 +28,7 @@ import li.joye.yakuyomi.engine.Ocr
 import li.joye.yakuyomi.engine.OcrConfig
 import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.Renderer
+import li.joye.yakuyomi.engine.TextFilter
 import li.joye.yakuyomi.engine.TextOrientation
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
@@ -79,7 +80,7 @@ class MainActivity : AppCompatActivity() {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
             val cfg = EngineConfig(
-                ocr = OcrConfig(minProb = 0f, useXnnpack = false), // 診斷：不丟低信心 + OCR 純 CPU
+                ocr = OcrConfig(), // 正式：minProb=0.5 丟低信心誤讀、useXnnpack=false（預設）
                 inpainter = InpainterConfig(method = method),
                 render = RenderConfig(
                     orientation = if (vertical) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL,
@@ -126,13 +127,15 @@ class MainActivity : AppCompatActivity() {
                             regions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
                             trMs = System.currentTimeMillis() - ms
                         }
+                        // 正式過濾：丟空白/數字/譯==原/regex 命中的區（誤判/未譯不去字、保留原圖）
+                        val kept = if (translator != null) TextFilter.apply(regions, cfg.translator.filterText) else regions
                         ms = System.currentTimeMillis()
-                        val cleaned = inp.inpaint(page, regions); val inMs = System.currentTimeMillis() - ms
+                        val cleaned = inp.inpaint(page, kept); val inMs = System.currentTimeMillis() - ms
                         ms = System.currentTimeMillis()
-                        val finalPage = Renderer.render(cleaned, regions, cfg.render, tf); val rnMs = System.currentTimeMillis() - ms
+                        val finalPage = Renderer.render(cleaned, kept, cfg.render, tf); val rnMs = System.currentTimeMillis() - ms
                         val pageMs = System.currentTimeMillis() - t0
                         total += pageMs
-                        log("[$tag] 偵測$detMs OCR$ocrMs 譯$trMs 去字$inMs 排版$rnMs｜頁$pageMs ms｜${lines.size}行${regions.size}區")
+                        log("[$tag] 偵測$detMs OCR$ocrMs 譯$trMs 去字$inMs 排版$rnMs｜頁$pageMs ms｜${lines.size}行${regions.size}區留${kept.size}")
                         addImage("$tag 成品（$method）", finalPage)
                     }
                     log("★ ${DEMOS.size} 頁總計 $total ms（去字=$method）平均 ${total / DEMOS.size} ms/頁")

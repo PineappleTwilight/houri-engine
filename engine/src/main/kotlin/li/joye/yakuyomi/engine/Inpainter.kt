@@ -10,6 +10,12 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.util.Log
 import java.nio.FloatBuffer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * LaMa 去字（Koharu mayocream/lama-manga.onnx）。block-aware：逐氣泡裁窗 → tile → LaMa → 貼回。
@@ -36,8 +42,7 @@ class Inpainter(
         session = env.createSession(modelPath, opts) // 路徑載入＝native 記憶體、不佔 JVM heap
     }
 
-    fun inpaint(page: Bitmap, regions: List<TextRegion>): Bitmap {
-        val tile = cfg.tileSize
+    suspend fun inpaint(page: Bitmap, regions: List<TextRegion>): Bitmap = coroutineScope {
         val w = page.width
         val h = page.height
         val result = page.copy(Bitmap.Config.ARGB_8888, true)
@@ -68,27 +73,17 @@ class Inpainter(
 
         if (cfg.method == "boxfill") {
             boxFill(result, regions, maskPx) // 瞬間：取氣泡底色填字區、不跑 LaMa
-        } else if (cfg.wholeImage) {
-            inpaintWindow(result, maskBmp, maskPx, 0, 0, w, h) // LaMa 整張一次
-        } else {
-            for (region in regions) {
-                val rw = region.x1 - region.x0
-                val rh = region.y1 - region.y0
-                val cx = (region.x0 + region.x1) / 2f
-                val cy = (region.y0 + region.y1) / 2f
-                val win = cfg.windowRatio
-                val wx0 = (cx - rw * win / 2f).toInt().coerceIn(0, w - 1)
-                val wy0 = (cy - rh * win / 2f).toInt().coerceIn(0, h - 1)
-                val wx1 = (cx + rw * win / 2f).toInt().coerceIn(wx0 + 1, w)
-                val wy1 = (cy + rh * win / 2f).toInt().coerceIn(wy0 + 1, h)
-                val ww = wx1 - wx0
-                val wh = wy1 - wy0
-                if (ww < 8 || wh < 8) continue
-                inpaintWindow(result, maskBmp, maskPx, wx0, wy0, ww, wh)
-            }
+            maskBmp.recycle()
+            return@coroutineScope result
         }
+        // lama 逐區平行：各區裁窗 → 平行跑 LaMa（只讀原圖+遮罩、唯讀安全）→ 收齊後序列貼回
+        val sem = Semaphore(cfg.concurrency.coerceAtLeast(1))
+        val outs = regions.mapNotNull { windowOf(it, w, h) }
+            .map { win -> async(Dispatchers.Default) { sem.withPermit { runWindow(page, maskBmp, win) } } }
+            .awaitAll()
+        for (o in outs) if (o != null) compositePixels(result, maskPx, o)
         maskBmp.recycle()
-        return result
+        result
     }
 
     /** box-fill 快速去字：每區的遮罩像素換成該區氣泡底色（bbox 內非遮罩像素均值）。無 LaMa、瞬間。 */
@@ -124,27 +119,47 @@ class Inpainter(
         result.setPixels(px, 0, w, 0, 0, w, h)
     }
 
-    /** 對一塊視窗 [wx0,wy0,ww,wh] 跑一次 LaMa（縮 tile→推論→放回），只把遮罩內像素換成結果。 */
-    private fun inpaintWindow(result: Bitmap, maskBmp: Bitmap, maskPx: IntArray, wx0: Int, wy0: Int, ww: Int, wh: Int) {
+    private class WinOut(val x0: Int, val y0: Int, val ww: Int, val wh: Int, val px: IntArray)
+
+    /** 由 region 算 ×windowRatio 裁窗（夾邊界）；太小回 null。 */
+    private fun windowOf(region: TextRegion, w: Int, h: Int): IntArray? {
+        val rw = region.x1 - region.x0
+        val rh = region.y1 - region.y0
+        val cx = (region.x0 + region.x1) / 2f
+        val cy = (region.y0 + region.y1) / 2f
+        val r = cfg.windowRatio
+        val wx0 = (cx - rw * r / 2f).toInt().coerceIn(0, w - 1)
+        val wy0 = (cy - rh * r / 2f).toInt().coerceIn(0, h - 1)
+        val wx1 = (cx + rw * r / 2f).toInt().coerceIn(wx0 + 1, w)
+        val wy1 = (cy + rh * r / 2f).toInt().coerceIn(wy0 + 1, h)
+        val ww = wx1 - wx0
+        val wh = wy1 - wy0
+        return if (ww < 8 || wh < 8) null else intArrayOf(wx0, wy0, ww, wh)
+    }
+
+    /** 對一塊視窗跑一次 LaMa（縮 tile→推論→放回視窗尺寸）；只讀 page/maskBmp ⇒ 平行安全。回傳視窗+輸出像素。 */
+    private fun runWindow(page: Bitmap, maskBmp: Bitmap, win: IntArray): WinOut? {
         val tile = cfg.tileSize
-        val w = result.width
-        val cropBmp = Bitmap.createBitmap(result, wx0, wy0, ww, wh)
+        val wx0 = win[0]; val wy0 = win[1]; val ww = win[2]; val wh = win[3]
+        val cropBmp = Bitmap.createBitmap(page, wx0, wy0, ww, wh)
         val crop512 = Bitmap.createScaledBitmap(cropBmp, tile, tile, true)
         val maskCropBmp = Bitmap.createBitmap(maskBmp, wx0, wy0, ww, wh)
         val mask512 = Bitmap.createScaledBitmap(maskCropBmp, tile, tile, false)
         val imgTensor = imageToNCHW(crop512, tile)
         val maskTensor = maskTo1CH(mask512, tile)
-        try {
+        return try {
             session.run(mapOf(INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
                 val outT = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
                 val res512 = nchwToBitmap(outT, tile)
                 val resWin = Bitmap.createScaledBitmap(res512, ww, wh, true)
-                compositeMasked(result, resWin, maskPx, w, wx0, wy0, ww, wh)
+                val px = IntArray(ww * wh)
+                resWin.getPixels(px, 0, ww, 0, 0, ww, wh)
                 res512.recycle()
                 resWin.recycle()
+                WinOut(wx0, wy0, ww, wh, px)
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "去字單窗失敗：${t.message}")
+            Log.w(TAG, "去字單窗失敗：${t.message}"); null
         } finally {
             imgTensor.close()
             maskTensor.close()
@@ -191,22 +206,19 @@ class Inpainter(
         return Bitmap.createBitmap(px, n, n, Bitmap.Config.ARGB_8888)
     }
 
-    private fun compositeMasked(
-        result: Bitmap, resWin: Bitmap, maskPx: IntArray,
-        w: Int, wx0: Int, wy0: Int, ww: Int, wh: Int,
-    ) {
-        val rp = IntArray(ww * wh)
-        resWin.getPixels(rp, 0, ww, 0, 0, ww, wh)
-        val win = IntArray(ww * wh)
-        result.getPixels(win, 0, ww, wx0, wy0, ww, wh)
-        for (y in 0 until wh) {
-            val maskRow = (wy0 + y) * w + wx0
-            val winRow = y * ww
-            for (x in 0 until ww) {
-                if ((maskPx[maskRow + x] and 0xFF) > 127) win[winRow + x] = rp[winRow + x]
+    /** 把視窗 LaMa 輸出貼回 result，只換遮罩內像素（序列呼叫、寫入安全）。 */
+    private fun compositePixels(result: Bitmap, maskPx: IntArray, o: WinOut) {
+        val w = result.width
+        val cur = IntArray(o.ww * o.wh)
+        result.getPixels(cur, 0, o.ww, o.x0, o.y0, o.ww, o.wh)
+        for (y in 0 until o.wh) {
+            val maskRow = (o.y0 + y) * w + o.x0
+            val row = y * o.ww
+            for (x in 0 until o.ww) {
+                if ((maskPx[maskRow + x] and 0xFF) > 127) cur[row + x] = o.px[row + x]
             }
         }
-        result.setPixels(win, 0, ww, wx0, wy0, ww, wh)
+        result.setPixels(cur, 0, o.ww, o.x0, o.y0, o.ww, o.wh)
     }
 
     override fun close() {
