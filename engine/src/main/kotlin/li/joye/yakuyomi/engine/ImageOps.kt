@@ -10,8 +10,9 @@ import kotlin.math.roundToInt
 
 /**
  * 前處理 helper（CLAUDE.md §5 ImageOps：第三層，重寫）。
+ * internal：[DetectorInput] 會碰 `OnnxTensor`，不該跨出 library 邊界。
  */
-object ImageOps {
+internal object ImageOps {
 
     /** 前處理結果：tensor ＋ 等比縮放比例（原圖座標 ×ratio→letterbox 空間；反算 ÷ratio）。 */
     class DetectorInput(val tensor: OnnxTensor, val ratio: Float)

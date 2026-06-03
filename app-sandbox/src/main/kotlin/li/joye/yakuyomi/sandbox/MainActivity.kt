@@ -18,17 +18,14 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import li.joye.yakuyomi.engine.Detector
 import li.joye.yakuyomi.engine.EngineConfig
-import li.joye.yakuyomi.engine.Inpainter
 import li.joye.yakuyomi.engine.InpainterConfig
-import li.joye.yakuyomi.engine.LlmTranslator
-import li.joye.yakuyomi.engine.Ocr
+import li.joye.yakuyomi.engine.ModelSet
 import li.joye.yakuyomi.engine.OcrConfig
 import li.joye.yakuyomi.engine.PageResult
-import li.joye.yakuyomi.engine.Pipeline
 import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.TextOrientation
+import li.joye.yakuyomi.engine.Yakuyomi
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
 /**
@@ -120,19 +117,15 @@ class MainActivity : AppCompatActivity() {
                 log("… 載入模型（首次複製到 filesDir 較久）")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
-                val det = Detector(ensureLocal(detF), cfg.detector)
-                val ocr = Ocr(ensureLocal(ocrF), alphabet, cfg.ocr)
-                val inp = Inpainter(ensureLocal(lamaF), cfg.inpainter)
-                val key = BuildConfig.DEEPSEEK_API_KEY
-                val translator = if (key.isNotBlank()) LlmTranslator(key, cfg.translator) else null
-                val pipeline = Pipeline(det, ocr, translator, inp, cfg, tf) // 引擎收斂：整條 pipeline 進 :engine
+                val models = ModelSet(ensureLocal(detF), ensureLocal(ocrF), ensureLocal(lamaF))
                 log("✓ 模型就緒，開跑")
-                try {
+                // 用工廠取得引擎、`use { }` 自動 close（取代手拼 Detector/Ocr/Inpainter/Pipeline + 逐一 close）
+                Yakuyomi.create(models, alphabet, BuildConfig.DEEPSEEK_API_KEY, cfg, tf).use { engine ->
                     var total = 0L
                     DEMOS.forEachIndexed { i, asset ->
                         val tag = "demo${i + 1}"
                         val page = loadAssetBitmap(asset)
-                        when (val r = pipeline.translatePage(page)) { // §11：略過/失敗都保留原圖、不覆蓋
+                        when (val r = engine.translatePage(page)) { // §11：略過/失敗都保留原圖、不覆蓋
                             is PageResult.Translated -> {
                                 val s = r.stats; total += s.totalMs
                                 log("[$tag] 偵測${s.detectMs} OCR${s.ocrMs} 譯${s.translateMs} 去字${s.inpaintMs} 排版${s.renderMs}｜頁${s.totalMs} ms｜${s.lines}行${s.regions}區留${s.kept}")
@@ -150,8 +143,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     log("★ ${DEMOS.size} 頁總計 $total ms（去字=$modeLabel）平均 ${total / DEMOS.size} ms/頁")
-                } finally {
-                    det.close(); ocr.close(); inp.close()
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "pipeline 失敗", t)

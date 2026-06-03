@@ -37,7 +37,7 @@ class RotRect(
     }
 }
 
-object Geometry {
+internal object Geometry {
     private fun cross(o: Pt, a: Pt, b: Pt) =
         (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 

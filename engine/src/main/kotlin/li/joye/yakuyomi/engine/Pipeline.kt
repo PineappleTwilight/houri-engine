@@ -42,7 +42,10 @@ data class PageStats(
  *   - 單 block 翻譯失敗 → 留原文（[Translator] 失敗項回原文 + [TextFilter] 丟「譯==原」的區 ⇒ 該區不去字、保留日文），其餘照翻。
  *   - 任一階段拋例外（網路/429 重試後仍失敗等）→ [PageResult.Failed]（保留原圖、不覆蓋、可重試）。
  *
- * 模型由呼叫端建好傳入（BYOM 路徑/下載與 close 都歸呼叫端）；本類不碰檔案、不管跨頁批次與 resume。
+ * 模型由呼叫端建好傳入；本類不碰檔案、不管跨頁批次與 resume。
+ * **生命週期**：[close] 會收掉傳入的 detector/ocr/inpainter 的原生 session ——
+ * 走 [Yakuyomi.create] 時這三顆由工廠建、歸本 pipeline 所有，`use { }` 即可。
+ * 進階：若你注入「想重用、共享」的元件，請自己管生命週期、別呼叫本 [close]（否則會把共享元件一起關掉）。
  */
 class Pipeline(
     private val detector: Detector,
@@ -120,6 +123,13 @@ class Pipeline(
             finalPage,
             PageStats(lines.size, regions.size, kept.size, detectMs, ocrMs, translateMs, inpaintMs, renderMs),
         )
+    }
+
+    /** 釋放 detector/ocr/inpainter 的原生 ONNX session（見類別說明的生命週期注意事項）。 */
+    override fun close() {
+        runCatching { detector.close() }
+        runCatching { ocr.close() }
+        runCatching { inpainter.close() }
     }
 
     companion object {

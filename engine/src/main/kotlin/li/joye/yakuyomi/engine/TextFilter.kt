@@ -13,8 +13,9 @@ package li.joye.yakuyomi.engine
  *
  * 被丟的區不進 [Inpainter]/[Renderer]，原始日文畫面原樣保留——比「去字後蓋回日文」更好。
  * 僅在「實際有翻譯」時套用；無 key 的 debug 路徑（排版日文）不過濾。
+ * internal：屬 pipeline 內部步驟，不跨出 library 邊界。
  */
-object TextFilter {
+internal object TextFilter {
 
     /** 回傳「保留」的區（過濾掉 should-filter 的）。 */
     fun apply(regions: List<TextRegion>, filterText: String? = null): List<TextRegion> {
