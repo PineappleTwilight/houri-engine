@@ -221,19 +221,40 @@ class Inpainter(
         val y0 = region.y0.toInt().coerceIn(0, h - 1)
         val x1 = region.x1.toInt().coerceIn(x0 + 1, w)
         val y1 = region.y1.toInt().coerceIn(y0 + 1, h)
-        var n = 0; var sl = 0.0; var sl2 = 0.0; var sr = 0L; var sg = 0L; var sb = 0L
-        for (y in y0 until y1) {
-            val row = y * w
-            for (x in x0 until x1) {
-                val i = row + x
-                if ((tightPx[i] and 0xFF) > 127) continue // 跳過文字像素
-                val p = px[i]
-                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
-                sl += 0.299 * r + 0.587 * g + 0.114 * b; sl2 += (0.299 * r + 0.587 * g + 0.114 * b).let { it * it }
-                sr += r; sg += g; sb += b; n++
+        val bw = x1 - x0; val bh = y1 - y0
+        // 行框多邊形局部遮罩：跟著斜框取背景，避開軸對齊 bbox 角落。★斜框(如斜的對話框)的 bbox 角落含氣泡黑邊/鄰格內容，
+        // 會污染背景 std、把乾淨斜白泡誤判成 lama（整頁很多斜泡時→大量 lama→裝置 OOM/超時→整頁失敗）。對齊 auto_diag.bg_stats。
+        val qmBmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+        Canvas(qmBmp).apply {
+            drawColor(Color.BLACK)
+            val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+            for (line in region.lines) {
+                val q = line.quad
+                if (q.size < 4) continue
+                val path = Path().apply {
+                    moveTo(q[0].x - x0, q[0].y - y0)
+                    for (i in 1..3) lineTo(q[i].x - x0, q[i].y - y0)
+                    close()
+                }
+                drawPath(path, p)
             }
         }
-        if (n < 16) return BgStat(255f, 0f, Color.WHITE) // 幾乎全文字＝當均勻白泡（平塗白安全）
+        val qm = IntArray(bw * bh)
+        qmBmp.getPixels(qm, 0, bw, 0, 0, bw, bh)
+        qmBmp.recycle()
+        var n = 0; var sl = 0.0; var sl2 = 0.0; var sr = 0L; var sg = 0L; var sb = 0L
+        for (y in 0 until bh) {
+            for (x in 0 until bw) {
+                if ((qm[y * bw + x] and 0xFF) <= 127) continue // 行框外
+                val gi = (y0 + y) * w + (x0 + x)
+                if ((tightPx[gi] and 0xFF) > 127) continue // 文字像素
+                val p = px[gi]
+                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                val lum = 0.299 * r + 0.587 * g + 0.114 * b
+                sl += lum; sl2 += lum * lum; sr += r; sg += g; sb += b; n++
+            }
+        }
+        if (n < 16) return BgStat(255f, 0f, Color.WHITE) // 行框內幾乎全文字＝當均勻白泡（平塗白安全）
         val mean = sl / n
         val std = kotlin.math.sqrt((sl2 / n - mean * mean).coerceAtLeast(0.0))
         return BgStat(mean.toFloat(), std.toFloat(), Color.rgb((sr / n).toInt(), (sg / n).toInt(), (sb / n).toInt()))

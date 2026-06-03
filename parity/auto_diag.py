@@ -23,13 +23,17 @@ WHITE_T = float(os.environ.get("YAKU_WHITET", "190"))  # 背景亮度均值 ≥ 
 LAMA = f"{paths.MODELS}/lama-manga.onnx"
 
 
-def bg_stats(img, mask, bbox):
-    """區 bbox 內非遮罩(背景)像素的亮度均值 + std。"""
-    x0, y0, x1, y1 = bbox
-    sub = img[y0:y1, x0:x1]; sm = mask[y0:y1, x0:x1]
-    bg = sub[sm <= 127]
+def bg_stats(img, tight, region):
+    """區域「行框多邊形」內、非文字(tight seg 外)像素的亮度均值 + std。
+    ★ 用行框(跟著斜框)而非軸對齊 bbox：斜框的 bbox 角落含氣泡黑邊/鄰格內容會污染量測、把白泡誤判成 lama。"""
+    x0, y0, x1, y1 = region["bbox"]
+    qm = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    for q in region["quads"]:
+        cv2.fillPoly(qm, [(np.array(q, np.float32) - [x0, y0]).astype(np.int32)], 255)
+    sub = img[y0:y1, x0:x1]; tt = tight[y0:y1, x0:x1]
+    bg = sub[(qm > 0) & (tt <= 127)]
     if len(bg) < 16:
-        return 255.0, 0.0  # 幾乎全遮罩→當白泡(boxfill 安全)
+        return 255.0, 0.0  # 行框內幾乎全文字→當白泡(boxfill 安全)
     lum = 0.114 * bg[:, 0] + 0.587 * bg[:, 1] + 0.299 * bg[:, 2]  # BGR
     return float(lum.mean()), float(lum.std())
 
@@ -59,7 +63,7 @@ def main():
 
     # 每區判定（背景量測用 tight seg，非膨脹去字遮罩）
     for r in regions:
-        mean, std = bg_stats(bgr, tight, r["bbox"])
+        mean, std = bg_stats(bgr, tight, r)
         r["mean"], r["std"] = mean, std
         r["bubble"] = is_bubble(mean, std)
     bub = [r for r in regions if r["bubble"]]
