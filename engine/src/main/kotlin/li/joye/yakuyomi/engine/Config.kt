@@ -102,6 +102,7 @@ data class RenderConfig(
     val expandW: Float = 1.3f,   // 文字框放大倍率（寬）給呼吸空間
     val expandH: Float = 1.5f,   // 文字框放大倍率（直欄高 / 橫排列高）
     val colTrim: Int = 3,        // 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
+    val rowTrim: Int = 3,        // 橫排每行少放幾字（colTrim 的橫排對映：行變短、列變多→字級自動縮）
     val fontScale: Float = 0.85f, // 算好字級後整體縮放（<1＝更小、更 fit 格子、留邊距）
     // 文字顏色：auto＝取去字後背景亮度判黑/白字（最穩、白底黑字/黑底白字）；mono＝一律黑字白邊
     val colorMode: String = "auto",

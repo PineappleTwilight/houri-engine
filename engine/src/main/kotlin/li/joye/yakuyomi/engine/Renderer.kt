@@ -161,7 +161,7 @@ object Renderer {
         var s = min(rowRoom.toInt(), cfg.fontSizeMax)
         while (s >= cfg.fontSizeMin) {
             fill.textSize = s.toFloat()
-            val ls = wrapCjk(text, fill, bw)
+            val ls = wrapCjk(text, fill, (bw - cfg.rowTrim * s).coerceAtLeast(s.toFloat())) // 每行少 rowTrim 字（橫向字數）
             val maxW = ls.maxOfOrNull { fill.measureText(it) } ?: 0f
             if (ls.size * s * 1.18f <= rowRoom && maxW <= bw) { size = s; lines = ls; break }
             s--
@@ -169,7 +169,7 @@ object Renderer {
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
         stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
-        lines = wrapCjk(text, fill, bw)  // 縮小後重排
+        lines = wrapCjk(text, fill, (bw - cfg.rowTrim * size).coerceAtLeast(size.toFloat()))  // 縮小後重排（含 rowTrim）
         val lh = size * 1.18f
         val tcx = (x0 + x1) / 2f
         var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT  // 垂直置中於框
