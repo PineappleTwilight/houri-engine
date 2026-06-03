@@ -91,6 +91,23 @@ Notable defaults (full list in `Config.kt`):
   then rotate along the region's skew angle to match the source.
 - `TranslatorConfig.provider = "deepseek"` — any OpenAI-compatible endpoint (set `apiBase`/`model`).
 
+### Language pair (not fixed to JP→CHT)
+
+Default is Japanese → Traditional Chinese, but **any pair works** — set these together:
+
+```kotlin
+translator = TranslatorConfig(
+    toLangName   = "English",     // target — the LLM translates into this
+    fromLangName = "Korean",      // source label for the prompt ("" = let the LLM infer)
+    sampleSource = "<|1|>…",      // few-shot example in the source language ("" = no example)
+    sampleTarget = "<|1|>…",      // …and its translation, in the target language
+)
+```
+
+The **source** is ultimately whatever your OCR model recognises — the bundled 48px CTC is Japanese;
+load a different OCR model + alphabet (BYOM) to read another language. The **target** is purely the LLM
+prompt. Keep `toLangName` and the few-shot in the same target language, or the example biases output.
+
 ---
 
 ## Result handling

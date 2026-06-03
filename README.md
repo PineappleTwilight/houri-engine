@@ -4,7 +4,7 @@
 
 **On-device manga-translation engine — detection / OCR / text-removal (ONNX Runtime) + cloud-LLM translation**
 
-Japanese → Traditional Chinese (CHT)
+Japanese → Traditional Chinese by default — **any source/target pair is configurable**
 
 **English** ｜ [中文](README_zh.md)
 

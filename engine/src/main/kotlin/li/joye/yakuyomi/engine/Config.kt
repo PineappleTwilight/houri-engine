@@ -37,12 +37,28 @@ data class OcrConfig(
     val useXnnpack: Boolean = false,  // ★預設關：XNNPACK 會把 48px CTC OCR 模型算錯（真機實證吐空），改純 CPU 才正確
 )
 
+// 預設 few-shot（日→繁中）：示範 <|i|> 逐行格式。改語言對時連同 toLangName/fromLangName 一起換成對應譯文。
+private const val DEFAULT_SAMPLE_SOURCE =
+    "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
+private const val DEFAULT_SAMPLE_TARGET =
+    "<|1|>好尷尬…我不想引人注目…我想消失…\n<|2|>你…沒事吧⁉\n<|3|>這傢伙是看不懂氣氛嗎…？"
+
+/**
+ * 翻譯設定。**語言對可任意**（不寫死日→繁中，只是預設）：
+ *  - [toLangName] = 目標語言（LLM 直接照這個翻）。
+ *  - [fromLangName] = 來源語言標註（進 prompt 措辭；實際來源其實由 OCR 模型決定＝BYOM 換模型就換來源）。
+ *  - [sampleSource]/[sampleTarget] = few-shot 範例（同時示範格式與語言對）。
+ * 換語言對：設 toLangName + fromLangName + 對應的 few-shot（三者要一致，否則 few-shot 會把輸出帶偏）。
+ */
 data class TranslatorConfig(
     val provider: String = "deepseek",                                  // 〔設定〕config.translator
     val targetLang: String = "CHT",                                     // 〔設定〕config.target_lang
     val model: String = "deepseek-chat",                                // 〔設定〕
     val apiBase: String = "https://api.deepseek.com/chat/completions",  // 〔設定〕custom_openai 用
-    val toLangName: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",
+    val toLangName: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",  // 〔設定〕目標語言
+    val fromLangName: String = "Japanese",          // 〔設定〕來源語言標註（空白＝讓 LLM 自己判）
+    val sampleSource: String = DEFAULT_SAMPLE_SOURCE, // 〔設定〕few-shot 原文（空白＝不放範例）
+    val sampleTarget: String = DEFAULT_SAMPLE_TARGET, // 〔設定〕few-shot 譯文（要跟 toLangName 同語言）
     val temperature: Double = 0.3,
     // 跨頁批次翻譯（對映 m-i-t --batch-size / --batch-concurrent；§2 翻譯批次策略、§10 並發旋鈕）
     val batchSize: Int = 8,              // 〔設定〕批次頁數：concurrent 模式＝同時並發的頁數上限；merged 模式＝每 prompt 併幾頁

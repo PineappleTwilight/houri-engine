@@ -15,8 +15,9 @@ import java.util.concurrent.TimeUnit
  * 雲端 LLM 翻譯（OpenAI 相容）。參數見 [TranslatorConfig]（provider/model/base/lang/temp 皆可設定）。
  *
  * prompt/協定 ported from manga_translator/translators/{chatgpt.py,config_gpt.py} @ d5a3eee（第一層照搬）：
- *   system(三步法) → few-shot(user 日文 / assistant 譯文) → user(<|i|>原文)；回應依 <|i|> 解析。
- *   漏行保留原文（§11）。成功譯文過 postProcess（s2twp，§12-8）。
+ *   system(三步法) → few-shot(語言對範例，預設日→繁中、可改/可關，見 [TranslatorConfig]) → user(<|i|>原文)；回應依 <|i|> 解析。
+ *   **語言對不寫死**：toLangName/fromLangName/sample* 全可設定（來源也可換 OCR 模型＝BYOM）。
+ *   漏行保留原文（§11）。成功譯文過可選 [postProcess]（如語言正規化）。
  * 此類只管「一頁」；跨頁批次與並發（cfg.batchSize / batchConcurrent）由 [BatchTranslator] 控。
  */
 class LlmTranslator(
@@ -54,11 +55,20 @@ class LlmTranslator(
     private fun buildMessages(queries: List<String>): JSONArray {
         val userPrompt = queries.mapIndexed { i, q -> "<|${i + 1}|>$q" }.joinToString("\n")
         return JSONArray().apply {
-            put(msg("system", SYSTEM_TEMPLATE.replace("{to_lang}", cfg.toLangName)))
-            put(msg("user", SAMPLE_IN))
-            put(msg("assistant", SAMPLE_OUT))
+            put(msg("system", systemPrompt()))
+            // few-shot 同時示範 <|i|> 格式與語言對；任一空白＝不放（全靠 system + 格式規則）
+            if (cfg.sampleSource.isNotBlank() && cfg.sampleTarget.isNotBlank()) {
+                put(msg("user", cfg.sampleSource))
+                put(msg("assistant", cfg.sampleTarget))
+            }
             put(msg("user", userPrompt))
         }
+    }
+
+    /** 套入語言對：{to_lang}←toLangName、{from_lang}←fromLangName（空白＝省略來源語、讓 LLM 自己判）。 */
+    private fun systemPrompt(): String {
+        val fromClause = cfg.fromLangName.trim().let { if (it.isEmpty()) "" else "$it " }
+        return SYSTEM_TEMPLATE.replace("{to_lang}", cfg.toLangName).replace("{from_lang}", fromClause)
     }
 
     private fun msg(role: String, content: String) =
@@ -126,11 +136,6 @@ class LlmTranslator(
                 "- Preserve original gibberish or sound effects without translation.\n" +
                 "- Output each segment with its prefix (<|number|> format exactly) and only provide the translation without raw text.\n" +
                 "- Translate content only—no additional interpretation or commentary.\n" +
-                "Translate the following text into {to_lang}:\n"
-
-        private const val SAMPLE_IN =
-            "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
-        private const val SAMPLE_OUT =
-            "<|1|>好尷尬…我不想引人注目…我想消失…\n<|2|>你…沒事吧⁉\n<|3|>這傢伙是看不懂氣氛嗎…？"
+                "Translate the following {from_lang}text into {to_lang}:\n"
     }
 }

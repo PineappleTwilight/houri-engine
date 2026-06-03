@@ -86,6 +86,22 @@ Yakuyomi.create(models, alphabet, apiKey, config)
 - `RenderConfig.orientation = AUTO`——跟著每個區域偵測到的方向（直/橫排），再沿區域傾斜角旋轉以貼合原文。
 - `TranslatorConfig.provider = "deepseek"`——任何 OpenAI 相容端點（設 `apiBase`/`model`）。
 
+### 語言對（不寫死日→繁中）
+
+預設是日本語 → 繁體中文，但**任意語言對都行**——這幾個一起設：
+
+```kotlin
+translator = TranslatorConfig(
+    toLangName   = "English",     // 目標——LLM 直接翻成這個
+    fromLangName = "Korean",      // 來源語言標註（""＝讓 LLM 自己判）
+    sampleSource = "<|1|>…",      // 來源語言的 few-shot 範例（""＝不放範例）
+    sampleTarget = "<|1|>…",      // …以及它的譯文（要跟目標同語言）
+)
+```
+
+**來源**最終取決於你載的 OCR 模型——內建 48px CTC 是日文；要讀別的語言就載別的 OCR 模型 + 字元表（BYOM）。
+**目標**純粹是 LLM prompt。`toLangName` 跟 few-shot 要同一個目標語言，否則範例會把輸出帶偏。
+
 ---
 
 ## 結果處理

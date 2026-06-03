@@ -56,6 +56,7 @@ page bitmap
   （這步就是阻止密集氣泡黏成一塊的關鍵）。同時算每區的閱讀序與傾斜角。
 - **Translator**——把 m-i-t 的 `chatgpt.py` prompt + 協定移植成 OpenAI 相容呼叫。逐頁、無跨頁上文
   （效率優先）。逐區失敗就 fallback 回原文。
+  **語言對可設定**——目標走 `toLangName`、來源走 OCR 模型 + prompt 標註（預設日→繁中，非寫死）。
 - **TextFilter**——m-i-t 的翻譯後過濾：不要把空白、純數字、LLM 原樣回傳的文字蓋回去。
 - **Inpainter**——預設 `boxfill`（每遮罩像素取最近非遮罩色）；LaMa（整頁 tile 或逐區 window）為替代。
 - **Renderer**——純文字框排版（不做氣泡 flood-fill）：字級自適應、行頭禁則、直/橫排、依背景亮度自動選字色、

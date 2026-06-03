@@ -62,6 +62,7 @@ Each stage in one line:
   dense bubbles merging into one block). Also computes each region's reading order and skew angle.
 - **Translator** — ports m-i-t's `chatgpt.py` prompt + protocol to an OpenAI-compatible call. Per
   page, no cross-page context (efficiency-first). Per-region failures fall back to the original text.
+  **Language pair is configurable** — target via `toLangName`, source via the OCR model + a prompt label (default JP→CHT, not hardcoded).
 - **TextFilter** — m-i-t's post-translation filter: don't paste back blanks, bare numbers, or
   text the LLM returned untranslated.
 - **Inpainter** — `boxfill` (nearest non-mask colour per masked pixel) by default; LaMa
