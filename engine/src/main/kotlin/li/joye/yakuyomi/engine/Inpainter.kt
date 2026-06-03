@@ -54,7 +54,14 @@ class Inpainter(
         if (cfg.method == "lama") regions.forEach { it.onArt = true }
 
         if (cfg.method == "boxfill") {
-            boxFill(result, maskPx) // 瞬間：就近取色填字筆畫、不跑 LaMa
+            // 逐區「平塗背景色」（取代就近取色 boxFill）：修大遮罩中心 FILL_REACH 搆不到 → 殘留原文暗痕（紅圈雜訊）。
+            // 白泡乾淨無殘留；忙碌區是平色塊（boxfill 本就最速質劣，要品質用 auto/lama）。對齊 auto 白泡的平塗。
+            val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
+            val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
+            for (r in regions) {
+                val s = bgStats(px, tightPx, r, w, h)
+                flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
+            }
             maskBmp.recycle()
             return@coroutineScope result
         }
