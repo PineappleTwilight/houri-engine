@@ -26,7 +26,9 @@ data class DetectorConfig(
     val boxThreshold: Float = 0.6f,   // 〔設定〕ctd.py 外部過濾（config.box_threshold=0.7 是 default 偵測器）
     val unclipRatio: Float = 1.5f,    // 〔設定〕ctd unclip（config.unclip_ratio=2.3 是 default 偵測器）
     val minSide: Float = 3f,
-    val segThreshold: Float = 0.3f,   // seg 文字筆畫遮罩二值門檻（去字用；parity/seg_validate.py 驗證 0.3 對齊、覆蓋好）
+    // seg 文字筆畫遮罩二值門檻（去字用）。★ 0.3 會濾掉漢字旁注音「假名」的弱訊號 → 去字留一排假名殘留。
+    // 降到 0.12＝偵測器其實看得到假名、只是 prob 弱（桌面 parity/auto_diag.py dev_furi3 實證）。只影響去字遮罩、不動偵測框/OCR。
+    val segThreshold: Float = 0.12f,
 )
 
 data class OcrConfig(
@@ -72,11 +74,21 @@ data class InpainterConfig(
     //   boxfill        ＝取氣泡底色填字區（瞬間、~12s/頁、平/單色泡泡最乾淨）。但多彩/壓在畫面上的字會塗錯色塊＝失敗得很醜，故不當預設。
     //   lama+逐區       ＝每區各跑一次 LaMa（小泡較銳利，但 N 區＝N× 整頁算力 ⇒ ~81s/頁；大/彩色泡泡仍會糊）。
     // ※ 不開 concurrency／獨立 session：去字是純 CPU、核數固定，平行切核不增總算力（實測並發≈序列）。逐區慢是「做 N 倍的事」，平行救不了。
-    val method: String = "boxfill",   // 真機 A/B 拍板：boxfill+seg 最快(~11.5s/頁)又乾淨(細筆畫+就近取色)、品質追平最貴的逐格
+    // 預設 auto：每區判背景——白且均勻＝對話框→平塗背景白（瞬間、保證無殘留）；否則(臉/髮/壓畫面)→lama逐區重建。
+    // 對齊桌面 parity/auto_diag.py（含假名修復、bubble 路由、平塗）。可改 boxfill(全平塗就近取色) / lama(整頁或逐區)。
+    val method: String = "auto",
     val wholeImage: Boolean = true,   // lama：true＝整頁一次（快）/ false＝逐區（小泡銳利、慢）
     val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（改了對不上模型）
     val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（lama 逐區裁窗）
-    val maskDilate: Float = 7f,       // ~ config.kernel_size / mask_dilation_offset
+    // 去字遮罩膨脹（半徑 = maskDilate/2）。★關鍵：漫畫在臉/頭髮上的字會描一圈白邊；遮罩太薄只蓋黑筆畫、
+    // 白邊留在外面 → boxfill 取到白邊抹成白塊、lama 把白邊當 context 延伸成白塊（兩者都像沒去字）。
+    // 加厚到半徑~12 吞掉白邊後，lama 周圍 context 全變底圖 → 重建乾淨（桌面 inpaint_dev DIL=12 實證 ≈ MIT）。
+    val maskDilate: Float = 24f,      // 半徑 12px：吞掉文字白邊（之前 7=半徑4 會殘白塊）
+    // auto 路由：背景(未膨脹 textMask 外的像素)亮度 std < autoStdThreshold 且均值 ≥ autoWhiteThreshold ＝對話框→平塗；否則 lama。
+    // ★ std 用未膨脹 textMask 量（膨脹遮罩會蓋掉筆畫間的白、量不到背景）。實測真白泡 std<3、壓在亮建築上 std~18-21(走lama)、臉 28+。
+    val autoStdThreshold: Float = 12f,   // 24→12：把「壓畫面的白底文字」正確判給 lama（桌面 auto_diag.py 驗證）
+    val autoWhiteThreshold: Float = 190f, // 背景亮度均值門檻：對話框是白底
+    val bboxPad: Int = 16,                // 去字 allow 用區域 bbox 矩形外擴 px：涵蓋貼 bbox 邊界的假名（行框太緊會漏）
     val intraThreads: Int = 4,        // LaMa session intra-op 執行緒（整頁/逐區都用滿 4 核）
 )
 
