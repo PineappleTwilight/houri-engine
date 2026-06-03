@@ -35,12 +35,17 @@ class LlmTranslator(
     var lastError: String? = null
         private set
 
+    /** 最近一次原始回應前段（診斷用）。 */
+    var lastRaw: String? = null
+        private set
+
     override suspend fun translate(queries: List<String>): List<String> {
         if (queries.isEmpty()) return emptyList()
         return try {
             val raw = request(buildMessages(queries))
+            lastRaw = raw.take(220)
             val parsed = parse(raw)
-            lastError = null
+            lastError = if (parsed.size < queries.size) "解析${parsed.size}/${queries.size}" else null
             queries.mapIndexed { i, q ->
                 val tr = parsed[i + 1]?.takeIf { it.isNotBlank() }
                 if (tr != null) (postProcess?.invoke(tr) ?: tr) else q
@@ -108,7 +113,9 @@ class LlmTranslator(
 
     companion object {
         private const val TAG = "LlmTranslator"
-        private val LINE_RE = Regex("""^<\|(\d+)\|>\s*(.*)$""")
+        // 寬鬆解析：DeepSeek 偶爾吐格式變體（實測 <|1>| 管線跑到 > 後面、或 <|1>）。
+        // 只認「<、可選|、數字、一串 |/>、譯文」⇒ 容 <|1|> / <|1>| / <|1>，非決定性格式錯不再整頁失敗。
+        private val LINE_RE = Regex("""^<\|?(\d+)\s*[|>]+\s*(.*)$""")
         private val THINK_RE = Regex("""(</think>)?<think>.*?</think>""", RegexOption.DOT_MATCHES_ALL)
 
         private const val SYSTEM_TEMPLATE =

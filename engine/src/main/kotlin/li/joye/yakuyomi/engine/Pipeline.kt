@@ -99,8 +99,13 @@ class Pipeline(
         // 過濾：空白/數字/regex/譯==原 → 丟（未譯或誤判的區不去字、保留原圖該處）
         val kept = if (translator != null) TextFilter.apply(regions, cfg.translator.filterText) else regions
         if (kept.isEmpty()) {
+            // 診斷：全數過濾＝沒有效譯文。印對齊數 + 翻譯 err/原始回應 + OCR原文→譯文，方便定位（OCR空? 翻譯格式錯? 過濾太兇?）
+            val aligned = regions.count { it.translatedText.isNotBlank() && it.translatedText != it.sourceText }
+            val tr = translator as? LlmTranslator
+            val dbg = regions.take(2).joinToString(" ‖ ") { "${it.sourceText.take(8)}→${it.translatedText.take(8)}" }
+            Log.w(TAG, "全數過濾 對齊$aligned/${regions.size} err=${tr?.lastError} 回應=${tr?.lastRaw}")
             return PageResult.Skipped(
-                "無有效譯文（全數過濾）",
+                "全數過濾 對齊$aligned/${regions.size} err=${tr?.lastError}｜回應=${tr?.lastRaw}｜$dbg",
                 PageStats(lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0),
             )
         }
