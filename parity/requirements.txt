@@ -7,6 +7,9 @@ pillow
 networkx        # mit_grouping: MST split
 shapely         # mit_grouping: polygon distance
 
+# Tests:
+pytest          # run: pytest parity/
+
 # Tool-only (uncomment if you run these):
 # torch         # export_ocr_onnx.py — export the 48px CTC checkpoint to ONNX
 # opencc        # merge_translate_parity.py — optional s2twp post-processing
