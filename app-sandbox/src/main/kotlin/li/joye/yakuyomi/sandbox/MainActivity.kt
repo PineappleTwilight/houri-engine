@@ -67,6 +67,9 @@ class MainActivity : AppCompatActivity() {
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
         binding.inpaintSpinner.setSelection(0) // 預設＝boxfill（position 0，真機 A/B 拍板）
+        binding.orientSpinner.adapter = android.widget.ArrayAdapter(
+            this, android.R.layout.simple_spinner_dropdown_item, ORIENT_MODES,
+        ) // 預設 position 0＝自動（跟原文方向）
         val t = currentTree()
         binding.logText.text =
             if (t == null) "① 先按「選擇模型資料夾」選含 3 個 *.onnx 的資料夾\n② 選去字方式 → 按翻譯跑全 4 張"
@@ -75,7 +78,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
-        val vertical = binding.verticalSwitch.isChecked
+        val orientation = when (binding.orientSpinner.selectedItemPosition) {
+            1 -> TextOrientation.VERTICAL
+            2 -> TextOrientation.HORIZONTAL
+            else -> TextOrientation.AUTO
+        }
         val saveLog = binding.genLogSwitch.isChecked
         runSaveImg = binding.genImgSwitch.isChecked
         val pos = binding.inpaintSpinner.selectedItemPosition // 0=boxfill 1=lama整頁 2=lama逐格
@@ -93,7 +100,7 @@ class MainActivity : AppCompatActivity() {
                 ocr = OcrConfig(), // 正式：minProb=0.5 丟低信心誤讀、useXnnpack=false（預設）
                 inpainter = InpainterConfig(method = method, wholeImage = whole),
                 render = RenderConfig(
-                    orientation = if (vertical) TextOrientation.VERTICAL else TextOrientation.HORIZONTAL,
+                    orientation = orientation,
                 ),
             )
             try {
@@ -253,8 +260,10 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val FIXED_VIEWS = 8 // 固定子 view：選資料夾鈕/翻譯鈕/3 開關/去字標籤/去字選單/logText
+        private const val FIXED_VIEWS = 9 // 固定子 view：選資料夾鈕/翻譯鈕/方向標籤+選單/2 開關/去字標籤+選單/logText
         private const val PREF_TREE = "modelTree"
+        // 排版方向選單（順序＝position：0 自動（跟原文方向）/ 1 直排 / 2 橫排）
+        private val ORIENT_MODES = listOf("自動（跟原文方向）", "直排", "橫排")
         // 去字方式選單（順序＝position：0 boxfill / 1 lama整頁 / 2 lama逐格）
         private val INPAINT_MODES = listOf(
             "boxfill 就近取色（快·預設）",

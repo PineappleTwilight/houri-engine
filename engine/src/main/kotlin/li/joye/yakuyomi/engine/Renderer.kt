@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -45,12 +46,25 @@ object Renderer {
             fill.color = fillColor
             stroke.color = outlineColor
             val vertical = when (cfg.orientation) {
-                TextOrientation.AUTO -> isCjk(text)
+                TextOrientation.AUTO -> region.direction == "v" // 跟著偵測到的原文方向（對齊 m-i-t），不再無腦直排
                 TextOrientation.VERTICAL -> true
                 TextOrientation.HORIZONTAL -> false
             }
-            if (vertical) drawVertical(canvas, region, text, fill, stroke, cfg)
-            else drawHorizontal(canvas, region, text, fill, stroke, cfg)
+            // 斜框：繞區域中心旋轉畫布、用去傾斜框排版。
+            // 旋轉方向經 PCA 量測對齊 m-i-t 樣本：region 正角＝文字右端下斜。
+            // Android Canvas 正角＝順時針（y 朝下）＝右端下斜 → 直接 +angle（parity 用 PIL、正角逆時針故取 -angle）。
+            val rotate = abs(region.angle) >= 1f
+            val x0: Float; val y0: Float; val x1: Float; val y1: Float
+            if (rotate) {
+                x0 = region.cx - region.boxW / 2f; y0 = region.cy - region.boxH / 2f
+                x1 = region.cx + region.boxW / 2f; y1 = region.cy + region.boxH / 2f
+                canvas.save(); canvas.rotate(region.angle, region.cx, region.cy)
+            } else {
+                x0 = region.x0; y0 = region.y0; x1 = region.x1; y1 = region.y1
+            }
+            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg)
+            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg)
+            if (rotate) canvas.restore()
         }
         return out
     }
@@ -87,11 +101,11 @@ object Renderer {
     }
 
     /** 直排：欄右→左、字上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 字。 */
-    private fun drawVertical(canvas: Canvas, r: TextRegion, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig) {
+    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
-        val bw = (r.x1 - r.x0) * cfg.expandW         // 寬：放大後的文字框寬
-        val colRoom = (r.y1 - r.y0) * cfg.expandH    // 直欄可用高（從文字框頂往下）
+        val bw = (x1 - x0) * cfg.expandW         // 寬：放大後的文字框寬
+        val colRoom = (y1 - y0) * cfg.expandH    // 直欄可用高（從文字框頂往下）
         var size = cfg.fontSizeMin
         var s = min(colRoom.toInt(), cfg.fontSizeMax)
         while (s >= cfg.fontSizeMin) {
@@ -107,10 +121,10 @@ object Renderer {
         val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
         val columns = splitColumnsV(chars, cpc)       // 禁則：欄不以行頭禁則字開頭
         val cols = columns.size
-        val tcx = (r.x0 + r.x1) / 2f                  // 定位：水平置中於文字框中心
+        val tcx = (x0 + x1) / 2f                  // 定位：水平置中於文字框中心
         val rightCx = tcx + cols * cw / 2f - cw / 2f
         val blockH = columns.maxOf { it.length } * lh // 垂直置中：以最長欄高為塊高，置中於框
-        val startCy = (r.y0 + r.y1) / 2f - blockH / 2f
+        val startCy = (y0 + y1) / 2f - blockH / 2f
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
             var cy = startCy
@@ -137,9 +151,9 @@ object Renderer {
     }
 
     /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。 */
-    private fun drawHorizontal(canvas: Canvas, r: TextRegion, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig) {
-        val bw = (r.x1 - r.x0) * cfg.expandW
-        val rowRoom = (r.y1 - r.y0) * cfg.expandH
+    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig) {
+        val bw = (x1 - x0) * cfg.expandW
+        val rowRoom = (y1 - y0) * cfg.expandH
         var size = cfg.fontSizeMin
         var lines = listOf(text)
         var s = min(rowRoom.toInt(), cfg.fontSizeMax)
@@ -155,8 +169,8 @@ object Renderer {
         stroke.strokeWidth = maxOf(2f, size * STROKE_RATIO)  // 描邊隨字級
         lines = wrapCjk(text, fill, bw)  // 縮小後重排
         val lh = size * 1.18f
-        val tcx = (r.x0 + r.x1) / 2f
-        var baseline = (r.y0 + r.y1) / 2f - lines.size * lh / 2f + size * ASCENT  // 垂直置中於框
+        val tcx = (x0 + x1) / 2f
+        var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT  // 垂直置中於框
         for (ln in lines) {
             val tx = tcx - fill.measureText(ln) / 2f
             if (cfg.fontBorder) canvas.drawText(ln, tx, baseline, stroke)

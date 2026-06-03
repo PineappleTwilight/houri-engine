@@ -19,9 +19,6 @@ for name in sys.argv[1:]:
             continue
         tb = (x0, y0, x1, y1)
         fg, bg = ts.resolve_colors(npimg, tb, r.get("fg") or (0, 0, 0), r.get("bg") or (255, 255, 255))
-        if ts.is_cjk(cht):
-            ts.draw_v(im, dr, cht, tb, fg, bg)
-        else:
-            ts.draw_h(dr, cht, tb, fg, bg)
+        ts.draw_region(im, dr, cht, r, fg, bg)  # dir(AUTO 跟原文) + angle 斜框
     im.save(os.path.join(OUT, f"final_{name}.png"))
     print(f"{name} retypeset")

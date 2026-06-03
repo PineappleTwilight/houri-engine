@@ -5,10 +5,13 @@
 重用既有 parity 模組的函式（detect/ocr/typeset），orchestration 內聯。
 """
 import os, sys, re, json
+from collections import Counter
 import numpy as np
 import cv2
 import onnxruntime as ort
 from PIL import Image, ImageDraw
+
+from mit_grouping import Quadrilateral as MitQuad, merge_bboxes_text_region
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import translate_parity as tp
 import typeset_parity as ts
@@ -56,43 +59,41 @@ def _bbox(q):
     return a[:, 0].min(), a[:, 1].min(), a[:, 0].max(), a[:, 1].max()
 
 
-def group(res):
-    n = len(res)
-    bb = [_bbox(r["quad"]) for r in res]
-    fs = [min(b[2] - b[0], b[3] - b[1]) for b in bb]
-    par = list(range(n))
-
-    def find(x):
-        while par[x] != x:
-            par[x] = par[par[x]]; x = par[x]
-        return x
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if res[i]["dir"] != res[j]["dir"]:
-                continue
-            cs = min(fs[i], fs[j])
-            if cs <= 0 or max(fs[i], fs[j]) / cs > FS_RATIO:
-                continue
-            dx = max(0, max(bb[i][0], bb[j][0]) - min(bb[i][2], bb[j][2]))
-            dy = max(0, max(bb[i][1], bb[j][1]) - min(bb[i][3], bb[j][3]))
-            if (dx * dx + dy * dy) ** 0.5 < cs * GAP:
-                par[find(i)] = find(j)
-    groups = {}
-    for i in range(n):
-        groups.setdefault(find(i), []).append(i)
+def group(res, W, H):
+    # 兩階段分組（連邊 + MST 分裂），照搬 m-i-t merge_bboxes_text_region（見 mit_grouping.py）。
+    quads = []
+    for r in res:
+        fg = r.get("fg") or (0, 0, 0)
+        bg = r.get("bg") or (255, 255, 255)
+        quads.append(MitQuad(np.array(r["quad"], float), r["text"], 0.9,
+                             tuple(int(c) for c in fg), tuple(int(c) for c in bg)))
     regions = []
-    for mem in groups.values():
-        d = res[mem[0]]["dir"]
-        mem.sort(key=(lambda i: -bb[i][2]) if d == "v" else (lambda i: (bb[i][1], bb[i][0])))
+    for txtlns, fgc, bgc in merge_bboxes_text_region(quads, W, H):
+        x0 = min(t.aabb.x for t in txtlns)
+        y0 = min(t.aabb.y for t in txtlns)
+        x1 = max(t.aabb.x + t.aabb.w for t in txtlns)
+        y1 = max(t.aabb.y + t.aabb.h for t in txtlns)
+        d = Counter([t.direction for t in txtlns]).most_common(1)[0][0]
+        # 區域角度＝各行角度均值-90（對齊 textline_merge dispatch），<3° 視為 0；斜框排版用
+        angle = float(np.degrees(np.mean([t.angle for t in txtlns])) - 90)
+        if abs(angle) < 3:
+            angle = 0.0
+        allpts = np.concatenate([np.asarray(t.pts, float) for t in txtlns])
+        cx = float(allpts[:, 0].mean())
+        cy = float(allpts[:, 1].mean())
+        rad = np.radians(angle)  # 去傾斜（R(-angle)）取文字自然座標下的框尺寸
+        dx = allpts[:, 0] - cx
+        dy = allpts[:, 1] - cy
+        rx = np.cos(rad) * dx + np.sin(rad) * dy
+        ry = -np.sin(rad) * dx + np.cos(rad) * dy
+        box_w = float(rx.max() - rx.min())
+        box_h = float(ry.max() - ry.min())
         regions.append({
-            "dir": d, "jp": "".join(res[i]["text"] for i in mem), "n": len(mem),
-            "bbox": [min(bb[i][0] for i in mem), min(bb[i][1] for i in mem),
-                     max(bb[i][2] for i in mem), max(bb[i][3] for i in mem)],
-            "quads": [res[i]["quad"] for i in mem],
-            # region 色＝各成員行平均（對齊 m-i-t update_font_colors 的逐行平均）
-            "fg": [int(np.mean([res[i]["fg"][k] for i in mem])) for k in range(3)],
-            "bg": [int(np.mean([res[i]["bg"][k] for i in mem])) for k in range(3)],
+            "dir": d, "jp": "".join(t.text for t in txtlns), "n": len(txtlns),
+            "bbox": [int(x0), int(y0), int(x1), int(y1)],
+            "quads": [t.pts.tolist() for t in txtlns],
+            "fg": list(fgc), "bg": list(bgc),
+            "angle": angle, "cx": cx, "cy": cy, "boxW": box_w, "boxH": box_h,
         })
     return regions
 
@@ -158,10 +159,7 @@ def typeset(rgb, regions):
             continue
         tb = (x0, y0, x1, y1)
         fg, bg = ts.resolve_colors(npimg, tb, r.get("fg") or (0, 0, 0), r.get("bg") or (255, 255, 255))
-        if ts.is_cjk(cht):
-            ts.draw_v(im, dr, cht, tb, fg, bg)
-        else:
-            ts.draw_h(dr, cht, tb, fg, bg)
+        ts.draw_region(im, dr, cht, r, fg, bg)  # dir(AUTO 跟原文) + angle 斜框
     return im
 
 
@@ -176,13 +174,15 @@ def main():
         name = os.path.splitext(os.path.basename(path))[0]
         rgb = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
         quads = detect(det, seg_rep, rgb)
-        regions = group(ocr_all(ocr, dic, rgb, quads))
+        regions = group(ocr_all(ocr, dic, rgb, quads), rgb.shape[1], rgb.shape[0])
         regions = translate(regions, key, ts.FILTER_TEXT)
         cleaned = inpaint(lama, rgb, regions)
         # 快取中間結果，之後可只重跑排版（retypeset.py）不必重打 DeepSeek
         Image.fromarray(cleaned).save(os.path.join(OUT, f"inpainted_{name}.png"))
         json.dump([{"dir": r["dir"], "jp": r["jp"], "n": r["n"], "bbox": r["bbox"], "cht": r.get("cht", ""),
-                    "fg": r.get("fg"), "bg": r.get("bg")} for r in regions],
+                    "fg": r.get("fg"), "bg": r.get("bg"), "angle": r.get("angle", 0),
+                    "cx": r.get("cx"), "cy": r.get("cy"), "boxW": r.get("boxW"), "boxH": r.get("boxH")}
+                   for r in regions],
                   open(os.path.join(OUT, f"cache_{name}.json"), "w", encoding="utf-8"), ensure_ascii=False)
         final = typeset(cleaned, regions)
         dst = os.path.join(OUT, f"final_{name}.png")

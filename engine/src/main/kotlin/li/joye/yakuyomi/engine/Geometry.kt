@@ -1,6 +1,8 @@
 package li.joye.yakuyomi.engine
 
+import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.min
 
 /**
  * 純 Kotlin 幾何 primitive（CLAUDE.md §6：cv2 → 手刻）。
@@ -106,5 +108,78 @@ object Geometry {
             }
         }
         return best
+    }
+
+    // —— 多邊形距離/面積：取代 shapely Polygon.distance / .area（grouping 用，§6 cv2/shapely→手刻） ——
+
+    /** 凸包面積（shoelace）。對齊 MultiPoint(pts).convex_hull.area。 */
+    fun polyArea(poly: List<Pt>): Float {
+        var s = 0f
+        val n = poly.size
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            s += poly[i].x * poly[j].y - poly[j].x * poly[i].y
+        }
+        return abs(s) / 2f
+    }
+
+    /** 點到線段最短距離。對齊 generic.py:distance_point_lineseg。 */
+    fun segPointDistance(a: Pt, b: Pt, p: Pt): Float {
+        val cx = b.x - a.x
+        val cy = b.y - a.y
+        val lenSq = cx * cx + cy * cy
+        val t = if (lenSq != 0f) ((p.x - a.x) * cx + (p.y - a.y) * cy) / lenSq else -1f
+        val xx: Float
+        val yy: Float
+        when {
+            t < 0f -> { xx = a.x; yy = a.y }
+            t > 1f -> { xx = b.x; yy = b.y }
+            else -> { xx = a.x + t * cx; yy = a.y + t * cy }
+        }
+        return hypot((p.x - xx).toDouble(), (p.y - yy).toDouble()).toFloat()
+    }
+
+    private fun segSegIntersect(a: Pt, b: Pt, c: Pt, d: Pt): Boolean {
+        fun o(p: Pt, q: Pt, r: Pt): Int {
+            val v = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y)
+            return if (v > 1e-6f) 1 else if (v < -1e-6f) -1 else 0
+        }
+        return o(a, b, c) != o(a, b, d) && o(c, d, a) != o(c, d, b)
+    }
+
+    /** 射線法：點是否在多邊形內。 */
+    fun pointInPoly(poly: List<Pt>, p: Pt): Boolean {
+        var inside = false
+        var j = poly.size - 1
+        for (i in poly.indices) {
+            val pi = poly[i]
+            val pj = poly[j]
+            if ((pi.y > p.y) != (pj.y > p.y) &&
+                p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x
+            ) inside = !inside
+            j = i
+        }
+        return inside
+    }
+
+    /** 兩凸多邊形最短距離（相交/包含＝0）。對齊 shapely Polygon(a).distance(Polygon(b))。 */
+    fun polyDistance(a: List<Pt>, b: List<Pt>): Float {
+        for (i in a.indices) {
+            val a0 = a[i]; val a1 = a[(i + 1) % a.size]
+            for (j in b.indices) {
+                if (segSegIntersect(a0, a1, b[j], b[(j + 1) % b.size])) return 0f
+            }
+        }
+        if (pointInPoly(a, b[0]) || pointInPoly(b, a[0])) return 0f
+        var m = Float.MAX_VALUE
+        for (i in a.indices) {
+            val a0 = a[i]; val a1 = a[(i + 1) % a.size]
+            for (p in b) m = min(m, segPointDistance(a0, a1, p))
+        }
+        for (i in b.indices) {
+            val b0 = b[i]; val b1 = b[(i + 1) % b.size]
+            for (p in a) m = min(m, segPointDistance(b0, b1, p))
+        }
+        return m
     }
 }

@@ -48,4 +48,6 @@ dependencies {
     implementation(libs.onnxruntime.android)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
+
+    testImplementation("junit:junit:4.13.2")
 }

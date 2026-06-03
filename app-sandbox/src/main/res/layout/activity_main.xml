@@ -25,13 +25,17 @@
             android:layout_marginTop="4dp"
             android:text="翻譯這一頁（診斷）" />
 
-        <Switch
-            android:id="@+id/verticalSwitch"
+        <TextView
+            android:id="@+id/orientLabel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:checked="true"
-            android:text="直排（關閉＝橫排）" />
+            android:layout_marginTop="8dp"
+            android:text="排版方向：" />
+
+        <Spinner
+            android:id="@+id/orientSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
 
         <Switch
             android:id="@+id/genLogSwitch"

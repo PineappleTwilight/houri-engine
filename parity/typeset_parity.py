@@ -199,6 +199,41 @@ def draw_h(dr, text, textbox, fg=(0, 0, 0), bg=(255, 255, 255)):
         ty += lh
 
 
+ANGLE_SIGN = -1  # 旋轉方向：對齊 m-i-t 樣本（PCA 量測：region 正角=文字右端下斜）。
+# PIL rotate(+φ)=右端上(CCW)，故要右端下需 rotate(-angle)→ ANGLE_SIGN=-1。
+
+
+def _bicubic():
+    return getattr(Image, "Resampling", Image).BICUBIC
+
+
+def draw_box(im, dr, text, box, fg, bg, direction):
+    if direction == "v":
+        draw_v(im, dr, text, box, fg, bg)
+    else:
+        draw_h(dr, text, box, fg, bg)
+
+
+def draw_region(im, dr, text, region, fg, bg):
+    """依 region 的 dir + angle 排版。angle≈0 直接畫；否則畫到暫存層→旋轉→貼回（對齊 m-i-t 斜框排版）。"""
+    direction = region.get("dir", "h")
+    angle = region.get("angle", 0) or 0
+    if abs(angle) < 1:
+        draw_box(im, dr, text, tuple(region["bbox"]), fg, bg, direction)
+        return
+    bw = max(8.0, region.get("boxW", 0))
+    bh = max(8.0, region.get("boxH", 0))
+    cx, cy = region["cx"], region["cy"]
+    margin = 100
+    W, H = int(bw * EXP_W + margin), int(bh * EXP_H + margin)
+    tmp = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    td = ImageDraw.Draw(tmp)
+    lb = ((W - bw) / 2, (H - bh) / 2, (W + bw) / 2, (H + bh) / 2)
+    draw_box(tmp, td, text, lb, fg, bg, direction)
+    rot = tmp.rotate(ANGLE_SIGN * angle, resample=_bicubic(), expand=True)
+    im.paste(rot, (int(cx - rot.width / 2), int(cy - rot.height / 2)), rot)
+
+
 def main():
     im = Image.open(INPAINTED).convert("RGB")
     dr = ImageDraw.Draw(im)
