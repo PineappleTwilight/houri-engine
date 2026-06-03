@@ -21,19 +21,24 @@ pip install -r parity/requirements.txt    # numpy, opencv-python, onnxruntime, p
                                           # networkx, shapely  (torch/opencc only for tools)
 ```
 
-External inputs the scripts expect (developer machine):
+All paths live in one place — **`parity/paths.py`** — and the machine-specific ones are
+**env-overridable**, so a different machine / CI / public user can run without editing scripts:
 
-| What | Where (current) | Notes |
-|------|-----------------|-------|
-| ONNX models | `engine/src/main/assets/models/*.onnx` | same files the engine loads |
-| OCR alphabet | `/tmp/ocr-ctc/alphabet-all-v5.txt` | char dictionary for CTC decode |
-| m-i-t clone | `/mnt/d/Gits/manga-image-translator` | source of the vendored spec / `SegDetectorRepresenter` |
-| test pages | `~/OneDrive/Manga/yakuyomi/test/raw/*.jpg`, m-i-t outputs in `…/test/mit/` | comparison fixtures |
-| API key | `api-keys.properties` (repo root, gitignored) | `DEEPSEEK_API_KEY=` for translation |
+| What | `paths.py` | env override | default |
+|------|-----------|--------------|---------|
+| ONNX models | `MODELS` | — (repo-relative) | `engine/src/main/assets/models` |
+| OCR alphabet | `ALPHABET` | `YAKU_ALPHABET` / `YAKU_OCR_CTC_DIR` | `/tmp/ocr-ctc/alphabet-all-v5.txt` |
+| OCR checkpoint | `OCR_CKPT` | `YAKU_OCR_CKPT` / `YAKU_OCR_CTC_DIR` | `/tmp/ocr-ctc/ocr-ctc.ckpt` |
+| m-i-t clone | `MIT_CLONE` | `YAKU_MIT_CLONE` | `/mnt/d/Gits/manga-image-translator` |
+| test pages + m-i-t outputs | `RAW_DIR` / `MIT_DIR` | `YAKU_TEST_DIR` | `~/OneDrive/Manga/yakuyomi/test/{raw,mit}` |
+| API key | `API_KEYS` | — (repo root, gitignored) | `api-keys.properties` (`DEEPSEEK_API_KEY=`) |
+
+```bash
+# e.g. point at a different test dir + m-i-t clone, no script edits:
+YAKU_TEST_DIR=~/manga-test YAKU_MIT_CLONE=~/src/mit python3 pipeline_parity.py raw/002.jpg
+```
 
 Outputs land in `parity/out/` (cached JSON + comparison PNGs; gitignored).
-
-> These paths are currently hard-coded per script — centralizing them is a follow-up.
 
 ---
 

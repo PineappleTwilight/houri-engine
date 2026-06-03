@@ -9,11 +9,8 @@ import numpy as np
 import cv2
 import onnxruntime as ort
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "parity/out")
+from paths import ROOT, OUT, ALPHABET, MIT_CLONE, SANDBOX_PAGE as IMG  # 集中路徑，見 paths.py
 MODEL = os.path.join(OUT, "ocr_48px_ctc.onnx")
-ALPHABET = "/tmp/ocr-ctc/alphabet-all-v5.txt"
-IMG = os.path.join(ROOT, "app-sandbox/src/main/assets/test/page.png")
 BOXES = os.path.join(OUT, "faithful_boxes.json")
 TEXT_H, BLANK = 48, 0
 
@@ -118,7 +115,7 @@ def ctc_decode(logits, dictionary, colors=None):
 
 
 def find_font():
-    for c in (glob.glob("/mnt/d/Gits/manga-image-translator/fonts/*.[to][tc][cf]") +
+    for c in (glob.glob(os.path.join(MIT_CLONE, "fonts/*.[to][tc][cf]")) +
               ["/mnt/c/Windows/Fonts/YuGothM.ttc", "/mnt/c/Windows/Fonts/msgothic.ttc",
                "/mnt/c/Windows/Fonts/meiryo.ttc", "/mnt/c/Windows/Fonts/msmincho.ttc"]):
         if os.path.exists(c):

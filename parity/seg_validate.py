@@ -9,10 +9,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL = "/home/joyel/OneDrive/Manga/yakuyomi/comictextdetector.pt.onnx"
-ASSETS = os.path.join(ROOT, "app-sandbox/src/main/assets/test")
-OUT = os.path.join(ROOT, "parity/out")
+from paths import ROOT, OUT, MODELS, SANDBOX_TEST as ASSETS  # 集中路徑，見 paths.py
+MODEL = os.path.join(MODELS, "comictextdetector.pt.onnx")
 os.makedirs(OUT, exist_ok=True)
 SZ = 1024
 

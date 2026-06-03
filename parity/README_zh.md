@@ -19,19 +19,24 @@ pip install -r parity/requirements.txt    # numpy, opencv-python, onnxruntime, p
                                           # networkx, shapely（torch/opencc 只給工具用）
 ```
 
-腳本預期的外部輸入（開發機）：
+所有路徑集中在一處——**`parity/paths.py`**——而且跟機器有關的那些都**可用環境變數覆蓋**，
+換機器 / CI / 公開後別人不用改腳本就能跑：
 
-| 是什麼 | 位置（目前） | 備註 |
-|--------|--------------|------|
-| ONNX 模型 | `engine/src/main/assets/models/*.onnx` | 跟引擎載入的同一批 |
-| OCR 字元表 | `/tmp/ocr-ctc/alphabet-all-v5.txt` | CTC 解碼用字典 |
-| m-i-t clone | `/mnt/d/Gits/manga-image-translator` | 規格本 / `SegDetectorRepresenter` 來源 |
-| 測試頁 | `~/OneDrive/Manga/yakuyomi/test/raw/*.jpg`，m-i-t 輸出在 `…/test/mit/` | 比對 fixture |
-| API key | `api-keys.properties`（repo 根、gitignored） | 翻譯用 `DEEPSEEK_API_KEY=` |
+| 是什麼 | `paths.py` | env 覆蓋 | 預設 |
+|--------|-----------|----------|------|
+| ONNX 模型 | `MODELS` | —（repo 內） | `engine/src/main/assets/models` |
+| OCR 字元表 | `ALPHABET` | `YAKU_ALPHABET` / `YAKU_OCR_CTC_DIR` | `/tmp/ocr-ctc/alphabet-all-v5.txt` |
+| OCR checkpoint | `OCR_CKPT` | `YAKU_OCR_CKPT` / `YAKU_OCR_CTC_DIR` | `/tmp/ocr-ctc/ocr-ctc.ckpt` |
+| m-i-t clone | `MIT_CLONE` | `YAKU_MIT_CLONE` | `/mnt/d/Gits/manga-image-translator` |
+| 測試頁 + m-i-t 輸出 | `RAW_DIR` / `MIT_DIR` | `YAKU_TEST_DIR` | `~/OneDrive/Manga/yakuyomi/test/{raw,mit}` |
+| API key | `API_KEYS` | —（repo 根、gitignored） | `api-keys.properties`（`DEEPSEEK_API_KEY=`） |
+
+```bash
+# 例：指到別的測試夾 + m-i-t clone，不用改腳本：
+YAKU_TEST_DIR=~/manga-test YAKU_MIT_CLONE=~/src/mit python3 pipeline_parity.py raw/002.jpg
+```
 
 輸出落在 `parity/out/`（快取 JSON + 比對 PNG；gitignored）。
-
-> 這些路徑目前各腳本各自硬編——集中化是後續工作。
 
 ---
 

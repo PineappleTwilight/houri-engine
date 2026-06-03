@@ -10,7 +10,7 @@ import pipeline_parity as pp
 from mit_grouping import Quadrilateral, merge_bboxes_text_region
 from collections import Counter
 
-RAW = "/home/joyel/OneDrive/Manga/yakuyomi/test/raw"
+from paths import RAW_DIR as RAW  # 集中路徑，見 paths.py
 DST = os.path.join(os.path.dirname(HERE),
                    "engine/src/test/kotlin/li/joye/yakuyomi/engine/GroupingFixture.kt")
 PAGES = ["002", "012"]

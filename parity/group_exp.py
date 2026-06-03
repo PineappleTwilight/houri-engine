@@ -12,8 +12,7 @@ import onnxruntime as ort
 import pipeline_parity as pp
 from mit_grouping import Quadrilateral, merge_bboxes_text_region
 
-RAW = "/home/joyel/OneDrive/Manga/yakuyomi/test/raw"
-OUT = os.path.join(os.path.dirname(HERE), "parity/out")
+from paths import RAW_DIR as RAW, OUT  # 集中路徑，見 paths.py
 COLS = [(255, 0, 0), (0, 160, 0), (0, 0, 255), (255, 140, 0), (150, 0, 200),
         (0, 160, 200), (200, 0, 120), (120, 120, 0), (0, 120, 120), (200, 80, 80)]
 
@@ -56,7 +55,7 @@ def main():
         H, W = rgb.shape[:2]
         quads = pp.detect(det, seg_rep, rgb)
         res = pp.ocr_all(ocr, dic, rgb, quads)
-        ours = pp.group(res)
+        ours = pp.group(res, W, H)
         mit = mit_group(res, W, H)
         a = draw(rgb, ours)
         b = draw(rgb, mit)

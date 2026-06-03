@@ -18,9 +18,8 @@ import typeset_parity as ts
 from ctd_reference import letterbox, import_seg_rep
 from ocr_parity import sort_pnts, transformed_region, ctc_decode, is_ignore
 
+from paths import MODELS, ALPHABET  # 集中路徑，見 paths.py
 ROOT, OUT = tp.ROOT, tp.OUT
-MODELS = os.path.join(ROOT, "engine/src/main/assets/models")
-ALPHABET = "/tmp/ocr-ctc/alphabet-all-v5.txt"
 INPUT, BOX_THRESH, TEXT_H, LAMA, WIN, GAP, FS_RATIO = 1024, 0.6, 48, 512, 1.7, 1.0, 1.5
 IGNORE_BUBBLE = 0  # config.ocr.ignore_bubble：1–50 開啟，跳過彩色/非氣泡 SFX 類文字（預設 0＝關）
 OCR_PROB = 0.5     # config.ocr.prob：OCR 平均信心 < 此值就丟（剃除低信心誤讀；m-i-t 預設 0.5）

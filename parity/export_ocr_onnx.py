@@ -8,11 +8,8 @@ ported spec: manga_translator/ocr/model_48px_ctc.py:OCR @ d5a3eee
 import sys, types, importlib.util, os
 import torch
 
-MIT = "/mnt/d/Gits/manga-image-translator"
-CKPT = "/tmp/ocr-ctc/ocr-ctc.ckpt"
-ALPHABET = "/tmp/ocr-ctc/alphabet-all-v5.txt"
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "parity/out/ocr_48px_ctc.onnx")
+from paths import MIT_CLONE as MIT, OCR_CKPT as CKPT, ALPHABET, OUT as _OUTDIR  # 集中路徑，見 paths.py
+OUT = os.path.join(_OUTDIR, "ocr_48px_ctc.onnx")
 
 
 def load_OCR():

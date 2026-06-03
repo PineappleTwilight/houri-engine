@@ -14,10 +14,9 @@ import numpy as np
 import cv2
 import onnxruntime as ort
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL = os.path.join(ROOT, "engine/src/main/assets/models/comictextdetector.pt.onnx")
-MIT_DB = "/mnt/d/Gits/manga-image-translator/manga_translator/detection/ctd_utils/utils/db_utils.py"
-OUT = os.path.join(ROOT, "parity/out")
+from paths import ROOT, OUT, MODELS, MIT_CLONE  # 集中路徑，見 paths.py
+MODEL = os.path.join(MODELS, "comictextdetector.pt.onnx")
+MIT_DB = os.path.join(MIT_CLONE, "manga_translator/detection/ctd_utils/utils/db_utils.py")
 INPUT_SIZE = 1024
 THRESH = 0.3       # SegDetectorRepresenter(thresh=0.3)
 BOX_THRESH = 0.6   # ctd.py 外部過濾
