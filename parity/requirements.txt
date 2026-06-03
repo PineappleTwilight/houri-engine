@@ -1,0 +1,12 @@
+# Desktop parity harness deps. Not shipped (the engine is pure Kotlin/ONNX).
+# Core — needed by the per-stage and end-to-end parity scripts:
+numpy
+opencv-python
+onnxruntime
+pillow
+networkx        # mit_grouping: MST split
+shapely         # mit_grouping: polygon distance
+
+# Tool-only (uncomment if you run these):
+# torch         # export_ocr_onnx.py — export the 48px CTC checkpoint to ONNX
+# opencc        # merge_translate_parity.py — optional s2twp post-processing
