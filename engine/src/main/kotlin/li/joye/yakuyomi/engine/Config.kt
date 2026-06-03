@@ -95,6 +95,7 @@ data class InpainterConfig(
 data class RenderConfig(
     val orientation: TextOrientation = TextOrientation.AUTO, // 〔設定〕對應 config.render.direction=auto（CJK→直排）
     val fontBorder: Boolean = true,                              // 〔設定〕config.render.disable_font_border=false
+    val artStrokeRatio: Float = 0.16f,                           // 壓畫面區(lama/auto忙碌)的白邊寬＝字級×此（比一般 0.10 粗；busy 背景上黑字粗白邊更好讀）
     val fontSizeMax: Int = 60,
     val fontSizeMin: Int = 9,
     // 排版幾何（純文字框法，對齊 parity/typeset_parity.py；不常動，留可控空間）

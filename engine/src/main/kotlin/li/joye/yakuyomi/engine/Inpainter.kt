@@ -50,6 +50,9 @@ class Inpainter(
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
 
+        // 標記「壓在畫面上」(lama 重建)的區 → Renderer 給黑字粗白邊（auto 在下方逐區設、boxfill 全白泡不設）
+        if (cfg.method == "lama") regions.forEach { it.onArt = true }
+
         if (cfg.method == "boxfill") {
             boxFill(result, maskPx) // 瞬間：就近取色填字筆畫、不跑 LaMa
             maskBmp.recycle()
@@ -69,7 +72,7 @@ class Inpainter(
                 if (s.std < cfg.autoStdThreshold && s.meanLum >= cfg.autoWhiteThreshold) {
                     flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h) // 白泡：平塗背景色
                 } else {
-                    busy.add(r) // 忙碌：lama 逐區
+                    busy.add(r); r.onArt = true // 忙碌：lama 逐區 + 標記給白邊
                 }
             }
             // 忙碌區去字：用 busy-only 遮罩（泡泡已平塗、不可再被 lama 動）；wholeImage 決定整頁/逐格

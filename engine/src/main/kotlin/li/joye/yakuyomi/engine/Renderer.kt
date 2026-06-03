@@ -62,8 +62,8 @@ object Renderer {
             } else {
                 x0 = region.x0; y0 = region.y0; x1 = region.x1; y1 = region.y1
             }
-            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg)
-            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg)
+            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, region.onArt)
+            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, region.onArt)
             if (rotate) canvas.restore()
         }
         return out
@@ -72,6 +72,8 @@ object Renderer {
     /** 文字色 (fill, outline)：auto＝取去字後背景亮度（暗底白字、亮底黑字，對齊 parity auto_colors）；mono＝黑字白邊。 */
     private fun textColors(page: Bitmap, r: TextRegion, cfg: RenderConfig): Pair<Int, Int> {
         if (cfg.colorMode == "mono") return Color.BLACK to Color.WHITE
+        // 壓在畫面上(lama 重建的 busy 背景)：一律黑字+粗白邊。白邊把字框出來，任何雜亂背景都讀得到（對齊 m-i-t 做法）。
+        if (r.onArt) return Color.BLACK to Color.WHITE
         val lum = bgLuminance(page, r.x0, r.y0, r.x1, r.y1)
         return if (lum < cfg.bgDark) Color.WHITE to Color.BLACK else Color.BLACK to Color.WHITE
     }
@@ -101,7 +103,7 @@ object Renderer {
     }
 
     /** 直排：欄右→左、字上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 字。 */
-    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig) {
+    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
         val bw = (x1 - x0) * cfg.expandW         // 寬：放大後的文字框寬
@@ -116,7 +118,7 @@ object Renderer {
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = maxOf(2f, size * STROKE_RATIO)  // 描邊隨字級（取代固定寬）
+        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
         val lh = size * 1.05f; val cw = size * 1.1f
         val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
         val columns = splitColumnsV(chars, cpc)       // 禁則：欄不以行頭禁則字開頭
@@ -151,7 +153,7 @@ object Renderer {
     }
 
     /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。 */
-    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig) {
+    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false) {
         val bw = (x1 - x0) * cfg.expandW
         val rowRoom = (y1 - y0) * cfg.expandH
         var size = cfg.fontSizeMin
@@ -166,7 +168,7 @@ object Renderer {
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = maxOf(2f, size * STROKE_RATIO)  // 描邊隨字級
+        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
         lines = wrapCjk(text, fill, bw)  // 縮小後重排
         val lh = size * 1.18f
         val tcx = (x0 + x1) / 2f
