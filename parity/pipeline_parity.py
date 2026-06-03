@@ -48,6 +48,10 @@ def ocr_all(sess, dic, rgb, quads):
         x = np.transpose((reg.astype(np.float32) - 127.5) / 127.5, (2, 0, 1))[None]
         cl, col = sess.run(["char_logits", "color"], {"image": x})
         t, prob, fg, bg = ctc_decode(cl[0], dic, col[0])
+        if os.environ.get("YAKU_OCRDBG"):
+            ax = np.array(b, float)
+            print(f"  L bbox=({int(ax[:,0].min())},{int(ax[:,1].min())},{int(ax[:,0].max())},{int(ax[:,1].max())}) "
+                  f"prob={prob:.2f} kept={'Y' if (t.strip() and prob >= OCR_PROB) else 'N'} {t[:18]}")
         if t.strip() and prob >= OCR_PROB:  # 低信心誤讀（如把 SFX 框成文字）剃除
             out.append({"dir": d, "text": t, "quad": np.array(b).tolist(), "fg": list(fg), "bg": list(bg)})
     return out

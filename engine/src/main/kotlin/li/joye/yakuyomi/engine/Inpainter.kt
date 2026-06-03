@@ -72,8 +72,20 @@ class Inpainter(
                     busy.add(r) // 忙碌：lama 逐區
                 }
             }
-            for (win in busy.mapNotNull { windowOf(it, w, h) }) {
-                runWindow(page, maskBmp, win)?.let { compositePixels(result, maskPx, it) }
+            // 忙碌區去字：用 busy-only 遮罩（泡泡已平塗、不可再被 lama 動）；wholeImage 決定整頁/逐格
+            if (busy.isNotEmpty()) {
+                val busyMaskPx = buildSegMask(busy, textMask, w, h)
+                val busyMaskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                busyMaskBmp.setPixels(busyMaskPx, 0, w, 0, 0, w, h)
+                if (cfg.wholeImage) {
+                    runWindow(page, busyMaskBmp, intArrayOf(0, 0, w, h)) // auto整頁：忙碌區整頁一次 lama（快、糊）
+                        ?.let { compositePixels(result, busyMaskPx, it) }
+                } else {
+                    for (win in busy.mapNotNull { windowOf(it, w, h) }) { // auto逐格：每忙碌區一次 lama（慢、銳）
+                        runWindow(page, busyMaskBmp, win)?.let { compositePixels(result, busyMaskPx, it) }
+                    }
+                }
+                busyMaskBmp.recycle()
             }
             maskBmp.recycle()
             return@coroutineScope result
