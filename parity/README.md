@@ -2,14 +2,14 @@
 
 **English** · [中文](README_zh.md)
 
-**Not shipped.** This is a developer-only Python harness that runs the same pipeline stages as the
-Kotlin `:engine`, so we can check the on-device port behaves like the reference
-([manga-image-translator](https://github.com/zyddnys/manga-image-translator), m-i-t) — *before*
-trusting it on a device.
+Not shipped. A developer-only Python harness that runs the same pipeline stages as the Kotlin
+`:engine`, so we can check the on-device port matches the reference
+([manga-image-translator](https://github.com/zyddnys/manga-image-translator), m-i-t) before trusting
+it on a device.
 
-Why it exists: the engine re-implements m-i-t (Python/torch) in Kotlin/ONNX. That port can't be
-diffed line-for-line, so correctness is "same input → close output". These scripts produce that
-reference output (and, for grouping, an automated cross-language assertion). See
+The engine re-implements m-i-t (Python/torch) in Kotlin/ONNX, and that port can't be diffed line for
+line, so correctness means "same input, close output". These scripts produce the reference output,
+and for grouping an automated cross-language assertion. See
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md#the-two-halves).
 
 ---

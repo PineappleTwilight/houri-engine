@@ -1,14 +1,12 @@
 # `parity/` — 桌面驗證 harness
 
-[English](README.md) · **中文**
+[English](README.md) ｜ 中文
 
-**不出貨。** 這是開發專用的 Python harness，跑跟 Kotlin `:engine` 同樣的 pipeline 階段，
-讓我們能檢查裝置端移植是否跟參考（[manga-image-translator](https://github.com/zyddnys/manga-image-translator)，
-m-i-t）行為一致——*在*信任它上機之前。
+不出貨。開發專用的 Python harness，跑跟 Kotlin `:engine` 同樣的 pipeline 階段，讓我們在信任它上機前，
+先檢查裝置端移植跟參考（[manga-image-translator](https://github.com/zyddnys/manga-image-translator)，m-i-t）一致。
 
-為什麼存在：引擎把 m-i-t（Python/torch）重寫成 Kotlin/ONNX。那種移植沒辦法逐行 diff，所以正確性是
-「同輸入 → 近輸出」。這些腳本產出那份參考輸出（grouping 還有自動化跨語言斷言）。
-見 [`../docs/ARCHITECTURE_zh.md`](../docs/ARCHITECTURE_zh.md#兩半)。
+引擎把 m-i-t（Python/torch）重寫成 Kotlin/ONNX，這種移植沒辦法逐行 diff，所以正確性是「同輸入、近輸出」。
+這些腳本產出那份參考輸出，grouping 還有自動化跨語言斷言。見 [`../docs/ARCHITECTURE_zh.md`](../docs/ARCHITECTURE_zh.md#兩半)。
 
 ---
 
