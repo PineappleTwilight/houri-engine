@@ -24,7 +24,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
-import li.joye.yakuyomi.engine.DetectorConfig
 import li.joye.yakuyomi.engine.EngineConfig
 import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.InpainterConfig
@@ -77,25 +76,75 @@ class MainActivity : AppCompatActivity() {
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
-        binding.inpaintSpinner.setSelection(1) // 預設＝Auto-整頁（對齊產品預設）
-        binding.orientSpinner.adapter = android.widget.ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item, ORIENT_MODES,
-        ) // 預設 position 0＝自動（跟原文方向）
+        binding.inpaintSpinner.setSelection(1) // 預設＝Auto-整頁（速質平均）
+        buildThumbnails()
+        updateButtons()
         val t = currentTree()
         binding.logText.text =
-            if (t == null) "① 先按「選擇模型資料夾」選含 3 個 *.onnx 的資料夾\n② 選去字方式 → 按翻譯跑全 4 張"
-            else "資料夾：${t.name}（選去字方式 → 按翻譯跑全 4 張批量計時）"
+            if (t == null) "① 先按「選擇模型資料夾」選含 3 個 *.onnx 的資料夾\n② 點縮圖選圖 → 診斷（多選）／效能比較（單選）"
+            else "資料夾：${t.name}（點縮圖選圖 → 診斷／效能比較）"
         // 開機 Toast 標 build 版本：手動安裝後一眼確認裝對版本（沒看到＝還是舊 APK / 同步未完成）
         Toast.makeText(this, "Yakuyomi sandbox $BUILD_TAG", Toast.LENGTH_LONG).show()
     }
 
+    // ===== 縮圖多選 =====
+    private val selected = linkedSetOf<Int>() // 選取的 TEST_IMAGES 索引（保序）
+    private val thumbViews = mutableListOf<View>()
+
+    private fun buildThumbnails() {
+        TEST_IMAGES.forEachIndexed { i, path ->
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(6, 6, 6, 6)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { marginEnd = 10 }
+                setOnClickListener { toggleSelect(i) }
+            }
+            val iv = ImageView(this).apply {
+                setImageBitmap(loadAssetThumbnail(path, 200))
+                layoutParams = LinearLayout.LayoutParams(200, 280)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            val num = TextView(this).apply {
+                text = "${i + 1}"
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(200, LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            col.addView(iv); col.addView(num)
+            thumbViews.add(col)
+            binding.thumbStrip.addView(col)
+        }
+        refreshThumbs()
+    }
+
+    private fun toggleSelect(i: Int) {
+        if (i in selected) selected.remove(i) else selected.add(i)
+        refreshThumbs(); updateButtons()
+    }
+
+    private fun refreshThumbs() = thumbViews.forEachIndexed { i, v ->
+        v.setBackgroundColor(if (i in selected) Color.parseColor("#3F51B5") else Color.TRANSPARENT)
+    }
+
+    /** 診斷：≥1 張；效能比較：單張。執行中由 run 函式先 disable 兩鈕、finally 再 updateButtons 還原。 */
+    private fun updateButtons() {
+        binding.detectButton.isEnabled = selected.isNotEmpty()
+        binding.inpaintCompareButton.isEnabled = selected.size == 1
+    }
+
+    private fun loadAssetThumbnail(path: String, target: Int): Bitmap {
+        val o1 = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        assets.open(path).use { BitmapFactory.decodeStream(it, null, o1) }
+        var s = 1
+        while (o1.outWidth / s > target * 2) s *= 2
+        val o2 = BitmapFactory.Options().apply { inSampleSize = s }
+        return assets.open(path).use { BitmapFactory.decodeStream(it, null, o2)!! }
+    }
+
     private fun runPipeline() {
         binding.detectButton.isEnabled = false
-        val orientation = when (binding.orientSpinner.selectedItemPosition) {
-            1 -> TextOrientation.VERTICAL
-            2 -> TextOrientation.HORIZONTAL
-            else -> TextOrientation.AUTO
-        }
+        binding.inpaintCompareButton.isEnabled = false
         val saveLog = binding.genLogSwitch.isChecked
         runSaveImg = binding.genImgSwitch.isChecked
         val (method, whole, modeLabel) = when (binding.inpaintSpinner.selectedItemPosition) {
@@ -103,40 +152,33 @@ class MainActivity : AppCompatActivity() {
             1 -> Triple("auto", true, "auto整頁")
             else -> Triple("auto", false, "auto逐格")
         }
+        val sel = selected.toList() // 快照（鈕已 disable，執行中不變）
+        val imgs = sel.map { TEST_IMAGES[it] }
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
-            val cfg = EngineConfig(
-                ocr = OcrConfig(), // 正式：minProb=0.5 丟低信心誤讀、useXnnpack=false（預設）
-                inpainter = InpainterConfig(method = method, wholeImage = whole),
-                render = RenderConfig(
-                    orientation = orientation,
-                ),
-            )
+            // 方向鎖 AUTO、效能用引擎最優預設（OCR 並發/8、intraThreads 6、RenderConfig 預設 AUTO）→ 只設去字方法。
+            val cfg = EngineConfig(inpainter = InpainterConfig(method = method, wholeImage = whole))
             try {
                 val tree = runTree
-                if (tree == null) {
-                    log("✗ 請先按「選擇模型資料夾」")
-                    return@launch
-                }
+                if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
+                if (imgs.isEmpty()) { log("✗ 請先點縮圖選至少一張測試圖"); return@launch }
                 val detF = findOnnx(tree, "detect", "comictext")
                 val ocrF = findOnnx(tree, "ocr")
                 val lamaF = findOnnx(tree, "lama")
                 if (detF == null || ocrF == null || lamaF == null) {
-                    log("✗ 模型不齊（需含 detect/ocr/lama 的 3 個 .onnx）")
-                    return@launch
+                    log("✗ 模型不齊（需含 detect/ocr/lama 的 3 個 .onnx）"); return@launch
                 }
-                log("▶ 批量測試 ${DEMOS.size} 張｜去字=$modeLabel")
+                log("▶ 診斷 ${imgs.size} 張｜去字=$modeLabel")
                 log("… 載入模型（首次複製到 filesDir 較久）")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
                 val models = ModelSet(ensureLocal(detF), ensureLocal(ocrF), ensureLocal(lamaF))
                 log("✓ 模型就緒，開跑")
-                // 用工廠取得引擎、`use { }` 自動 close（取代手拼 Detector/Ocr/Inpainter/Pipeline + 逐一 close）
                 Yakuyomi.create(models, alphabet, BuildConfig.DEEPSEEK_API_KEY, cfg, tf).use { engine ->
                     var total = 0L
-                    DEMOS.forEachIndexed { i, asset ->
-                        val tag = "demo${i + 1}"
+                    imgs.forEachIndexed { i, asset ->
+                        val tag = "圖${sel[i] + 1}"
                         val page = loadAssetBitmap(asset)
                         when (val r = engine.translatePage(page)) { // §11：略過/失敗都保留原圖、不覆蓋
                             is PageResult.Translated -> {
@@ -155,10 +197,10 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                    log("★ ${DEMOS.size} 頁總計 $total ms（去字=$modeLabel）平均 ${total / DEMOS.size} ms/頁")
+                    if (imgs.isNotEmpty()) log("★ ${imgs.size} 張總計 $total ms（去字=$modeLabel）平均 ${total / imgs.size} ms/張")
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "pipeline 失敗", t)
+                Log.e(TAG, "診斷失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 if (saveLog) {
@@ -170,38 +212,32 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                 }
-                withContext(Dispatchers.Main) { binding.detectButton.isEnabled = true }
+                withContext(Dispatchers.Main) { updateButtons() }
             }
         }
     }
 
     private fun runInpaintCompare() {
+        binding.detectButton.isEnabled = false
         binding.inpaintCompareButton.isEnabled = false
+        val imgPath = selected.firstOrNull()?.let { TEST_IMAGES[it] } // 單選（鈕已限定 size==1）
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
-            val saveLog = binding.genLogSwitch.isChecked // 去背比較也寫 log 檔（EP/各階段秒才進可讀檔）
+            val saveLog = binding.genLogSwitch.isChecked // 效能比較也寫 log 檔（EP/各階段秒才進可讀檔）
             try {
                 val tree = runTree
-                if (tree == null) {
-                    log("✗ 請先按「選擇模型資料夾」")
-                    return@launch
-                }
+                if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
+                if (imgPath == null) { log("✗ 效能比較需選「單一」張測試圖"); return@launch }
                 val detF = findOnnx(tree, "detect", "comictext")
                 val ocrF = findOnnx(tree, "ocr")
                 val lamaF = findOnnx(tree, "lama")
                 if (detF == null || ocrF == null || lamaF == null) {
-                    log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）")
-                    return@launch
+                    log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）"); return@launch
                 }
-                val orient = when (binding.orientSpinner.selectedItemPosition) {
-                    1 -> TextOrientation.VERTICAL
-                    2 -> TextOrientation.HORIZONTAL
-                    else -> TextOrientation.AUTO
-                }
-                val ocrConc = binding.ocrConcSwitch.isChecked // OCR 逐行並發實驗（小圖塊吃不滿 intra-op→單緒並發填核）
-                log("▶ 去背比較 3 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）｜OCR=${if (ocrConc) "並發" else "序列"}")
-                val page = loadAssetBitmap("test/01.jpg")
+                val orient = TextOrientation.AUTO // 鎖定
+                log("▶ 效能比較 3 去字模式 ×（去字/貼字）+ 總表 — $imgPath（需連網翻譯）")
+                val page = loadAssetBitmap(imgPath)
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
 
@@ -210,10 +246,9 @@ class MainActivity : AppCompatActivity() {
                 val tD0 = System.currentTimeMillis()
                 val detection = detector.detect(page)
                 val tDetect = System.currentTimeMillis() - tD0
-                val detEp = detector.ep
                 detector.close()
                 val tO0 = System.currentTimeMillis()
-                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig(concurrent = ocrConc))
+                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig()) // 並發鎖最優預設(concurrent/8)
                 ocr.recognize(page, detection.lines)
                 ocr.close()
                 val regions = Grouping.group(detection.lines)
@@ -245,7 +280,6 @@ class MainActivity : AppCompatActivity() {
                 val row1 = ArrayList<Bitmap>()   // 第一排：去字（框＋去字秒）
                 val row2 = ArrayList<Bitmap>()   // 第二排：貼字（整張秒）
                 val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms
-                var inpEp = "?" // 去字實際 EP（迴圈內捕捉；各模式同設定→同 EP）
                 row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
@@ -253,7 +287,6 @@ class MainActivity : AppCompatActivity() {
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
-                    inpEp = inp.ep
                     inp.close()
                     // 第一排：去字 + 路由框（auto 標引擎 std）+ 去字秒（先 copy 乾淨去字圖給第二排貼字）
                     val r1 = cleaned.copy(Bitmap.Config.ARGB_8888, true)
@@ -269,32 +302,12 @@ class MainActivity : AppCompatActivity() {
                     timings.add(Triple(name, tInpaint, tRender))
                     log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaint + tRender) / 1000.0)}s")
                 }
-                // lama intra-op 探測：Auto-整頁 去字在 4/6/8 緒各跑一次，找最快緒數
-                // （現用 4；手機 8 核但 lama 只吃 4 緒＝半數核閒置，看調大有沒有空間。big.LITTLE→6 可能勝 8）。
-                log("— lama intra-op 探測（Auto-整頁 去字，找最快緒數）—")
-                for (th in listOf(4, 6, 8)) {
-                    kept.forEach { it.onArt = false }
-                    val pInp = Inpainter(lamaPath, InpainterConfig(method = "auto", wholeImage = true, intraThreads = th))
-                    val pt = System.currentTimeMillis()
-                    pInp.inpaint(page, kept, detection.textMask).recycle()
-                    pInp.close()
-                    log("  intra-op $th 緒：去字 ${"%.1f".format((System.currentTimeMillis() - pt) / 1000.0)}s")
-                }
-                // 偵測 intra-op 探測（XNNPACK；6 vs 8 看 big.LITTLE 拖累，跟 lama 同理）
-                log("— 偵測 intra-op 探測（找最快緒數）—")
-                for (th in listOf(4, 6, 8)) {
-                    val pDet = Detector(ensureLocal(detF), DetectorConfig(intraThreads = th))
-                    val pt = System.currentTimeMillis()
-                    pDet.detect(page)
-                    pDet.close()
-                    log("  intra-op $th 緒：偵測 ${"%.1f".format((System.currentTimeMillis() - pt) / 1000.0)}s")
-                }
 
                 // 左下（raw 正下方、本來空白處）＝逐階段時間總表
                 row2.add(0, buildTimingTable(page.width, page.height, tDetect, tOcr, tTranslate, timings))
 
                 val big = mergeVertical(listOf(mergeHorizontal(row1), mergeHorizontal(row2)))
-                val hw = hwInfoLines(detEp, inpEp, ocrConc)
+                val hw = hwInfoLines()
                 hw.forEach { log(it) }
                 drawHwInfo(big, hw)
                 val cmpName = "${runStamp}_inpaintcmp.png"
@@ -319,7 +332,7 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                 }
-                withContext(Dispatchers.Main) { binding.inpaintCompareButton.isEnabled = true }
+                withContext(Dispatchers.Main) { updateButtons() }
             }
         }
     }
@@ -380,20 +393,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 硬體資訊兩行（裝置/SoC、核數/RAM/去字執行緒）＝去背時間數據的對照背景。 */
-    private fun hwInfoLines(detEp: String, inpEp: String, ocrConc: Boolean): List<String> {
-        val cores = Runtime.getRuntime().availableProcessors()
-        val mi = android.app.ActivityManager.MemoryInfo()
-        getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(mi)
-        val ramGB = mi.totalMem / (1024.0 * 1024 * 1024)
-        val soc = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
-            "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE
-        val ocrLabel = if (ocrConc) "並發x${OcrConfig().concurrency}(每行單緒)" else "序列(intra-op4)"
-        return listOf(
-            "$BUILD_TAG ｜ ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc",
-            "%d核 · %.1fGB RAM ｜ OCR=%s".format(cores, ramGB, ocrLabel),
-            "偵測 EP=$detEp ｜ 去字 EP=$inpEp", // EP 確認（應為 XNNPACK）
-        )
-    }
+    /** 效能比較圖左上角橫幅：只標 build 版本（裝置/EP/緒數已知、不再標）。 */
+    private fun hwInfoLines(): List<String> = listOf(BUILD_TAG)
 
     /** 在合圖左上角疊印硬體資訊（黑底白字）。 */
     private fun drawHwInfo(bmp: Bitmap, lines: List<String>) {
@@ -516,14 +517,15 @@ class MainActivity : AppCompatActivity() {
                 adjustViewBounds = true
                 setImageBitmap(scaledForView(bmp))
             }
-            binding.container.addView(lbl)
-            binding.container.addView(iv)
+            binding.outputContainer.addView(lbl)
+            binding.outputContainer.addView(iv)
         }
     }
 
     private suspend fun clearOutputs() = withContext(Dispatchers.Main) {
         binding.logText.text = ""
-        while (binding.container.childCount > FIXED_VIEWS) binding.container.removeViewAt(FIXED_VIEWS)
+        // 輸出區第 0 個＝logText，其餘＝上次結果圖/標籤 → 清掉只留 logText（控件區在另一容器，不受影響）
+        while (binding.outputContainer.childCount > 1) binding.outputContainer.removeViewAt(1)
     }
 
     private fun stamp(): String =
@@ -582,22 +584,24 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.6-overlap ｜去字‖翻譯重疊(翻譯這一頁看頁實際ms)+偵測探測" // 改一次就 bump，手動安裝確認版本用
+        private const val BUILD_TAG = "v0.7-rework ｜控件/輸出分離·縮圖多選·診斷+效能比較" // 改一次就 bump，手動安裝確認版本用
 
-        // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/OCR並發)/去字標籤+選單/logText＝11。
-        // ★ 加/刪任何固定 view（尤其開關）就要同步改這個數，否則 clearOutputs 會把 logText 或末尾固定 view 誤刪（log 消失）。
-        private const val FIXED_VIEWS = 11
         private const val PREF_TREE = "modelTree"
-        // 排版方向選單（順序＝position：0 自動（跟原文方向）/ 1 直排 / 2 橫排）
-        private val ORIENT_MODES = listOf("自動（跟原文方向）", "直排", "橫排")
-        // 去字方式選單（順序＝position：0 boxfill / 1 auto整頁 / 2 lama整頁 / 3 auto逐格 / 4 lama逐格，對齊 fork 設定）
-        // 3 階梯對齊產品（砍 LaMa-整頁/LaMa-逐格：把乾淨白泡也送 lama→黃暈+慢，純下風）
+        // 去字方式選單（順序＝position：0 BoxFill / 1 Auto-整頁 / 2 Auto-逐格）
         private val INPAINT_MODES = listOf(
-            "BoxFill（最快·糙）",
-            "Auto-整頁（平衡·推薦）",
-            "Auto-逐格（質佳·慢）",
+            "BoxFill（高速低質）",
+            "Auto-整頁（速質平均）",
+            "Auto-逐格（低速高質）",
         )
-        private val DEMOS = listOf("test/failed.jpg", "test/page.png", "test/demo2.png", "test/demo3.png", "test/demo4.png")
+        // 測試圖（縮圖選單順序＝編號 1..N）
+        private val TEST_IMAGES = listOf(
+            "test/page.png",   // 1
+            "test/01.jpg",     // 2
+            "test/demo2.png",  // 3
+            "test/demo3.png",  // 4
+            "test/demo4.png",  // 5
+            "test/failed.jpg", // 6
+        )
         private const val ALPHABET = "models/alphabet-all-v5.txt"
         private const val FONT = "fonts/NotoSansMonoCJK.ttc"
     }
