@@ -393,8 +393,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 硬體資訊兩行（裝置/SoC、核數/RAM/去字執行緒）＝去背時間數據的對照背景。 */
-    /** 效能比較圖左上角橫幅：只標 build 版本（裝置/EP/緒數已知、不再標）。 */
-    private fun hwInfoLines(): List<String> = listOf(BUILD_TAG)
+    /** 效能比較圖左上角橫幅：版本 + 軟硬資訊 + 生效的效能參數（讓時間數據有對照背景）。 */
+    private fun hwInfoLines(): List<String> {
+        val cores = Runtime.getRuntime().availableProcessors()
+        val mi = android.app.ActivityManager.MemoryInfo()
+        getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(mi)
+        val ramGB = mi.totalMem / (1024.0 * 1024 * 1024)
+        val soc = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}"
+        } else {
+            android.os.Build.HARDWARE
+        }
+        return listOf(
+            BUILD_TAG,
+            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc · %d核 · %.1fGB".format(cores, ramGB),
+            "效能：OCR並發 x%d · 推論 intra-op %d緒 · XNNPACK CPU".format(OcrConfig().concurrency, InpainterConfig().intraThreads),
+        )
+    }
 
     /** 在合圖左上角疊印硬體資訊（黑底白字）。 */
     private fun drawHwInfo(bmp: Bitmap, lines: List<String>) {
@@ -584,7 +599,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.7-rework ｜控件/輸出分離·縮圖多選·診斷+效能比較" // 改一次就 bump，手動安裝確認版本用
+        private const val BUILD_TAG = "v0.7-rework" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
 
         private const val PREF_TREE = "modelTree"
         // 去字方式選單（順序＝position：0 BoxFill / 1 Auto-整頁 / 2 Auto-逐格）
