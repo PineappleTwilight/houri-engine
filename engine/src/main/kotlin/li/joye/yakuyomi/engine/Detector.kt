@@ -27,7 +27,7 @@ class Detector(
 
     init {
         val options = OrtSession.SessionOptions()
-        ep = options.applyEp(NUM_THREADS, TAG)
+        ep = options.applyEp(cfg.intraThreads, TAG)
         session = env.createSession(modelPath, options) // 從路徑載入＝native 記憶體、不佔 JVM heap
         Log.i(TAG, "session inputs=${session.inputNames} outputs=${session.outputNames} ep=$ep")
     }
@@ -176,7 +176,6 @@ class Detector(
 
     companion object {
         private const val TAG = "Detector"
-        private const val NUM_THREADS = 4
         private const val OUT_DET = "det" // 文字行圖（DB），channel 0 = 文字機率
         private const val OUT_SEG = "seg" // 逐像素文字筆畫遮罩 [1,1,H,W]
         private const val MASK_ON = 0xFFFFFFFF.toInt()

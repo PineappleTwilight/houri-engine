@@ -29,6 +29,7 @@ data class DetectorConfig(
     // seg 文字筆畫遮罩二值門檻（去字用）。★ 0.3 會濾掉漢字旁注音「假名」的弱訊號 → 去字留一排假名殘留。
     // 降到 0.12＝偵測器其實看得到假名、只是 prob 弱（桌面 parity/auto_diag.py dev_furi3 實證）。只影響去字遮罩、不動偵測框/OCR。
     val segThreshold: Float = 0.12f,
+    val intraThreads: Int = 6,        // XNNPACK intra-op 緒。同 lama：6 大核甜蜜點（4→6 預期省 ~0.4s；探測確認）
 )
 
 data class OcrConfig(
