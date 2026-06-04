@@ -554,7 +554,9 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val FIXED_VIEWS = 10 // 固定子 view：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/2 開關/去字標籤+選單/logText
+        // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/QNN)/去字標籤+選單/logText＝11。
+        // ★ 加/刪任何固定 view（尤其開關）就要同步改這個數，否則 clearOutputs 會把 logText 或末尾固定 view 誤刪（log 消失）。
+        private const val FIXED_VIEWS = 11
         private const val PREF_TREE = "modelTree"
         // 排版方向選單（順序＝position：0 自動（跟原文方向）/ 1 直排 / 2 橫排）
         private val ORIENT_MODES = listOf("自動（跟原文方向）", "直排", "橫排")
