@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity() {
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
-        binding.inpaintSpinner.setSelection(3) // 預設＝Auto-逐格（對齊 fork 預設、即正在測的回歸案例）
+        binding.inpaintSpinner.setSelection(1) // 預設＝Auto-整頁（對齊產品預設）
         binding.orientSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, ORIENT_MODES,
         ) // 預設 position 0＝自動（跟原文方向）
@@ -98,13 +98,10 @@ class MainActivity : AppCompatActivity() {
         }
         val saveLog = binding.genLogSwitch.isChecked
         runSaveImg = binding.genImgSwitch.isChecked
-        val pos = binding.inpaintSpinner.selectedItemPosition // 0=boxfill 1=auto整頁 2=lama整頁 3=auto逐格 4=lama逐格
-        val (method, whole, modeLabel) = when (pos) {
+        val (method, whole, modeLabel) = when (binding.inpaintSpinner.selectedItemPosition) {
             0 -> Triple("boxfill", true, "boxfill")
             1 -> Triple("auto", true, "auto整頁")
-            2 -> Triple("lama", true, "lama整頁")
-            3 -> Triple("auto", false, "auto逐格")
-            else -> Triple("lama", false, "lama逐格")
+            else -> Triple("auto", false, "auto逐格")
         }
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
@@ -594,12 +591,11 @@ class MainActivity : AppCompatActivity() {
         // 排版方向選單（順序＝position：0 自動（跟原文方向）/ 1 直排 / 2 橫排）
         private val ORIENT_MODES = listOf("自動（跟原文方向）", "直排", "橫排")
         // 去字方式選單（順序＝position：0 boxfill / 1 auto整頁 / 2 lama整頁 / 3 auto逐格 / 4 lama逐格，對齊 fork 設定）
+        // 3 階梯對齊產品（砍 LaMa-整頁/LaMa-逐格：把乾淨白泡也送 lama→黃暈+慢，純下風）
         private val INPAINT_MODES = listOf(
-            "BoxFill（最速質劣）",
-            "Auto-整頁（快速質差）",
-            "LaMa-整頁（中速質中）",
-            "Auto-逐格（低速質佳）",
-            "LaMa-逐格（慢速質高）",
+            "BoxFill（最快·糙）",
+            "Auto-整頁（平衡·推薦）",
+            "Auto-逐格（質佳·慢）",
         )
         private val DEMOS = listOf("test/failed.jpg", "test/page.png", "test/demo2.png", "test/demo3.png", "test/demo4.png")
         private const val ALPHABET = "models/alphabet-all-v5.txt"
