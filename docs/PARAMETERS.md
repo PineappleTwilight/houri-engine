@@ -40,6 +40,10 @@ Dropdown, default **Auto-whole**. Three modes, all of which flat-fill speech bub
 
 Why there is no "LaMa-only" mode: running a clean white bubble through LaMa is pure downside (a faint halo plus the cost), so bubbles are always flat-filled.
 
+![BoxFill vs Auto-whole](img/inpaint-methods.png)
+
+Text over a building, removed two ways. BoxFill (left) flat-fills each text column into a pale patch that ignores the art behind it; Auto-whole (right) reconstructs the structure with LaMa. On clean speech bubbles the two are identical.
+
 ### Auto bubble threshold (autoStdThreshold)
 Default 6. Range 0–30 (practical 2–20). In the auto modes, a region is treated as a clean bubble (flat-filled) when its background brightness varies less than this and is light enough; otherwise it goes to LaMa.
 
