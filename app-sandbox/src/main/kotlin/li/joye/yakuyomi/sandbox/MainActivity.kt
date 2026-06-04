@@ -180,6 +180,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
+            val saveLog = binding.genLogSwitch.isChecked // 去背比較也寫 log 檔（QNN 的 EP 字串才進可讀檔）
             try {
                 val tree = runTree
                 if (tree == null) {
@@ -292,6 +293,15 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "去背比較失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
             } finally {
+                if (saveLog) {
+                    val ok = writeLog()
+                    withContext(Dispatchers.Main) {
+                        binding.logText.append(
+                            if (ok) "📁 已寫入：${runStamp}_log.txt\n"
+                            else "✗ log 寫入失敗：請重按「選擇模型資料夾」重新授權（含寫入）\n",
+                        )
+                    }
+                }
                 withContext(Dispatchers.Main) { binding.inpaintCompareButton.isEnabled = true }
             }
         }
