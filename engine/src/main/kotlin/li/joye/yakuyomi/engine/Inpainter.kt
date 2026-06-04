@@ -60,6 +60,7 @@ class Inpainter(
             val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
             for (r in regions) {
                 val s = bgStats(px, tightPx, r, w, h)
+                r.dbgStd = s.std; r.dbgWhite = s.meanLum // 同 auto：留實測值給 sandbox 去背比較標框（boxfill 不分流、但仍顯示 bg 量測供對照）
                 flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
             }
             maskBmp.recycle()

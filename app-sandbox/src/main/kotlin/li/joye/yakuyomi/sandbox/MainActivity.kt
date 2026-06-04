@@ -197,7 +197,7 @@ class MainActivity : AppCompatActivity() {
                     2 -> TextOrientation.HORIZONTAL
                     else -> TextOrientation.AUTO
                 }
-                log("▶ 去背比較 4 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）")
+                log("▶ 去背比較 3 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）")
                 val page = loadAssetBitmap("test/01.jpg")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
@@ -230,12 +230,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 log("共用前段：偵測${"%.1f".format(tDetect / 1000.0)}s OCR${"%.1f".format(tOcr / 1000.0)}s 翻譯${"%.1f".format(tTranslate / 1000.0)}s｜${detection.lines.size}行 ${regions.size}區 留${kept.size}")
 
-                // 4 模式（lama逐格 加回、放最右）；泡泡三者都平塗，差別只在忙碌區
+                // 3 模式（LaMa-逐格 移除：實測品質≈Auto-逐格、卻多半分鐘）；泡泡三者都平塗，差別只在忙碌區
                 val modes = listOf(
                     Triple("BoxFill",   "boxfill", true),
                     Triple("Auto-整頁", "auto",    true),
                     Triple("Auto-逐格", "auto",    false),
-                    Triple("LaMa-逐格", "lama",    false),
                 )
                 val renderCfg = RenderConfig(orientation = orient)
                 val lamaPath = ensureLocal(lamaF)
