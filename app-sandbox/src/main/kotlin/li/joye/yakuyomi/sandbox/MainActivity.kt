@@ -15,6 +15,7 @@ import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.documentfile.provider.DocumentFile
@@ -84,6 +85,8 @@ class MainActivity : AppCompatActivity() {
         binding.logText.text =
             if (t == null) "① 先按「選擇模型資料夾」選含 3 個 *.onnx 的資料夾\n② 選去字方式 → 按翻譯跑全 4 張"
             else "資料夾：${t.name}（選去字方式 → 按翻譯跑全 4 張批量計時）"
+        // 開機 Toast 標 build 版本：手動安裝後一眼確認裝對版本（沒看到＝還是舊 APK / 同步未完成）
+        Toast.makeText(this, "Yakuyomi sandbox $BUILD_TAG", Toast.LENGTH_LONG).show()
     }
 
     private fun runPipeline() {
@@ -213,7 +216,8 @@ class MainActivity : AppCompatActivity() {
                 val tD0 = System.currentTimeMillis()
                 val detection = detector.detect(page)
                 val tDetect = System.currentTimeMillis() - tD0
-                log("偵測 EP=${detector.ep}｜建session(編譯)${"%.1f".format(tDetCreate / 1000.0)}s 推論${"%.1f".format(tDetect / 1000.0)}s")
+                val detEp = detector.ep
+                log("偵測 EP=$detEp｜建session(編譯)${"%.1f".format(tDetCreate / 1000.0)}s 推論${"%.1f".format(tDetect / 1000.0)}s")
                 detector.close()
                 val tO0 = System.currentTimeMillis()
                 val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
@@ -248,6 +252,7 @@ class MainActivity : AppCompatActivity() {
                 val row1 = ArrayList<Bitmap>()   // 第一排：去字（框＋去字秒）
                 val row2 = ArrayList<Bitmap>()   // 第二排：貼字（整張秒）
                 val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms
+                var inpEp = "?" // 去字實際 EP（迴圈內捕捉；各模式同 qnn 旗標→同 EP，留最後一個 lama 模式的）
                 row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
@@ -257,6 +262,7 @@ class MainActivity : AppCompatActivity() {
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
+                    inpEp = inp.ep
                     log("[$name] EP=${inp.ep} 建session${"%.1f".format(tInpCreate / 1000.0)}s（boxfill 不跑 lama，QNN 對它無效）")
                     inp.close()
                     // 第一排：去字 + 路由框（auto 標引擎 std）+ 去字秒（先 copy 乾淨去字圖給第二排貼字）
@@ -277,7 +283,7 @@ class MainActivity : AppCompatActivity() {
                 row2.add(0, buildTimingTable(page.width, page.height, tDetect, tOcr, tTranslate, timings))
 
                 val big = mergeVertical(listOf(mergeHorizontal(row1), mergeHorizontal(row2)))
-                val hw = hwInfoLines()
+                val hw = hwInfoLines(detEp, inpEp)
                 hw.forEach { log(it) }
                 drawHwInfo(big, hw)
                 val cmpName = "${runStamp}_inpaintcmp.png"
@@ -363,7 +369,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 硬體資訊兩行（裝置/SoC、核數/RAM/去字執行緒）＝去背時間數據的對照背景。 */
-    private fun hwInfoLines(): List<String> {
+    private fun hwInfoLines(detEp: String, inpEp: String): List<String> {
         val cores = Runtime.getRuntime().availableProcessors()
         val mi = android.app.ActivityManager.MemoryInfo()
         getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(mi)
@@ -372,8 +378,10 @@ class MainActivity : AppCompatActivity() {
             "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE
         val threads = InpainterConfig().intraThreads
         return listOf(
-            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc",
-            "%d核 · %.1fGB RAM · 去字 intra-op %d緒 (XNNPACK CPU)".format(cores, ramGB, threads),
+            "$BUILD_TAG ｜ ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc",
+            "%d核 · %.1fGB RAM · intra-op %d緒".format(cores, ramGB, threads),
+            // ★ 實際生效 EP（QNN 有沒有真接上，圖上一看便知；失敗會顯示 XNNPACK←QNN失敗(原因)）
+            "偵測 EP=$detEp ｜ 去字 EP=$inpEp",
         )
     }
 
@@ -564,6 +572,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val BUILD_TAG = "v0.2-qnn ｜EP標在圖上+log+V75瘦身" // 改一次就 bump，手動安裝確認版本用
+
         // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/QNN)/去字標籤+選單/logText＝11。
         // ★ 加/刪任何固定 view（尤其開關）就要同步改這個數，否則 clearOutputs 會把 logText 或末尾固定 view 誤刪（log 消失）。
         private const val FIXED_VIEWS = 11

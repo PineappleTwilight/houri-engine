@@ -20,8 +20,8 @@ android {
         applicationId = "li.joye.yakuyomi.sandbox"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1-m2"
+        versionCode = 2
+        versionName = "0.2-qnn"
         buildConfigField(
             "String",
             "DEEPSEEK_API_KEY",
@@ -53,6 +53,21 @@ android {
     // 模型分離（BYOM）：*.onnx 不打進 APK，改由 app 從使用者選的資料夾載入 → APK 變小
     androidResources {
         ignoreAssetsPattern = "*.onnx"
+    }
+
+    // QNN 庫瘦身：qnn-runtime 預設打進所有 Hexagon 版本(V68/69/73/75)+DSP+GPU。
+    // 此測試機＝SD 8 Gen 3＝Hexagon V75，只需 V75 skel/stub + 共用的 libQnnHtp/Prepare/System。
+    // 砍掉其餘 ≈ 省 ~50MB，OneDrive 手動安裝快很多。★換非 8Gen3 的機測試時要把對應 Vxx 加回來。
+    packaging {
+        jniLibs {
+            excludes += listOf(
+                "**/libQnnHtpV68Skel.so", "**/libQnnHtpV68Stub.so",
+                "**/libQnnHtpV69Skel.so", "**/libQnnHtpV69Stub.so",
+                "**/libQnnHtpV73Skel.so", "**/libQnnHtpV73Stub.so",
+                "**/libQnnDsp.so", "**/libQnnDspV66Skel.so", "**/libQnnDspV66Stub.so",
+                "**/libQnnGpu.so",
+            )
+        }
     }
 }
 
