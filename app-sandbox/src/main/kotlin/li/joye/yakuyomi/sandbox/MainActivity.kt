@@ -271,6 +271,18 @@ class MainActivity : AppCompatActivity() {
                     timings.add(Triple(name, tInpaint, tRender))
                     log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaint + tRender) / 1000.0)}s")
                 }
+                // lama intra-op 探測：Auto-整頁 去字在 4/6/8 緒各跑一次，找最快緒數
+                // （現用 4；手機 8 核但 lama 只吃 4 緒＝半數核閒置，看調大有沒有空間。big.LITTLE→6 可能勝 8）。
+                log("— lama intra-op 探測（Auto-整頁 去字，找最快緒數）—")
+                for (th in listOf(4, 6, 8)) {
+                    kept.forEach { it.onArt = false }
+                    val pInp = Inpainter(lamaPath, InpainterConfig(method = "auto", wholeImage = true, intraThreads = th))
+                    val pt = System.currentTimeMillis()
+                    pInp.inpaint(page, kept, detection.textMask).recycle()
+                    pInp.close()
+                    log("  intra-op $th 緒：去字 ${"%.1f".format((System.currentTimeMillis() - pt) / 1000.0)}s")
+                }
+
                 // 左下（raw 正下方、本來空白處）＝逐階段時間總表
                 row2.add(0, buildTimingTable(page.width, page.height, tDetect, tOcr, tTranslate, timings))
 
@@ -563,7 +575,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.4-ocrconc8 ｜OCR並發x8 + QNN徹底移除" // 改一次就 bump，手動安裝確認版本用
+        private const val BUILD_TAG = "v0.5-lamaprobe ｜去背比較加 lama intra-op 4/6/8 探測" // 改一次就 bump，手動安裝確認版本用
 
         // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/OCR並發)/去字標籤+選單/logText＝11。
         // ★ 加/刪任何固定 view（尤其開關）就要同步改這個數，否則 clearOutputs 會把 logText 或末尾固定 view 誤刪（log 消失）。
