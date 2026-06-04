@@ -404,9 +404,11 @@ class MainActivity : AppCompatActivity() {
         } else {
             android.os.Build.HARDWARE
         }
+        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "?"
         return listOf(
             BUILD_TAG,
             "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc · %d核 · %.1fGB".format(cores, ramGB),
+            "Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT}) · $abi",
             "效能：OCR並發 x%d · 推論 intra-op %d緒 · XNNPACK CPU".format(OcrConfig().concurrency, InpainterConfig().intraThreads),
         )
     }
