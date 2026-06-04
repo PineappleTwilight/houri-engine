@@ -345,9 +345,9 @@ class Inpainter(
         } finally {
             imgTensor.close()
             maskTensor.close()
-            cropBmp.recycle()
+            if (cropBmp !== page) cropBmp.recycle() // 整窗(0,0,w,h)時 createBitmap 對 immutable 圖回傳 page 本身，別回收輸入
             crop512.recycle()
-            maskCropBmp.recycle()
+            if (maskCropBmp !== maskBmp) maskCropBmp.recycle() // 同上：整窗時別回收輸入遮罩
             mask512.recycle()
         }
     }
