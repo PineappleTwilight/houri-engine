@@ -98,7 +98,9 @@ data class InpainterConfig(
     val autoStdThreshold: Float = 6f,    // 12→8→6：壓畫面窄框引擎量 ~7 漏判 boxfill；6 給足餘裕（桌面 auto_diag 01.jpg + 真機去背比較驗證）
     val autoWhiteThreshold: Float = 190f, // 背景亮度均值門檻：對話框是白底
     val bboxPad: Int = 16,                // 去字 allow 用區域 bbox 矩形外擴 px：涵蓋貼 bbox 邊界的假名（行框太緊會漏）
-    val intraThreads: Int = 4,        // LaMa session intra-op 執行緒（整頁/逐區都用滿 4 核）
+    // LaMa session intra-op 執行緒。真機探測(SD 8 Gen 3, 8 核=6 大+2 小)：4→7.0s、6→5.8s(最快)、8→6.3s。
+    // 6＝用滿 6 大核（1×X4+5×A720）、避開 2 個慢的 A520 小核（加進去反拖累）。4→6 去字快 ~17%、整頁/逐區都受惠。
+    val intraThreads: Int = 6,        // 4→6（big.LITTLE 甜蜜點＝大核數；非全 8 核，小核拖累）
 )
 
 data class RenderConfig(
