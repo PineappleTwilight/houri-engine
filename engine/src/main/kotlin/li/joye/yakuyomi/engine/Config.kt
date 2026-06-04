@@ -29,9 +29,6 @@ data class DetectorConfig(
     // seg 文字筆畫遮罩二值門檻（去字用）。★ 0.3 會濾掉漢字旁注音「假名」的弱訊號 → 去字留一排假名殘留。
     // 降到 0.12＝偵測器其實看得到假名、只是 prob 弱（桌面 parity/auto_diag.py dev_furi3 實證）。只影響去字遮罩、不動偵測框/OCR。
     val segThreshold: Float = 0.12f,
-    // QNN(Hexagon NPU) EP：true＝偵測走 NPU；fp32 模型自動以 fp16 推論（enable_htp_fp16_precision 預設）。
-    // 需 onnxruntime-android-qnn AAR。失敗（無庫/不支援）自動退回 XNNPACK→CPU。實際用的 EP 見 [Detector.ep]。
-    val useQnn: Boolean = false,
 )
 
 data class OcrConfig(
@@ -44,7 +41,7 @@ data class OcrConfig(
     // concurrent=true → session intra-op 設 1（單行單緒）、靠 Semaphore(concurrency) 並發；false → 單行用滿 NUM_THREADS、序列（現狀）。
     // 純 CPU、ORT 共享 thread pool ⇒ 收益需實測（sandbox 去背比較 OCR 列 A/B）。與「批次 padding」不同：零 padding 浪費。
     val concurrent: Boolean = false,
-    val concurrency: Int = 6,         // 同時在飛的行數上限（8 核留 2 核給系統）
+    val concurrency: Int = 8,         // 同時在飛的行數上限（＝核數，全核並發；6→8 實驗）
 )
 
 // 預設 few-shot（日→繁中）：示範 <|i|> 逐行格式。改語言對時連同 toLangName/fromLangName 一起換成對應譯文。
@@ -102,8 +99,6 @@ data class InpainterConfig(
     val autoWhiteThreshold: Float = 190f, // 背景亮度均值門檻：對話框是白底
     val bboxPad: Int = 16,                // 去字 allow 用區域 bbox 矩形外擴 px：涵蓋貼 bbox 邊界的假名（行框太緊會漏）
     val intraThreads: Int = 4,        // LaMa session intra-op 執行緒（整頁/逐區都用滿 4 核）
-    // QNN(Hexagon NPU) EP：true＝lama 去字走 NPU；fp32 自動 fp16。需 -qnn AAR。失敗退回 XNNPACK→CPU。實際 EP 見 [Inpainter.ep]。
-    val useQnn: Boolean = false,
 )
 
 data class RenderConfig(

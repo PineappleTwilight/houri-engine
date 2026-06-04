@@ -22,12 +22,12 @@ class Detector(
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
-    /** 實際生效的 EP（"QNN"/"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log 確認是否真的上了 NPU。 */
+    /** 實際生效的 EP（"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log/圖確認。 */
     val ep: String
 
     init {
         val options = OrtSession.SessionOptions()
-        ep = options.applyEp(cfg.useQnn, NUM_THREADS, TAG)
+        ep = options.applyEp(NUM_THREADS, TAG)
         session = env.createSession(modelPath, options) // 從路徑載入＝native 記憶體、不佔 JVM heap
         Log.i(TAG, "session inputs=${session.inputNames} outputs=${session.outputNames} ep=$ep")
     }

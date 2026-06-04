@@ -182,7 +182,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
-            val saveLog = binding.genLogSwitch.isChecked // 去背比較也寫 log 檔（QNN 的 EP 字串才進可讀檔）
+            val saveLog = binding.genLogSwitch.isChecked // 去背比較也寫 log 檔（EP/各階段秒才進可讀檔）
             try {
                 val tree = runTree
                 if (tree == null) {
@@ -208,7 +208,6 @@ class MainActivity : AppCompatActivity() {
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
 
                 // 共用前段（3 模式共用、只跑一次）：偵測→OCR→分群→翻譯→過濾；逐階段計時供總表。
-                // QNN 的 session 建立含 NPU 圖編譯（慢、只付一次、可 context-cache）→ 與推論分開計時。
                 val detector = Detector(ensureLocal(detF))
                 val tD0 = System.currentTimeMillis()
                 val detection = detector.detect(page)
@@ -248,7 +247,7 @@ class MainActivity : AppCompatActivity() {
                 val row1 = ArrayList<Bitmap>()   // 第一排：去字（框＋去字秒）
                 val row2 = ArrayList<Bitmap>()   // 第二排：貼字（整張秒）
                 val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms
-                var inpEp = "?" // 去字實際 EP（迴圈內捕捉；各模式同 qnn 旗標→同 EP，留最後一個 lama 模式的）
+                var inpEp = "?" // 去字實際 EP（迴圈內捕捉；各模式同設定→同 EP）
                 row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
@@ -373,7 +372,7 @@ class MainActivity : AppCompatActivity() {
         return listOf(
             "$BUILD_TAG ｜ ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc",
             "%d核 · %.1fGB RAM ｜ OCR=%s".format(cores, ramGB, ocrLabel),
-            "偵測 EP=$detEp ｜ 去字 EP=$inpEp", // EP 確認（QNN 已還原→應為 XNNPACK）
+            "偵測 EP=$detEp ｜ 去字 EP=$inpEp", // EP 確認（應為 XNNPACK）
         )
     }
 
@@ -564,9 +563,9 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.3-ocrconc ｜OCR並發實驗+QNN依賴還原(APK砍回~57MB)" // 改一次就 bump，手動安裝確認版本用
+        private const val BUILD_TAG = "v0.4-ocrconc8 ｜OCR並發x8 + QNN徹底移除" // 改一次就 bump，手動安裝確認版本用
 
-        // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/QNN)/去字標籤+選單/logText＝11。
+        // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/OCR並發)/去字標籤+選單/logText＝11。
         // ★ 加/刪任何固定 view（尤其開關）就要同步改這個數，否則 clearOutputs 會把 logText 或末尾固定 view 誤刪（log 消失）。
         private const val FIXED_VIEWS = 11
         private const val PREF_TREE = "modelTree"
