@@ -297,7 +297,8 @@ class MainActivity : AppCompatActivity() {
                     val tR0 = System.currentTimeMillis()
                     val rendered = Renderer.render(cleaned, kept, renderCfg, tf)
                     val tRender = System.currentTimeMillis() - tR0
-                    labelBmp(rendered, name, tDetect + tOcr + tTranslate + tInpaint + tRender)
+                    // 下排標「整張」總時間（不標去字方式，免誤以為是去字耗時；方式看上排）
+                    labelBmp(rendered, "整張", tDetect + tOcr + tTranslate + tInpaint + tRender)
                     row2.add(rendered)
                     timings.add(Triple(name, tInpaint, tRender))
                     log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaint + tRender) / 1000.0)}s")
