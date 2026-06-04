@@ -25,6 +25,10 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 引擎只對外開一個呼叫，`translatePage(page): PageResult`（翻好／略過／失敗）。覆蓋原檔、「已翻譯」標記、續傳、跨頁批次是 reader app 的事。
 
+![效能比較](docs/img/showcase.png)
+
+來自 sandbox app：同一頁跑過三種去字模式。上排是去字後、下排是貼完譯文的成品，左邊的表把每個模式各階段的用時拆開列出。橫幅記了裝置、生效的設定、跟 LLM。
+
 ## 目標
 
 - **吞吐。** reader 不該卡在翻譯上。OCR 把一頁的文字行並發辨識、去字跟翻譯的網路等待重疊跑、下載 worker 在你讀到之前先翻好後面的頁。一頁在 Snapdragon 8 Gen 3 上大約 10–16 秒，視去字方法而定。

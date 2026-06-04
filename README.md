@@ -25,6 +25,10 @@ page bitmap
 
 The engine exposes one call, `translatePage(page): PageResult` (translated / skipped / failed). Writing the file back, the "translated" marker, resume, and cross-page batching belong to the reader app.
 
+![Performance comparison](docs/img/showcase.png)
+
+From the sandbox app: one page run through the three text-removal modes. The top row is after removal, the bottom row is the finished translation, and the table on the left breaks down the time each stage takes per mode. The banner records the device, the active settings, and the LLM.
+
 ## Goals
 
 - **Throughput.** A reader should not stall on translation. OCR processes a page's lines concurrently, text removal overlaps the translation network wait, and the download worker translates pages ahead of where you read. A page is roughly 10–16 s on a Snapdragon 8 Gen 3, depending on the text-removal mode.
