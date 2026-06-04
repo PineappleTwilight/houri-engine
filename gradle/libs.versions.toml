@@ -13,9 +13,9 @@ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = 
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
-# onnxruntime-android-qnn＝完整 ORT + QNN(Hexagon NPU) EP 的超集；傳遞依賴 com.qualcomm.qti:qnn-runtime 帶進 HTP 原生庫（libQnnHtp 等）。
-# CPU/XNNPACK 路徑不變，多出可選的 QNN EP（去字/偵測/OCR 可逐顆切上 NPU、fp16）。
-onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android-qnn", version.ref = "onnxruntime" }
+# 還原為精簡 AAR（QNN fp16 實測對本 float 模型不加速、op 回退 CPU＋多 7s 編譯＝更慢，已記 qnn-fp16-no-npu-accel）。
+# QNN 程式碼（OrtEp.applyEp / useQnn flag）保留為休眠（addQnn 在標準 API 即可編譯，runtime 無庫則退回 XNNPACK），未來若走 int8 再換回 -qnn。
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 
 [plugins]

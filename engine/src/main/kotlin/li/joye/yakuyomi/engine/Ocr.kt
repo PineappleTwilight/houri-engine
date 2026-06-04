@@ -9,6 +9,12 @@ import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.nio.FloatBuffer
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -39,11 +45,13 @@ class Ocr(
     private val session: OrtSession
 
     init {
+        // 並發模式：每行單緒（intra-op=1）、靠 N 行並發填核；序列模式：單行用滿 NUM_THREADS（現狀）。
+        val threads = if (cfg.concurrent) 1 else NUM_THREADS
         val options = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(NUM_THREADS)
+            setIntraOpNumThreads(threads)
             if (cfg.useXnnpack) {
                 try {
-                    addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
+                    addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
                 } catch (t: Throwable) {
                     Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
                 }
@@ -53,34 +61,45 @@ class Ocr(
     }
 
     /**
-     * 對每條文字行做 OCR，就地填入 direction 與 text。**逐行**推論（真機是 compute-bound，
-     * 批次的 padding 多餘運算反而更慢——實測）。每條右側加 [PAD_MARGIN] 白邊（見 [stripToTensor]）讓 CTC 不截尾字。
+     * 對每條文字行做 OCR，就地填入 direction 與 text。每條右側加 [PAD_MARGIN] 白邊（見 [stripToTensor]）讓 CTC 不截尾字。
+     * [OcrConfig.concurrent]＝true：多行並發（小圖塊吃不滿 intra-op→改單緒、並發填核，見 init）；false：逐行序列（現狀）。
+     * 批次 padding 已否決（寬度差→padding 浪費）；此處是「並發」（零 padding），與批次不同。
      */
-    fun recognize(page: Bitmap, lines: List<TextLine>) {
+    suspend fun recognize(page: Bitmap, lines: List<TextLine>): Unit = coroutineScope {
         val inputName = session.inputNames.first()
-        for (line in lines) {
-            val (ordered, isV) = sortPnts(line.quad)
-            line.direction = if (isV) "v" else "h"
-            val strip = transformedRegion(page, ordered, isV, cfg.textHeight) ?: continue
-            if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
-                strip.recycle()  // 彩色/非氣泡 SFX 類文字 → 跳過
-                continue
-            }
-            try {
-                stripToTensor(strip).use { input ->
-                    session.run(mapOf(inputName to input)).use { res ->
-                        val logits = res.get(OUT_LOGITS).orElseThrow {
-                            IllegalStateException("缺輸出 $OUT_LOGITS")
-                        } as OnnxTensor
-                        val (text, prob) = ctcDecode(logits)
-                        if (prob >= cfg.minProb) line.text = text  // 低信心誤讀 → 丟
-                    }
+        if (cfg.concurrent && lines.size > 1) {
+            val sem = Semaphore(cfg.concurrency.coerceAtLeast(1))
+            lines.map { line ->
+                async(Dispatchers.Default) { sem.withPermit { recognizeOne(page, line, inputName) } }
+            }.awaitAll()
+        } else {
+            for (line in lines) recognizeOne(page, line, inputName)
+        }
+    }
+
+    /** 單行 OCR：裁切→前處理→CTC→填 text。thread-safe：只寫自己的 line、session.run 可並發、其餘皆 local/唯讀。 */
+    private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String) {
+        val (ordered, isV) = sortPnts(line.quad)
+        line.direction = if (isV) "v" else "h"
+        val strip = transformedRegion(page, ordered, isV, cfg.textHeight) ?: return
+        if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
+            strip.recycle()  // 彩色/非氣泡 SFX 類文字 → 跳過
+            return
+        }
+        try {
+            stripToTensor(strip).use { input ->
+                session.run(mapOf(inputName to input)).use { res ->
+                    val logits = res.get(OUT_LOGITS).orElseThrow {
+                        IllegalStateException("缺輸出 $OUT_LOGITS")
+                    } as OnnxTensor
+                    val (text, prob) = ctcDecode(logits)
+                    if (prob >= cfg.minProb) line.text = text  // 低信心誤讀 → 丟
                 }
-            } catch (t: Throwable) {
-                Log.w(TAG, "OCR 單行失敗：${t.message}")
-            } finally {
-                strip.recycle()
             }
+        } catch (t: Throwable) {
+            Log.w(TAG, "OCR 單行失敗：${t.message}")
+        } finally {
+            strip.recycle()
         }
     }
 

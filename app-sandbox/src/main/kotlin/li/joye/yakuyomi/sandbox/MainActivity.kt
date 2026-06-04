@@ -24,7 +24,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
-import li.joye.yakuyomi.engine.DetectorConfig
 import li.joye.yakuyomi.engine.EngineConfig
 import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.InpainterConfig
@@ -202,25 +201,22 @@ class MainActivity : AppCompatActivity() {
                     2 -> TextOrientation.HORIZONTAL
                     else -> TextOrientation.AUTO
                 }
-                val qnn = binding.qnnSwitch.isChecked // QNN(NPU fp16) 套到偵測 + 去字(lama)；OCR 維持 CPU（已知最脆、先不冒險）
-                log("▶ 去背比較 3 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）｜EP=${if (qnn) "QNN NPU(fp16)" else "XNNPACK CPU"}")
+                val ocrConc = binding.ocrConcSwitch.isChecked // OCR 逐行並發實驗（小圖塊吃不滿 intra-op→單緒並發填核）
+                log("▶ 去背比較 3 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）｜OCR=${if (ocrConc) "並發" else "序列"}")
                 val page = loadAssetBitmap("test/01.jpg")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
 
                 // 共用前段（3 模式共用、只跑一次）：偵測→OCR→分群→翻譯→過濾；逐階段計時供總表。
                 // QNN 的 session 建立含 NPU 圖編譯（慢、只付一次、可 context-cache）→ 與推論分開計時。
-                val tDc0 = System.currentTimeMillis()
-                val detector = Detector(ensureLocal(detF), DetectorConfig(useQnn = qnn))
-                val tDetCreate = System.currentTimeMillis() - tDc0
+                val detector = Detector(ensureLocal(detF))
                 val tD0 = System.currentTimeMillis()
                 val detection = detector.detect(page)
                 val tDetect = System.currentTimeMillis() - tD0
                 val detEp = detector.ep
-                log("偵測 EP=$detEp｜建session(編譯)${"%.1f".format(tDetCreate / 1000.0)}s 推論${"%.1f".format(tDetect / 1000.0)}s")
                 detector.close()
                 val tO0 = System.currentTimeMillis()
-                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
+                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig(concurrent = ocrConc))
                 ocr.recognize(page, detection.lines)
                 ocr.close()
                 val regions = Grouping.group(detection.lines)
@@ -256,14 +252,11 @@ class MainActivity : AppCompatActivity() {
                 row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
-                    val tIc0 = System.currentTimeMillis()
-                    val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole, useQnn = qnn))
-                    val tInpCreate = System.currentTimeMillis() - tIc0
+                    val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
                     inpEp = inp.ep
-                    log("[$name] EP=${inp.ep} 建session${"%.1f".format(tInpCreate / 1000.0)}s（boxfill 不跑 lama，QNN 對它無效）")
                     inp.close()
                     // 第一排：去字 + 路由框（auto 標引擎 std）+ 去字秒（先 copy 乾淨去字圖給第二排貼字）
                     val r1 = cleaned.copy(Bitmap.Config.ARGB_8888, true)
@@ -283,7 +276,7 @@ class MainActivity : AppCompatActivity() {
                 row2.add(0, buildTimingTable(page.width, page.height, tDetect, tOcr, tTranslate, timings))
 
                 val big = mergeVertical(listOf(mergeHorizontal(row1), mergeHorizontal(row2)))
-                val hw = hwInfoLines(detEp, inpEp)
+                val hw = hwInfoLines(detEp, inpEp, ocrConc)
                 hw.forEach { log(it) }
                 drawHwInfo(big, hw)
                 val cmpName = "${runStamp}_inpaintcmp.png"
@@ -369,19 +362,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 硬體資訊兩行（裝置/SoC、核數/RAM/去字執行緒）＝去背時間數據的對照背景。 */
-    private fun hwInfoLines(detEp: String, inpEp: String): List<String> {
+    private fun hwInfoLines(detEp: String, inpEp: String, ocrConc: Boolean): List<String> {
         val cores = Runtime.getRuntime().availableProcessors()
         val mi = android.app.ActivityManager.MemoryInfo()
         getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(mi)
         val ramGB = mi.totalMem / (1024.0 * 1024 * 1024)
         val soc = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
             "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE
-        val threads = InpainterConfig().intraThreads
+        val ocrLabel = if (ocrConc) "並發x${OcrConfig().concurrency}(每行單緒)" else "序列(intra-op4)"
         return listOf(
             "$BUILD_TAG ｜ ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc",
-            "%d核 · %.1fGB RAM · intra-op %d緒".format(cores, ramGB, threads),
-            // ★ 實際生效 EP（QNN 有沒有真接上，圖上一看便知；失敗會顯示 XNNPACK←QNN失敗(原因)）
-            "偵測 EP=$detEp ｜ 去字 EP=$inpEp",
+            "%d核 · %.1fGB RAM ｜ OCR=%s".format(cores, ramGB, ocrLabel),
+            "偵測 EP=$detEp ｜ 去字 EP=$inpEp", // EP 確認（QNN 已還原→應為 XNNPACK）
         )
     }
 
@@ -572,7 +564,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.2-qnn ｜EP標在圖上+log+V75瘦身" // 改一次就 bump，手動安裝確認版本用
+        private const val BUILD_TAG = "v0.3-ocrconc ｜OCR並發實驗+QNN依賴還原(APK砍回~57MB)" // 改一次就 bump，手動安裝確認版本用
 
         // 固定子 view 數：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/3 開關(log/圖/QNN)/去字標籤+選單/logText＝11。
         // ★ 加/刪任何固定 view（尤其開關）就要同步改這個數，否則 clearOutputs 會把 logText 或末尾固定 view 誤刪（log 消失）。
