@@ -1,159 +1,100 @@
-<div align="center">
+# Yakuyomi — manga translation engine
 
-# Yakuyomi（訳読み）— Engine
+On-device detection, OCR, and text removal (ONNX Runtime) plus cloud-LLM translation. Japanese to Traditional Chinese by default; any source and target language can be set.
 
-**On-device manga-translation engine — detection / OCR / text-removal (ONNX Runtime) + cloud-LLM translation**
+English ｜ [中文](README_zh.md)
 
-Japanese → Traditional Chinese by default — **any source/target pair is configurable**
+Status: the engine runs end to end on a real device (milestones M0–M3). Reader integration (M4) is in progress.
 
-**English** ｜ [中文](README_zh.md)
-
-> **This repo (`yakuyomi-engine`) is the translation engine.** The reader app — **Yakuyomi**, a
-> [mihon](https://github.com/mihonapp/mihon) fork — is a separate repo that pulls this engine in as a
-> submodule (see [Repository layout](#repository-layout)).
->
-> **Status: the engine works end-to-end (M0–M3)** on a real device; reader integration (M4) is in progress.
-
-</div>
-
----
+This repo is the **engine** (`yakuyomi-engine`). The reader app is a separate [mihon](https://github.com/mihonapp/mihon) fork that pulls the engine in as a submodule; see [Repository layout](#repository-layout).
 
 ## What it is
 
-Yakuyomi is a manga reader with **built-in AI translation**, based on [mihon](https://github.com/mihonapp/mihon). The work splits in two:
+Yakuyomi translates manga pages. Four of the five stages run on the device with ONNX Runtime and Canvas; only translation calls out to a network LLM:
 
-- **Text detection, OCR, text removal** → run **on-device**, offline (ONNX Runtime) — this is the **engine** (this repo).
-- **Translation** → handed to a **cloud LLM** (DeepSeek by default, OpenAI-compatible).
+```
+page bitmap
+  detect    (ONNX)  text-line boxes + per-pixel stroke mask
+  OCR       (ONNX)  one forward per line  ->  source text
+  group             merge aligned lines into bubble regions
+  translate (LLM)   one request per page, batched, rate-limited
+  remove    (ONNX)  erase the original text (flat-fill or LaMa)
+  typeset   (Canvas) draw the translation back
+  translated bitmap
+```
 
-The top priority is **efficiency / throughput**: a chapter's pages are translated concurrently to minimize end-to-end time.
+The engine exposes one call, `translatePage(page): PageResult` (translated / skipped / failed). Writing the file back, the "translated" marker, resume, and cross-page batching belong to the reader app.
+
+## Goals
+
+- **Throughput.** A reader should not stall on translation. OCR processes a page's lines concurrently, text removal overlaps the translation network wait, and the download worker translates pages ahead of where you read. A page is roughly 10–16 s on a Snapdragon 8 Gen 3, depending on the text-removal mode.
+- **Configurable, and ready to be public.** Provider, model, API base, key, and language pair are all settings (bring your own key). Models are loaded from a folder you pick, not bundled (bring your own model). About 20 engine parameters are exposed; see [docs/PARAMETERS.md](docs/PARAMETERS.md).
+- **Never make the library worse.** A page is overwritten only when translation succeeds. If a page has no text, or every line fails, or the network drops, the original is kept untouched. Blocks whose translation fails keep their Japanese text instead of being blanked.
+
+## What it can do
+
+- **Detection** — comic-text-detector. Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.
+- **OCR** — a 48px CTC model, one forward per line, decoded greedily. Runs on CPU (XNNPACK miscomputes this model). Lines are recognized concurrently, which on an 8-core phone cuts OCR roughly in half.
+- **Translation** — a cloud LLM with the line-numbered protocol from manga-image-translator. DeepSeek by default; any OpenAI-compatible provider works. Per-page requests run concurrently under a semaphore to avoid rate limits. A failed line falls back to its source text rather than breaking the page.
+- **Text removal** — three modes, trading speed for quality. Speech bubbles are always flat-filled (clean, no halo); the modes differ only in how text drawn over artwork is handled:
+
+  | Mode | Artwork handling | Speed |
+  |---|---|---|
+  | BoxFill | flat-fill (becomes a colour block) | fastest |
+  | Auto-whole (default) | one whole-image LaMa pass | balanced |
+  | Auto-tile | per-region LaMa | slowest, sharpest |
+
+- **Typesetting** — text-box layout, vertical or horizontal, with adaptive font size, vertical centering, outline scaled to the font, line-head kinsoku, and tilt-aware placement (text follows a slanted bubble's angle). Text colour is chosen from the cleaned background (black on light, white on dark).
+- **Languages** — Japanese to Traditional Chinese out of the box. Set a different target, source, and few-shot example for any pair. Traditional-Chinese output relies on the prompt; there is no OpenCC post-processing.
 
 ## Repository layout
 
-The project spans two repos:
+Two repos:
 
 | Repo | Role |
 |---|---|
-| **`yakuyomi-engine`** (this repo) | the on-device translation engine: `:engine` (detection / OCR / translation / text-removal / typesetting, exposing only `translatePage(page): PageResult`) + a throwaway `:app-sandbox` for isolated testing + the `parity/` validation harness. Reader-agnostic, independently testable. |
-| **`Yakuyomi`** — a [mihon](https://github.com/mihonapp/mihon) fork | the reader app: mihon rebranded, with the download-pipeline hook + translation settings + model management. It pulls in `yakuyomi-engine` as a **git submodule**, built from source via Gradle `includeBuild`. |
+| `yakuyomi-engine` (this one) | the engine: `:engine` (the pipeline, exposing only `translatePage`), a throwaway `:app-sandbox` for testing on a device, and the `parity/` desktop validation harness. No reader code. |
+| `Yakuyomi` (a mihon fork) | the reader app: mihon with the download hook, translation settings, and model management. Consumes the engine as a git submodule via Gradle `includeBuild`. |
 
-Why split: the engine stays clean and testable on its own, while the app is a genuine mihon fork (so it's eligible for mihon's fork network). Engine changes are committed here; the app bumps the submodule pointer.
+The engine stays reader-agnostic so it can be tested on its own; the app is a real mihon fork. Engine work is committed here, and the app bumps the submodule pointer.
 
-## How it's built: vibecoding
+## Models
 
-This project is built by **vibecoding** — a human drives direction, trade-offs and review; the code is written mostly by AI ([Claude Code](https://claude.com/claude-code)).
-
-The engine is a from-scratch Kotlin + ONNX Runtime implementation, and **this repo contains no manga-image-translator source code**; what it aligns to m-i-t is its behaviour and prompts (see [below](#aligning-with-manga-image-translator)), while the models are third-party (see [Models & sources](#models--sources)).
-
-## Why "semi-offline"
-
-Detection / OCR / text removal run on-device, so those steps work offline; only translation goes to a cloud LLM, so **translation needs a network connection while it runs**. A deliberate trade-off — the other stages stay offline and the engine can ship independently, at the cost of semi-offline translation.
-
-## Highlights
-
-- 🔍 **On-device detection**: comic-text-detector, emitting text-line boxes **plus a per-pixel text-stroke mask (seg)**.
-- 🔠 **On-device OCR**: 48px CTC model (CPU-only; XNNPACK miscomputes this model, so it's disabled).
-- 🌐 **Cloud-LLM translation**: reuses m-i-t's prompt and protocol; per-page, in-batch concurrency, `Semaphore` rate-limiting (avoids 429s).
-- 🧹 **On-device text removal**: default **box-fill nearest-colour** — uses the seg thin-stroke mask, fills only the glyph strokes, each pixel taking its nearest background colour (multi-colour / gradient / text-over-art never smear into a colour block); **LaMa** (whole-page / per-region) is also selectable.
-- ✍️ **Typesetting**: pure text-box layout — vertical / horizontal, adaptive font size, **vertical centering, stroke width scaled to font size, line-head kinsoku**, punctuation rotation, automatic black/white text (by post-removal background luminance).
-- 🇹🇼 **Traditional-Chinese output**: the prompt enforces Taiwan-style Traditional Chinese, entirely via the LLM (**no OpenCC post-processing**; occasional wording slips accepted).
-- 🔑 **BYOK (bring your own key)**: provider / model / API base / key / target language are all configurable; **no key is bundled**; keys live in the Android Keystore.
-- 📦 **BYOM (bring your own model)**: ONNX weights aren't packed into the APK; the user points the app at a local folder (loaded off-heap, dodging the JVM heap cap).
-- 💾 **Overwrite-in-place, resumable**: a page is overwritten only when translation succeeds, with per-page completion state; on failure / no text the original is kept — **never overwrite the library with something worse than the original**.
-
-## A page's data flow
-
-```
-Page Bitmap
- → Detect (ONNX)    → text-line boxes + seg stroke mask; sorted by m-i-t's coordinate heuristic
- → OCR    (ONNX)    → whole-block recognition per box → Japanese sourceText
- → Group            → merge nearby, aligned lines into bubble regions (ported m-i-t merge rule)
- → Translate (LLM)  → per-page, concurrent, no rolling context → targetText (pasted back by block ID)
- → Remove (ONNX/CV) → box-fill nearest-colour (default) / LaMa inpaint
- → Typeset (Canvas) → vertical / horizontal, centered, stroke, kinsoku
- → Translated Bitmap
-```
-
-The engine exposes a single entry point, `translatePage(page): PageResult` (translated / skipped / failed); **overwriting the original, markers, resume, and cross-page batch concurrency** are the reader app's job (the Yakuyomi fork's download worker).
-
-## Tech choices
-
-| Item | Choice | Notes |
-|---|---|---|
-| Reader base | **mihon** (the Yakuyomi app is a fork) | integration sits at the download layer; the reader is untouched |
-| Inference | **pure Kotlin + ONNX Runtime** (`onnxruntime-android`, with XNNPACK) | NNAPI deprecated, not used |
-| Acceleration | XNNPACK/CPU → int8 quantization → QNN / LiteRT (NPU/GPU) when needed | NPU is the future lever to cut LaMa's cost |
-| Text removal (default) | **box-fill nearest-colour** | instant, follows local background, no colour block |
-| Text removal (optional) | **LaMa** (whole-page / per-region) | see [Models & sources](#models--sources) |
-| Translation | cloud LLM, reusing m-i-t `chatgpt.py`'s prompt + protocol | OpenAI-compatible |
-| Default provider | **DeepSeek** | fully changeable (BYOK) |
-
-## Translation providers (BYOK)
-
-v1 first supports the **OpenAI-compatible** group (one HTTP client covers all):
-
-- `openai`, `deepseek`, `groq`, `custom_openai` (OpenRouter / LM Studio / self-hosted)
-- then `gemini`, and later the non-LLM cloud MTs (DeepL / Caiyun / Youdao / Baidu / Papago) as separate adapters.
-
-The settings screen exposes: provider, model, API base (for custom_openai), API key (one slot per provider, stored in Keystore), and target language. DeepSeek by default, all changeable.
-
-## Models & sources
-
-ONNX weights are **not committed and not packed into the APK** (BYOM). Provenance:
+Weights are not committed and not packed into the APK. The app loads them from a folder you choose.
 
 | Stage | Model | Source |
 |---|---|---|
-| Detection | comic-text-detector (outputs `blk` / `seg` / `det`) | ONNX from [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) (manga-image-translator ecosystem) |
-| OCR | 48px CTC | weights from [manga-image-translator](https://github.com/zyddnys/manga-image-translator), exported to ONNX by us via `torch.onnx.export` |
-| Text removal | LaMa (manga fine-tune) | **`lama-manga.onnx` from [Koharu (mayocream/koharu)](https://github.com/mayocream/koharu)**; underlying architecture [advimman/LaMa](https://github.com/advimman/lama) |
-| Fonts | Noto Sans / Serif CJK TC, Source Han | for CJK rendering, redistributable (OFL / Apache) |
+| Detection | comic-text-detector | [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| OCR | 48px CTC | weights from [manga-image-translator](https://github.com/zyddnys/manga-image-translator), exported to ONNX here |
+| Text removal | LaMa (manga fine-tune) | `lama-manga.onnx` from [Koharu](https://github.com/mayocream/koharu); architecture from [advimman/LaMa](https://github.com/advimman/lama) |
+| Fonts | Noto Sans/Serif CJK, Source Han | CJK rendering (OFL / Apache) |
 
-ONNX export and pipeline details were informed by [Koharu](https://github.com/mayocream/koharu) (Rust + ONNX). Redistribution terms for each model / font are pending the [licensing audit](#license).
+## Building
 
-## Aligning with manga-image-translator
+The engine builds as a standard Android Gradle library. The sandbox app (`:app-sandbox`) is the quickest way to exercise the pipeline:
 
-m-i-t is the spec, not a master to be copied line-for-line. We pin one upstream commit (see `.upstream-ref`) and align in three layers:
+```
+./gradlew :app-sandbox:assembleDebug
+```
 
-1. **Copy verbatim** — prompt & protocol, per-stage parameters / thresholds, config schema, model selection & processing order, provider scope.
-2. **Match behaviour, implement freely** — detection post-processing, coordinate back-projection, seg mask generation, line grouping, reading order, concurrent translation (criterion: same input → near-identical output).
-3. **Informed divergence (recorded)** — platform-forced or deliberate trade-offs, e.g. ORT inference, dropping CUDA, box-fill nearest-colour for removal, rolling context off by default.
+Install it, point it at a folder containing the three `.onnx` models, pick test images, and run a diagnostic or a text-removal comparison. The reader app lives in the separate fork repo.
 
-Every ported file is headed with `// ported from <python path> @ <commit>`, and is validated against the Python output by the `parity/` harness before being wired into the pipeline.
+## Configuration
 
-## Roadmap
+Every tunable parameter, its range, and the effect of changing it is documented in [docs/PARAMETERS.md](docs/PARAMETERS.md). The reader's translation settings expose the same set, grouped by stage, with the advanced knobs behind a toggle.
 
-Development happens in this engine repo (with a standalone `:app-sandbox`); the engine is decoupled (`:engine`, exposing only `translatePage`) and is consumed by the **Yakuyomi** mihon fork as a submodule.
+## How it relates to manga-image-translator
 
-| Milestone | Scope | Status |
-|---|---|---|
-| **M0** | sandbox + ONNX detector, draw text boxes on a page (verify XNNPACK on a real device) | ✅ |
-| **M1** | wire OCR (48px CTC), overlay the recognized Japanese | ✅ |
-| **M2** | wire LLM translation (DeepSeek, per-page concurrency) + cover text → end-to-end working | ✅ |
-| **M3** | text removal (box-fill nearest-colour / LaMa) + typesetting (centering / stroke / kinsoku); engine consolidated into `translatePage` | ✅ |
-| **M4** | hook the engine into the **Yakuyomi** (mihon) fork's download pipeline, model download management, quantization / perf, fast / quality modes | ⏳ |
-
-## Privacy
-
-- **BYOK**: no API key is bundled; you provide your own, stored in the Android Keystore.
-- **On-device processing**: detection / OCR / text removal never leave the device.
-- **Translation goes online**: the OCR'd text is sent to **the LLM provider you configure** for translation — check that provider's data policy yourself.
+The engine is a from-scratch Kotlin + ONNX Runtime implementation. It contains no manga-image-translator source code; what it borrows is behaviour — the translation prompt and protocol, the parameter defaults, the model choice and processing order. The details, and the layered alignment policy, are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Credits
 
-This project stands on the shoulders of:
-
-- [mihon](https://github.com/mihonapp/mihon) (the reader the Yakuyomi app is forked from, Apache-2.0)
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (behavioural spec & prompts for the translation pipeline)
-- [Koharu (mayocream/koharu)](https://github.com/mayocream/koharu) (the `lama-manga.onnx` removal model; ONNX-export / pipeline reference)
-- [comic-text-detector](https://github.com/dmMaze/comic-text-detector), [manga-ocr](https://github.com/kha-white/manga-ocr), [LaMa](https://github.com/advimman/lama) (models / architectures)
-- Noto Sans / Serif CJK, Source Han (CJK rendering fonts)
-- [Claude Code](https://claude.com/claude-code) (vibecoding development)
+- [mihon](https://github.com/mihonapp/mihon) — the reader the app forks (Apache-2.0)
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt and behaviour reference
+- [Koharu](https://github.com/mayocream/koharu) — the `lama-manga.onnx` model and ONNX-export reference
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector), [LaMa](https://github.com/advimman/lama) — models and architectures
+- Noto Sans/Serif CJK, Source Han — fonts
 
 ## License
 
-**TBD.** The code in this repo is **self-implemented in Kotlin / ORT** (not a port of m-i-t source), but the project as a whole still **reuses m-i-t's prompts and parameter defaults**, ships as a fork of mihon (Apache-2.0), and uses several third-party model weights / fonts. A licensing audit (m-i-t terms, each model / font license, model hosting) will be completed before any public release, at which point a proper `LICENSE` will be added. Until then, assume no distribution license.
-
----
-
-<div align="center">
-<sub>訳読み — read the panels that haven't been translated yet.</sub>
-</div>
+To be decided. The code here is written from scratch in Kotlin/ORT, but the project reuses manga-image-translator's prompts and defaults, forks mihon (Apache-2.0), and uses third-party model weights and fonts. A licensing audit will be done before any public release. Until then, assume no distribution license.
