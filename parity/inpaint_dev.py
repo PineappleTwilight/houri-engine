@@ -19,7 +19,8 @@ INPUT, LAMA = 1024, 512
 WIN = float(os.environ.get("YAKU_WIN", "1.7"))      # lama 視窗 context 倍率（可 env 覆蓋）
 SEG_T = float(os.environ.get("YAKU_SEGT", "0.3"))   # seg 二值門檻（低=抓更多筆畫/小字）
 DIL = int(os.environ.get("YAKU_DIL", "3"))          # 遮罩膨脹半徑（大=蓋到邊緣）
-FILL_REACH, AUTO_STD = 64, 24.0
+FILL_REACH = 64
+AUTO_STD = float(os.environ.get("YAKU_STDT", "24.0"))  # auto 路由門檻（低=更多區走 lama；引擎側用 6）
 
 
 def detect_seg(det, seg_rep, rgb):
