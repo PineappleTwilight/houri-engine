@@ -25,16 +25,12 @@ class Inpainter(
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
+    /** 實際生效的 EP（"QNN"/"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log 確認去字是否真上 NPU。 */
+    val ep: String
 
     init {
-        val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(cfg.intraThreads) // 逐區平行時：concurrency × intraThreads ≈ 核數
-            try {
-                addXnnpack(mapOf("intra_op_num_threads" to cfg.intraThreads.toString()))
-            } catch (t: Throwable) {
-                Log.w(TAG, "XNNPACK 不可用：${t.message}")
-            }
-        }
+        val opts = OrtSession.SessionOptions()
+        ep = opts.applyEp(cfg.useQnn, cfg.intraThreads, TAG)
         session = env.createSession(modelPath, opts) // 路徑載入＝native 記憶體、不佔 JVM heap
     }
 

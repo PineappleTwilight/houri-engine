@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import li.joye.yakuyomi.engine.Detector
+import li.joye.yakuyomi.engine.DetectorConfig
 import li.joye.yakuyomi.engine.EngineConfig
 import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.InpainterConfig
@@ -197,17 +198,22 @@ class MainActivity : AppCompatActivity() {
                     2 -> TextOrientation.HORIZONTAL
                     else -> TextOrientation.AUTO
                 }
-                log("▶ 去背比較 3 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）")
+                val qnn = binding.qnnSwitch.isChecked // QNN(NPU fp16) 套到偵測 + 去字(lama)；OCR 維持 CPU（已知最脆、先不冒險）
+                log("▶ 去背比較 3 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）｜EP=${if (qnn) "QNN NPU(fp16)" else "XNNPACK CPU"}")
                 val page = loadAssetBitmap("test/01.jpg")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
 
-                // 共用前段（4 模式共用、只跑一次）：偵測→OCR→分群→翻譯→過濾；逐階段計時供總表。
+                // 共用前段（3 模式共用、只跑一次）：偵測→OCR→分群→翻譯→過濾；逐階段計時供總表。
+                // QNN 的 session 建立含 NPU 圖編譯（慢、只付一次、可 context-cache）→ 與推論分開計時。
+                val tDc0 = System.currentTimeMillis()
+                val detector = Detector(ensureLocal(detF), DetectorConfig(useQnn = qnn))
+                val tDetCreate = System.currentTimeMillis() - tDc0
                 val tD0 = System.currentTimeMillis()
-                val detector = Detector(ensureLocal(detF))
                 val detection = detector.detect(page)
-                detector.close()
                 val tDetect = System.currentTimeMillis() - tD0
+                log("偵測 EP=${detector.ep}｜建session(編譯)${"%.1f".format(tDetCreate / 1000.0)}s 推論${"%.1f".format(tDetect / 1000.0)}s")
+                detector.close()
                 val tO0 = System.currentTimeMillis()
                 val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
                 ocr.recognize(page, detection.lines)
@@ -244,10 +250,13 @@ class MainActivity : AppCompatActivity() {
                 row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
-                    val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
+                    val tIc0 = System.currentTimeMillis()
+                    val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole, useQnn = qnn))
+                    val tInpCreate = System.currentTimeMillis() - tIc0
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
+                    log("[$name] EP=${inp.ep} 建session${"%.1f".format(tInpCreate / 1000.0)}s（boxfill 不跑 lama，QNN 對它無效）")
                     inp.close()
                     // 第一排：去字 + 路由框（auto 標引擎 std）+ 去字秒（先 copy 乾淨去字圖給第二排貼字）
                     val r1 = cleaned.copy(Bitmap.Config.ARGB_8888, true)

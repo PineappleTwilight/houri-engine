@@ -13,7 +13,9 @@ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = 
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
-onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
+# onnxruntime-android-qnn＝完整 ORT + QNN(Hexagon NPU) EP 的超集；傳遞依賴 com.qualcomm.qti:qnn-runtime 帶進 HTP 原生庫（libQnnHtp 等）。
+# CPU/XNNPACK 路徑不變，多出可選的 QNN EP（去字/偵測/OCR 可逐顆切上 NPU、fp16）。
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android-qnn", version.ref = "onnxruntime" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 
 [plugins]

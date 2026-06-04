@@ -22,19 +22,14 @@ class Detector(
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
+    /** 實際生效的 EP（"QNN"/"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log 確認是否真的上了 NPU。 */
+    val ep: String
 
     init {
-        val options = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(NUM_THREADS)
-            try {
-                addXnnpack(mapOf("intra_op_num_threads" to NUM_THREADS.toString()))
-                Log.i(TAG, "XNNPACK 已啟用")
-            } catch (t: Throwable) {
-                Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
-            }
-        }
+        val options = OrtSession.SessionOptions()
+        ep = options.applyEp(cfg.useQnn, NUM_THREADS, TAG)
         session = env.createSession(modelPath, options) // 從路徑載入＝native 記憶體、不佔 JVM heap
-        Log.i(TAG, "session inputs=${session.inputNames} outputs=${session.outputNames}")
+        Log.i(TAG, "session inputs=${session.inputNames} outputs=${session.outputNames} ep=$ep")
     }
 
     fun detect(page: Bitmap): Detection {

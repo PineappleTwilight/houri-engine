@@ -58,6 +58,13 @@
             android:checked="true"
             android:text="產生 debug 圖到資料夾" />
 
+        <Switch
+            android:id="@+id/qnnSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="false"
+            android:text="偵測/去字 用 QNN NPU (fp16)" />
+
         <TextView
             android:id="@+id/inpaintLabel"
             android:layout_width="wrap_content"
