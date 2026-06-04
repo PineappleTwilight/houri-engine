@@ -187,7 +187,7 @@ class MainActivity : AppCompatActivity() {
                     log("✗ 模型不齊（需含 detect/comictext 與 lama 的 .onnx）")
                     return@launch
                 }
-                log("▶ 去背比較 5 種模式 — 01.jpg")
+                log("▶ 去背比較 3 種模式 — 01.jpg")
                 val page = loadAssetBitmap("test/01.jpg")
                 val detector = Detector(ensureLocal(detF))
                 val detection = detector.detect(page)
@@ -198,12 +198,11 @@ class MainActivity : AppCompatActivity() {
                 val results = ArrayList<Bitmap>(6)
                 results.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
 
+                // 對齊產品 3 階梯（泡泡三者都平塗，差別只在忙碌區）：平塗 / 整頁lama / 逐區lama
                 val modes = listOf(
                     Triple("BoxFill",   "boxfill", true),
                     Triple("Auto-整頁", "auto",    true),
-                    Triple("LaMa-整頁", "lama",    true),
                     Triple("Auto-逐格", "auto",    false),
-                    Triple("LaMa-逐格", "lama",    false),
                 )
                 val lamaPath = ensureLocal(lamaF)
                 for ((name, method, whole) in modes) {
@@ -220,6 +219,9 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val big = mergeHorizontal(results)
+                val hw = hwInfoLines()
+                hw.forEach { log(it) }
+                drawHwInfo(big, hw)
                 val cmpName = "${runStamp}_inpaintcmp.png"
                 runCatching {
                     tree.findFile(cmpName)?.delete()
@@ -266,10 +268,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 在 bmp 右上角疊印「name + (ms)」標籤（黑底白字圓角矩形），直接修改傳入的 bmp 並回傳。ms<0 不印時間。 */
+    /** 在 bmp 右上角疊印「name + (秒)」標籤（黑底白字圓角矩形），直接修改傳入的 bmp 並回傳。ms<0 不印時間。 */
     private fun labelBmp(bmp: Bitmap, name: String, ms: Long): Bitmap {
         val canvas = Canvas(bmp)
-        val text = if (ms >= 0) "$name ${ms}ms" else name
+        val text = if (ms >= 0) "$name %.1fs".format(ms / 1000.0) else name
         val textSize = (bmp.width / 26f).coerceAtLeast(14f)
         val textPaint = Paint().apply {
             color = Color.WHITE
@@ -291,6 +293,38 @@ class MainActivity : AppCompatActivity() {
         canvas.drawRoundRect(RectF(right - boxW, top, right, top + boxH), 8f, 8f, bgPaint)
         canvas.drawText(text, right - boxW + pad, top + pad + textSize * 0.85f, textPaint)
         return bmp
+    }
+
+    /** 硬體資訊兩行（裝置/SoC、核數/RAM/去字執行緒）＝去背時間數據的對照背景。 */
+    private fun hwInfoLines(): List<String> {
+        val cores = Runtime.getRuntime().availableProcessors()
+        val mi = android.app.ActivityManager.MemoryInfo()
+        getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(mi)
+        val ramGB = mi.totalMem / (1024.0 * 1024 * 1024)
+        val soc = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
+            "${android.os.Build.SOC_MANUFACTURER} ${android.os.Build.SOC_MODEL}" else android.os.Build.HARDWARE
+        val threads = InpainterConfig().intraThreads
+        return listOf(
+            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc",
+            "%d核 · %.1fGB RAM · 去字 intra-op %d緒 (XNNPACK CPU)".format(cores, ramGB, threads),
+        )
+    }
+
+    /** 在合圖左上角疊印硬體資訊（黑底白字）。 */
+    private fun drawHwInfo(bmp: Bitmap, lines: List<String>) {
+        val canvas = Canvas(bmp)
+        val ts = (bmp.height / 70f).coerceIn(18f, 40f)
+        val txt = Paint().apply {
+            color = Color.WHITE; textSize = ts; isAntiAlias = true
+            typeface = Typeface.MONOSPACE; isFakeBoldText = true
+        }
+        val bg = Paint().apply { color = Color.BLACK; alpha = 200 }
+        val pad = ts * 0.4f
+        val maxW = lines.maxOf { txt.measureText(it) }
+        canvas.drawRect(0f, 0f, maxW + pad * 2, (ts + pad) * lines.size + pad, bg)
+        lines.forEachIndexed { i, line ->
+            canvas.drawText(line, pad, pad + ts * 0.85f + i * (ts + pad), txt)
+        }
     }
 
     /** 把多張 Bitmap 橫向拼接（頂部對齊）。 */
