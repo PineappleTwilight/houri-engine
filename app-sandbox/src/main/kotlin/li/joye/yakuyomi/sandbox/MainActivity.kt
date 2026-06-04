@@ -406,11 +406,13 @@ class MainActivity : AppCompatActivity() {
             android.os.Build.HARDWARE
         }
         val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "?"
+        val tc = TranslatorConfig()
         return listOf(
             BUILD_TAG,
             "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · $soc · %d核 · %.1fGB".format(cores, ramGB),
             "Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT}) · $abi",
             "效能：OCR並發 x%d · 推論 intra-op %d緒 · XNNPACK CPU".format(OcrConfig().concurrency, InpainterConfig().intraThreads),
+            "LLM：${tc.provider} · ${tc.model}",
         )
     }
 
@@ -470,7 +472,10 @@ class MainActivity : AppCompatActivity() {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(Color.WHITE)
-        val stages = listOf("偵測", "OCR", "翻譯", "去字", "排版", "整張")
+        val stages = listOf(
+            "偵測" to "Detect", "辨識" to "OCR", "翻譯" to "Translate",
+            "去字" to "Inpaint", "排版" to "Render", "整張" to "Total",
+        )
         val cols = 1 + timings.size
         val rowsN = 1 + stages.size
         val colW = w.toFloat() / cols
@@ -492,11 +497,19 @@ class MainActivity : AppCompatActivity() {
             val y = row * rowH + rowH / 2 + ts * 0.35f
             canvas.drawText(s, x, y, p)
         }
+        // 中英雙行（中文粗體在上、英文小灰字在下）＝項目名稱中英顯示，雙行才不擠出格
+        val small = Paint(txt).apply { textSize = ts * 0.72f; color = Color.DKGRAY }
+        fun putTwoLine(col: Int, row: Int, top: String, bottom: String) {
+            val cx = col * colW + colW / 2
+            val cyTop = row * rowH + rowH / 2 - ts * 0.1f
+            canvas.drawText(top, cx - txtB.measureText(top) / 2, cyTop, txtB)
+            canvas.drawText(bottom, cx - small.measureText(bottom) / 2, cyTop + ts * 0.95f, small)
+        }
         fun fmt(ms: Long) = "%.1f".format(ms / 1000.0)
-        put(0, 0, "階段/秒", true)
+        putTwoLine(0, 0, "階段", "Stage")
         timings.forEachIndexed { i, t -> put(i + 1, 0, t.first, true) }
         stages.forEachIndexed { si, stage ->
-            put(0, si + 1, stage, true)
+            putTwoLine(0, si + 1, stage.first, stage.second)
             timings.forEachIndexed { i, t ->
                 val v = when (si) {
                     0 -> fmt(tDetect)
