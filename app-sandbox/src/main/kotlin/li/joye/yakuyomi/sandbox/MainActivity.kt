@@ -32,6 +32,10 @@ import li.joye.yakuyomi.engine.OcrConfig
 import li.joye.yakuyomi.engine.PageResult
 import li.joye.yakuyomi.engine.RenderConfig
 import li.joye.yakuyomi.engine.TextOrientation
+import li.joye.yakuyomi.engine.LlmTranslator
+import li.joye.yakuyomi.engine.Ocr
+import li.joye.yakuyomi.engine.Renderer
+import li.joye.yakuyomi.engine.TranslatorConfig
 import li.joye.yakuyomi.engine.Yakuyomi
 import li.joye.yakuyomi.sandbox.databinding.ActivityMainBinding
 
@@ -182,43 +186,88 @@ class MainActivity : AppCompatActivity() {
                     return@launch
                 }
                 val detF = findOnnx(tree, "detect", "comictext")
+                val ocrF = findOnnx(tree, "ocr")
                 val lamaF = findOnnx(tree, "lama")
-                if (detF == null || lamaF == null) {
-                    log("✗ 模型不齊（需含 detect/comictext 與 lama 的 .onnx）")
+                if (detF == null || ocrF == null || lamaF == null) {
+                    log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）")
                     return@launch
                 }
-                log("▶ 去背比較 3 種模式 — 01.jpg")
+                val orient = when (binding.orientSpinner.selectedItemPosition) {
+                    1 -> TextOrientation.VERTICAL
+                    2 -> TextOrientation.HORIZONTAL
+                    else -> TextOrientation.AUTO
+                }
+                log("▶ 去背比較 4 模式 ×（去字/貼字）+ 總表 — 01.jpg（需連網翻譯）")
                 val page = loadAssetBitmap("test/01.jpg")
+                val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
+                val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
+
+                // 共用前段（4 模式共用、只跑一次）：偵測→OCR→分群→翻譯→過濾；逐階段計時供總表。
+                val tD0 = System.currentTimeMillis()
                 val detector = Detector(ensureLocal(detF))
                 val detection = detector.detect(page)
-                val regions = Grouping.group(detection.lines)
                 detector.close()
-                log("偵測：${detection.lines.size} 行 → ${regions.size} 區")
+                val tDetect = System.currentTimeMillis() - tD0
+                val tO0 = System.currentTimeMillis()
+                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
+                ocr.recognize(page, detection.lines)
+                ocr.close()
+                val regions = Grouping.group(detection.lines)
+                val tOcr = System.currentTimeMillis() - tO0
+                val tT0 = System.currentTimeMillis()
+                val translator = LlmTranslator(BuildConfig.DEEPSEEK_API_KEY, TranslatorConfig())
+                val cht = translator.translate(regions.map { it.sourceText })
+                regions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
+                // 等效 engine TextFilter（internal 跨不過 module）：空白/純數字/譯==原 就丟（filterText 此處 null、略過 regex）
+                val kept = regions.filter { r ->
+                    val t = r.translatedText.trim()
+                    t.isNotEmpty() && !t.all { it.isDigit() } && !r.sourceText.trim().equals(t, ignoreCase = true)
+                }
+                val tTranslate = System.currentTimeMillis() - tT0
+                if (kept.isEmpty()) {
+                    log("✗ 全數過濾（無有效譯文）：${translator.lastError}｜回應=${translator.lastRaw}")
+                    return@launch
+                }
+                log("共用前段：偵測${"%.1f".format(tDetect / 1000.0)}s OCR${"%.1f".format(tOcr / 1000.0)}s 翻譯${"%.1f".format(tTranslate / 1000.0)}s｜${detection.lines.size}行 ${regions.size}區 留${kept.size}")
 
-                val results = ArrayList<Bitmap>(6)
-                results.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
-
-                // 對齊產品 3 階梯（泡泡三者都平塗，差別只在忙碌區）：平塗 / 整頁lama / 逐區lama
+                // 4 模式（lama逐格 加回、放最右）；泡泡三者都平塗，差別只在忙碌區
                 val modes = listOf(
                     Triple("BoxFill",   "boxfill", true),
                     Triple("Auto-整頁", "auto",    true),
                     Triple("Auto-逐格", "auto",    false),
+                    Triple("LaMa-逐格", "lama",    false),
                 )
+                val renderCfg = RenderConfig(orientation = orient)
                 val lamaPath = ensureLocal(lamaF)
+                val row1 = ArrayList<Bitmap>()   // 第一排：去字（框＋去字秒）
+                val row2 = ArrayList<Bitmap>()   // 第二排：貼字（整張秒）
+                val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms
+                row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
                     val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
                     val t0 = System.currentTimeMillis()
-                    val cleaned = inp.inpaint(page, regions, detection.textMask)
-                    val ms = System.currentTimeMillis() - t0
+                    val cleaned = inp.inpaint(page, kept, detection.textMask)
+                    val tInpaint = System.currentTimeMillis() - t0
                     inp.close()
-                    markRegions(cleaned, regions)
-                    labelBmp(cleaned, name, ms)
-                    results.add(cleaned)
-                    log("[$name] ${ms}ms")
+                    // 第一排：去字 + 路由框（auto 標引擎 std）+ 去字秒（先 copy 乾淨去字圖給第二排貼字）
+                    val r1 = cleaned.copy(Bitmap.Config.ARGB_8888, true)
+                    markRegions(r1, kept)
+                    labelBmp(r1, name, tInpaint)
+                    row1.add(r1)
+                    // 第二排：貼上譯文 + 整張秒（偵測+OCR+翻譯+去字+排版）
+                    val tR0 = System.currentTimeMillis()
+                    val rendered = Renderer.render(cleaned, kept, renderCfg, tf)
+                    val tRender = System.currentTimeMillis() - tR0
+                    labelBmp(rendered, name, tDetect + tOcr + tTranslate + tInpaint + tRender)
+                    row2.add(rendered)
+                    timings.add(Triple(name, tInpaint, tRender))
+                    log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaint + tRender) / 1000.0)}s")
                 }
+                // 左下（raw 正下方、本來空白處）＝逐階段時間總表
+                row2.add(0, buildTimingTable(page.width, page.height, tDetect, tOcr, tTranslate, timings))
 
-                val big = mergeHorizontal(results)
+                val big = mergeVertical(listOf(mergeHorizontal(row1), mergeHorizontal(row2)))
                 val hw = hwInfoLines()
                 hw.forEach { log(it) }
                 drawHwInfo(big, hw)
@@ -229,8 +278,8 @@ class MainActivity : AppCompatActivity() {
                         contentResolver.openOutputStream(uri)?.use { big.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     }
                 }
-                log("去背比較完成（${results.size} 欄）→ 已存圖")
-                addImage("去背比較（${results.size} 欄合圖）", big)
+                log("去背比較完成（${modes.size} 模式 × 去字/貼字 2 排 + 總表）→ 已存圖")
+                addImage("去背比較（${modes.size}模式 2排+總表）", big)
             } catch (t: Throwable) {
                 Log.e(TAG, "去背比較失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
@@ -340,6 +389,72 @@ class MainActivity : AppCompatActivity() {
             x += bmp.width
         }
         return out
+    }
+
+    /** 把多張 Bitmap 縱向堆疊（左邊對齊）。 */
+    private fun mergeVertical(list: List<Bitmap>): Bitmap {
+        val w = list.maxOf { it.width }
+        val h = list.sumOf { it.height }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.WHITE)
+        var y = 0
+        for (bmp in list) {
+            canvas.drawBitmap(bmp, 0f, y.toFloat(), null)
+            y += bmp.height
+        }
+        return out
+    }
+
+    /** 逐階段時間總表（縱＝偵測/OCR/翻譯/去字/排版/整張，橫＝各模式），畫成一張 w×h 格子表填左下空格。 */
+    private fun buildTimingTable(
+        w: Int, h: Int,
+        tDetect: Long, tOcr: Long, tTranslate: Long,
+        timings: List<Triple<String, Long, Long>>, // name, 去字ms, 排版ms
+    ): Bitmap {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.WHITE)
+        val stages = listOf("偵測", "OCR", "翻譯", "去字", "排版", "整張")
+        val cols = 1 + timings.size
+        val rowsN = 1 + stages.size
+        val colW = w.toFloat() / cols
+        val rowH = h.toFloat() / rowsN
+        val ts = (rowH * 0.3f).coerceIn(20f, 40f)
+        val txt = Paint().apply {
+            color = Color.BLACK; textSize = ts; isAntiAlias = true; typeface = Typeface.MONOSPACE
+        }
+        val txtB = Paint().apply {
+            color = Color.BLACK; textSize = ts; isAntiAlias = true
+            typeface = Typeface.MONOSPACE; isFakeBoldText = true
+        }
+        val grid = Paint().apply { color = Color.LTGRAY; strokeWidth = 2f }
+        for (c in 0..cols) canvas.drawLine(c * colW, 0f, c * colW, rowsN * rowH, grid)
+        for (r in 0..rowsN) canvas.drawLine(0f, r * rowH, cols * colW, r * rowH, grid)
+        fun put(col: Int, row: Int, s: String, bold: Boolean) {
+            val p = if (bold) txtB else txt
+            val x = col * colW + (colW - p.measureText(s)) / 2
+            val y = row * rowH + rowH / 2 + ts * 0.35f
+            canvas.drawText(s, x, y, p)
+        }
+        fun fmt(ms: Long) = "%.1f".format(ms / 1000.0)
+        put(0, 0, "階段/秒", true)
+        timings.forEachIndexed { i, t -> put(i + 1, 0, t.first, true) }
+        stages.forEachIndexed { si, stage ->
+            put(0, si + 1, stage, true)
+            timings.forEachIndexed { i, t ->
+                val v = when (si) {
+                    0 -> fmt(tDetect)
+                    1 -> fmt(tOcr)
+                    2 -> fmt(tTranslate)
+                    3 -> fmt(t.second)
+                    4 -> fmt(t.third)
+                    else -> fmt(tDetect + tOcr + tTranslate + t.second + t.third)
+                }
+                put(i + 1, si + 1, v, si == 5) // 整張那列粗體
+            }
+        }
+        return bmp
     }
 
     private suspend fun log(msg: String) {
