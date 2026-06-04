@@ -76,6 +76,7 @@ class Inpainter(
             val busy = ArrayList<TextRegion>()
             for (r in regions) {
                 val s = bgStats(px, tightPx, r, w, h)
+                r.dbgStd = s.std; r.dbgWhite = s.meanLum   // 除錯：留引擎實測值給 sandbox 去背比較標在框上（調門檻用）
                 if (s.std < cfg.autoStdThreshold && s.meanLum >= cfg.autoWhiteThreshold) {
                     flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h) // 白泡：平塗背景色
                 } else {

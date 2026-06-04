@@ -207,7 +207,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 val lamaPath = ensureLocal(lamaF)
                 for ((name, method, whole) in modes) {
-                    regions.forEach { it.onArt = false } // 重置，避免上一輪 stale 顏色
+                    regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
                     val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, regions, detection.textMask)
@@ -238,7 +238,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 在 bmp 上對每個 region 畫彩框：onArt=true→RED(lama 重建)，false→GREEN(boxfill/平塗)。 */
+    /**
+     * 在 bmp 上對每個 region 畫彩框：onArt=true→RED(lama 重建)，false→GREEN(boxfill/平塗)。
+     * auto 模式另把引擎實測背景 std/亮度標在框左上（dbgStd≥0 才有）＝調 autoStdThreshold 用，直接看引擎真值不靠桌面 parity。
+     */
     private fun markRegions(bmp: Bitmap, regions: List<li.joye.yakuyomi.engine.TextRegion>) {
         val canvas = Canvas(bmp)
         val paint = Paint().apply {
@@ -246,9 +249,20 @@ class MainActivity : AppCompatActivity() {
             strokeWidth = 5f
             isAntiAlias = true
         }
+        val txt = Paint().apply {
+            color = Color.WHITE; textSize = 26f; isAntiAlias = true; isFakeBoldText = true
+        }
+        val txtBg = Paint().apply { color = Color.argb(210, 0, 0, 0); style = Paint.Style.FILL }
         for (r in regions) {
             paint.color = if (r.onArt) Color.RED else Color.GREEN
             canvas.drawRect(r.x0, r.y0, r.x1, r.y1, paint)
+            if (r.dbgStd >= 0f) {
+                val label = "s%.1f w%.0f".format(r.dbgStd, r.dbgWhite)
+                val tw = txt.measureText(label)
+                val ty = r.y0 + 26f
+                canvas.drawRect(r.x0, r.y0, r.x0 + tw + 8f, r.y0 + 32f, txtBg)
+                canvas.drawText(label, r.x0 + 4f, ty, txt)
+            }
         }
     }
 
