@@ -40,8 +40,8 @@ data class OcrConfig(
     // 逐行並發 OCR：小圖塊（48px 高、窄）吃不滿 intra-op 4 緒 → 改「每行單緒、N 行並發」把核填滿。
     // concurrent=true → session intra-op 設 1（單行單緒）、靠 Semaphore(concurrency) 並發；false → 單行用滿 NUM_THREADS、序列（現狀）。
     // 純 CPU、ORT 共享 thread pool ⇒ 收益需實測（sandbox 去背比較 OCR 列 A/B）。與「批次 padding」不同：零 padding 浪費。
-    val concurrent: Boolean = false,
-    val concurrency: Int = 8,         // 同時在飛的行數上限（＝核數，全核並發；6→8 實驗）
+    val concurrent: Boolean = true,   // 預設開：真機 8.9s→4.8s(快46%)、零品質風險(每行邏輯不變)、8 核全填滿
+    val concurrency: Int = 8,         // 同時在飛的行數上限（＝核數，全核並發；conc=核數為甜蜜點，再高無核可用）
 )
 
 // 預設 few-shot（日→繁中）：示範 <|i|> 逐行格式。改語言對時連同 toLangName/fromLangName 一起換成對應譯文。
