@@ -3,6 +3,10 @@ package li.joye.yakuyomi.sandbox
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -18,8 +22,11 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import li.joye.yakuyomi.engine.Detector
 import li.joye.yakuyomi.engine.EngineConfig
+import li.joye.yakuyomi.engine.Grouping
 import li.joye.yakuyomi.engine.InpainterConfig
+import li.joye.yakuyomi.engine.Inpainter
 import li.joye.yakuyomi.engine.ModelSet
 import li.joye.yakuyomi.engine.OcrConfig
 import li.joye.yakuyomi.engine.PageResult
@@ -60,10 +67,11 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
         binding.pickFolderButton.setOnClickListener { folderPicker.launch(null) }
         binding.detectButton.setOnClickListener { runPipeline() }
+        binding.inpaintCompareButton.setOnClickListener { runInpaintCompare() }
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
-        binding.inpaintSpinner.setSelection(0) // 預設＝boxfill（position 0，真機 A/B 拍板）
+        binding.inpaintSpinner.setSelection(3) // 預設＝Auto-逐格（對齊 fork 預設、即正在測的回歸案例）
         binding.orientSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, ORIENT_MODES,
         ) // 預設 position 0＝自動（跟原文方向）
@@ -82,13 +90,13 @@ class MainActivity : AppCompatActivity() {
         }
         val saveLog = binding.genLogSwitch.isChecked
         runSaveImg = binding.genImgSwitch.isChecked
-        val pos = binding.inpaintSpinner.selectedItemPosition // 0=boxfill 1=lama整頁 2=lama逐格
-        val method = if (pos == 0) "boxfill" else "lama"
-        val whole = pos != 2
-        val modeLabel = when (pos) {
-            0 -> "boxfill"
-            1 -> "lama整頁"
-            else -> "lama逐格"
+        val pos = binding.inpaintSpinner.selectedItemPosition // 0=boxfill 1=auto整頁 2=lama整頁 3=auto逐格 4=lama逐格
+        val (method, whole, modeLabel) = when (pos) {
+            0 -> Triple("boxfill", true, "boxfill")
+            1 -> Triple("auto", true, "auto整頁")
+            2 -> Triple("lama", true, "lama整頁")
+            3 -> Triple("auto", false, "auto逐格")
+            else -> Triple("lama", false, "lama逐格")
         }
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
@@ -160,6 +168,130 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { binding.detectButton.isEnabled = true }
             }
         }
+    }
+
+    private fun runInpaintCompare() {
+        binding.inpaintCompareButton.isEnabled = false
+        lifecycleScope.launch(Dispatchers.Default) {
+            clearOutputs()
+            logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
+            try {
+                val tree = runTree
+                if (tree == null) {
+                    log("✗ 請先按「選擇模型資料夾」")
+                    return@launch
+                }
+                val detF = findOnnx(tree, "detect", "comictext")
+                val lamaF = findOnnx(tree, "lama")
+                if (detF == null || lamaF == null) {
+                    log("✗ 模型不齊（需含 detect/comictext 與 lama 的 .onnx）")
+                    return@launch
+                }
+                log("▶ 去背比較 5 種模式 — 01.jpg")
+                val page = loadAssetBitmap("test/01.jpg")
+                val detector = Detector(ensureLocal(detF))
+                val detection = detector.detect(page)
+                val regions = Grouping.group(detection.lines)
+                detector.close()
+                log("偵測：${detection.lines.size} 行 → ${regions.size} 區")
+
+                val results = ArrayList<Bitmap>(6)
+                results.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
+
+                val modes = listOf(
+                    Triple("BoxFill",   "boxfill", true),
+                    Triple("Auto-整頁", "auto",    true),
+                    Triple("LaMa-整頁", "lama",    true),
+                    Triple("Auto-逐格", "auto",    false),
+                    Triple("LaMa-逐格", "lama",    false),
+                )
+                val lamaPath = ensureLocal(lamaF)
+                for ((name, method, whole) in modes) {
+                    regions.forEach { it.onArt = false } // 重置，避免上一輪 stale 顏色
+                    val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
+                    val t0 = System.currentTimeMillis()
+                    val cleaned = inp.inpaint(page, regions, detection.textMask)
+                    val ms = System.currentTimeMillis() - t0
+                    inp.close()
+                    markRegions(cleaned, regions)
+                    labelBmp(cleaned, name, ms)
+                    results.add(cleaned)
+                    log("[$name] ${ms}ms")
+                }
+
+                val big = mergeHorizontal(results)
+                val cmpName = "${runStamp}_inpaintcmp.png"
+                runCatching {
+                    tree.findFile(cmpName)?.delete()
+                    tree.createFile("image/png", cmpName)?.uri?.let { uri ->
+                        contentResolver.openOutputStream(uri)?.use { big.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    }
+                }
+                log("去背比較完成（${results.size} 欄）→ 已存圖")
+                addImage("去背比較（${results.size} 欄合圖）", big)
+            } catch (t: Throwable) {
+                Log.e(TAG, "去背比較失敗", t)
+                log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                withContext(Dispatchers.Main) { binding.inpaintCompareButton.isEnabled = true }
+            }
+        }
+    }
+
+    /** 在 bmp 上對每個 region 畫彩框：onArt=true→RED(lama 重建)，false→GREEN(boxfill/平塗)。 */
+    private fun markRegions(bmp: Bitmap, regions: List<li.joye.yakuyomi.engine.TextRegion>) {
+        val canvas = Canvas(bmp)
+        val paint = Paint().apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
+            isAntiAlias = true
+        }
+        for (r in regions) {
+            paint.color = if (r.onArt) Color.RED else Color.GREEN
+            canvas.drawRect(r.x0, r.y0, r.x1, r.y1, paint)
+        }
+    }
+
+    /** 在 bmp 右上角疊印「name + (ms)」標籤（黑底白字圓角矩形），直接修改傳入的 bmp 並回傳。ms<0 不印時間。 */
+    private fun labelBmp(bmp: Bitmap, name: String, ms: Long): Bitmap {
+        val canvas = Canvas(bmp)
+        val text = if (ms >= 0) "$name ${ms}ms" else name
+        val textSize = (bmp.width / 26f).coerceAtLeast(14f)
+        val textPaint = Paint().apply {
+            color = Color.WHITE
+            this.textSize = textSize
+            isAntiAlias = true
+            typeface = Typeface.MONOSPACE
+        }
+        val textW = textPaint.measureText(text)
+        val pad = textSize * 0.4f
+        val boxW = textW + pad * 2
+        val boxH = textSize + pad * 2
+        val right = bmp.width.toFloat() - pad
+        val top = pad
+        val bgPaint = Paint().apply {
+            color = Color.BLACK
+            alpha = 200
+            isAntiAlias = true
+        }
+        canvas.drawRoundRect(RectF(right - boxW, top, right, top + boxH), 8f, 8f, bgPaint)
+        canvas.drawText(text, right - boxW + pad, top + pad + textSize * 0.85f, textPaint)
+        return bmp
+    }
+
+    /** 把多張 Bitmap 橫向拼接（頂部對齊）。 */
+    private fun mergeHorizontal(list: List<Bitmap>): Bitmap {
+        val h = list.maxOf { it.height }
+        val w = list.sumOf { it.width }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.WHITE)
+        var x = 0
+        for (bmp in list) {
+            canvas.drawBitmap(bmp, x.toFloat(), 0f, null)
+            x += bmp.width
+        }
+        return out
     }
 
     private suspend fun log(msg: String) {
@@ -251,17 +383,19 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val FIXED_VIEWS = 9 // 固定子 view：選資料夾鈕/翻譯鈕/方向標籤+選單/2 開關/去字標籤+選單/logText
+        private const val FIXED_VIEWS = 10 // 固定子 view：選資料夾鈕/翻譯鈕/去背比較鈕/方向標籤+選單/2 開關/去字標籤+選單/logText
         private const val PREF_TREE = "modelTree"
         // 排版方向選單（順序＝position：0 自動（跟原文方向）/ 1 直排 / 2 橫排）
         private val ORIENT_MODES = listOf("自動（跟原文方向）", "直排", "橫排")
-        // 去字方式選單（順序＝position：0 boxfill / 1 lama整頁 / 2 lama逐格）
+        // 去字方式選單（順序＝position：0 boxfill / 1 auto整頁 / 2 lama整頁 / 3 auto逐格 / 4 lama逐格，對齊 fork 設定）
         private val INPAINT_MODES = listOf(
-            "boxfill 就近取色（快·預設）",
-            "LaMa 整頁（~6s·整塊遮罩）",
-            "LaMa 逐格（慢·seg 細筆畫）",
+            "BoxFill（最速質劣）",
+            "Auto-整頁（快速質差）",
+            "LaMa-整頁（中速質中）",
+            "Auto-逐格（低速質佳）",
+            "LaMa-逐格（慢速質高）",
         )
-        private val DEMOS = listOf("test/page.png", "test/demo2.png", "test/demo3.png", "test/demo4.png")
+        private val DEMOS = listOf("test/failed.jpg", "test/page.png", "test/demo2.png", "test/demo3.png", "test/demo4.png")
         private const val ALPHABET = "models/alphabet-all-v5.txt"
         private const val FONT = "fonts/NotoSansMonoCJK.ttc"
     }

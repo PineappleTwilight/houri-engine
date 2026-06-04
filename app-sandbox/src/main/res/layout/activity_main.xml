@@ -25,6 +25,13 @@
             android:layout_marginTop="4dp"
             android:text="翻譯這一頁（診斷）" />
 
+        <Button
+            android:id="@+id/inpaintCompareButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="去背比較" />
+
         <TextView
             android:id="@+id/orientLabel"
             android:layout_width="wrap_content"

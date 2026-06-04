@@ -84,9 +84,11 @@ data class InpainterConfig(
     // 白邊留在外面 → boxfill 取到白邊抹成白塊、lama 把白邊當 context 延伸成白塊（兩者都像沒去字）。
     // 加厚到半徑~12 吞掉白邊後，lama 周圍 context 全變底圖 → 重建乾淨（桌面 inpaint_dev DIL=12 實證 ≈ MIT）。
     val maskDilate: Float = 24f,      // 半徑 12px：吞掉文字白邊（之前 7=半徑4 會殘白塊）
-    // auto 路由：背景(未膨脹 textMask 外的像素)亮度 std < autoStdThreshold 且均值 ≥ autoWhiteThreshold ＝對話框→平塗；否則 lama。
-    // ★ std 用未膨脹 textMask 量（膨脹遮罩會蓋掉筆畫間的白、量不到背景）。實測真白泡 std<3、壓在亮建築上 std~18-21(走lama)、臉 28+。
-    val autoStdThreshold: Float = 12f,   // 24→12：把「壓畫面的白底文字」正確判給 lama（桌面 auto_diag.py 驗證）
+    // auto 路由：背景亮度 std < autoStdThreshold 且均值 ≥ autoWhiteThreshold ＝對話框→平塗；否則 lama。
+    // ★ std 在「未膨脹 textMask 的行框四邊形多邊形內」量（斜框修正：軸對齊 bbox 會把傾斜泡泡的角落雜訊算進來→誤判）。
+    // 實測（quad 量測、桌面 auto_diag.py 01.jpg 驗）：真白泡 std 2-3、壓在亮建築/牆面上的字 std 9-21、臉/髮 24+。
+    // 真泡泡(2-3)與壓畫面(9+)中間有大空檔 → 門檻 8 落在裡面（偏上緣，讓真泡泡留最大餘裕只走快速平塗）。
+    val autoStdThreshold: Float = 8f,    // 12→8：把「壓在亮牆面/建築上、quad 量測 std 9-10」的字正確判給 lama 重建（桌面 auto_diag.py 01.jpg 驗證）
     val autoWhiteThreshold: Float = 190f, // 背景亮度均值門檻：對話框是白底
     val bboxPad: Int = 16,                // 去字 allow 用區域 bbox 矩形外擴 px：涵蓋貼 bbox 邊界的假名（行框太緊會漏）
     val intraThreads: Int = 4,        // LaMa session intra-op 執行緒（整頁/逐區都用滿 4 核）
