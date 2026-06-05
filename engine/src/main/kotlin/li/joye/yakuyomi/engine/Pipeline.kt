@@ -13,7 +13,7 @@ import kotlinx.coroutines.coroutineScope
  */
 sealed interface PageResult {
     /** 成功：可覆蓋原檔 + 寫「已翻譯」marker。 */
-    data class Translated(val page: Bitmap, val stats: PageStats) : PageResult
+    data class Translated(val page: Bitmap, val stats: PageStats, val analysis: PageAnalysis? = null) : PageResult
 
     /** 沒東西可翻（偵測不到字 / OCR 全空 / 譯文全被過濾）：保留原圖、標記略過、**不覆蓋**。 */
     data class Skipped(val reason: String, val stats: PageStats) : PageResult
@@ -21,6 +21,13 @@ sealed interface PageResult {
     /** 出錯（網路/429 重試後仍失敗/例外）：保留原圖、**不標記**、之後可重試。 */
     data class Failed(val reason: String) : PageResult
 }
+
+/**
+ * 重繪素材（給「最低成本切換去字方法」用）：seg 文字遮罩 + regions（含 quad/角度/onArt/源文/譯文）。
+ * 原圖由呼叫端持有（translatePage 的輸入）、去字方法由呼叫端決定，故不在此。
+ * 序列化/落地（含 mask 轉文字塞 json）由呼叫端（reader）負責。
+ */
+data class PageAnalysis(val mask: Bitmap, val regions: List<TextRegion>)
 
 /** 逐階段計時與計數（除錯/效能用）。 */
 data class PageStats(
@@ -152,6 +159,7 @@ class Pipeline(
         PageResult.Translated(
             finalPage,
             PageStats(lines.size, regions.size, kept.size, detectMs, ocrMs, translateMs, inpaintMs, renderMs, System.currentTimeMillis() - tWall),
+            PageAnalysis(detection.textMask, textRegions),
         )
     }
 
