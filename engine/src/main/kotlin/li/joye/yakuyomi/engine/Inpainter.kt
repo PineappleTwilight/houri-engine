@@ -113,6 +113,15 @@ class Inpainter(
     }
 
     /** 整塊遮罩（舊法）：文字行框 FILL_AND_STROKE。lama 整頁專用——縮 512 後細筆畫殘留，整塊在乾淨泡泡上擦得更乾淨。 */
+    /** 給視覺化用：回傳去字遮罩 Bitmap（masked=白、其餘黑；與 inpaint 用的同一份 seg 細遮罩 + 膨脹）。 */
+    fun buildMask(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Bitmap {
+        val w = page.width
+        val h = page.height
+        val useSeg = !(cfg.method == "lama" && cfg.wholeImage)
+        val maskPx = if (useSeg) buildSegMask(regions, textMask, w, h) else buildQuadMask(regions, w, h)
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(maskPx, 0, w, 0, 0, w, h) }
+    }
+
     private fun buildQuadMask(regions: List<TextRegion>, w: Int, h: Int): IntArray {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         Canvas(bmp).apply {

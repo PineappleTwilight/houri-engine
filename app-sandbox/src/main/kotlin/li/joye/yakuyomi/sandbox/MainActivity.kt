@@ -236,7 +236,7 @@ class MainActivity : AppCompatActivity() {
                     log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）"); return@launch
                 }
                 val orient = TextOrientation.AUTO // 鎖定
-                log("▶ 效能比較 3 去字模式 ×（去字/貼字）+ 總表 — $imgPath（需連網翻譯）")
+                log("▶ 去背比較 4×2 盤（原圖/偵測/去字遮罩/最佳成果 + 三模式去字+框 + 右下表格資訊）— $imgPath（需連網翻譯）")
                 val page = loadAssetBitmap(imgPath)
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
@@ -269,7 +269,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 log("共用前段：偵測${"%.1f".format(tDetect / 1000.0)}s OCR${"%.1f".format(tOcr / 1000.0)}s 翻譯${"%.1f".format(tTranslate / 1000.0)}s｜${detection.lines.size}行 ${regions.size}區 留${kept.size}")
 
-                // 3 模式（LaMa-逐格 移除：實測品質≈Auto-逐格、卻多半分鐘）；泡泡三者都平塗，差別只在忙碌區
+                // 3 去字模式（LaMa-逐格 移除：實測品質≈Auto-逐格、卻多半分鐘）；泡泡三者都平塗，差別只在忙碌區
                 val modes = listOf(
                     Triple("BoxFill",   "boxfill", true),
                     Triple("Auto-整頁", "auto",    true),
@@ -277,10 +277,15 @@ class MainActivity : AppCompatActivity() {
                 )
                 val renderCfg = RenderConfig(orientation = orient)
                 val lamaPath = ensureLocal(lamaF)
-                val row1 = ArrayList<Bitmap>()   // 第一排：去字（框＋去字秒）
-                val row2 = ArrayList<Bitmap>()   // 第二排：貼字（整張秒）
-                val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms
-                row1.add(labelBmp(page.copy(Bitmap.Config.ARGB_8888, true), "raw", -1L))
+                val pw = page.width; val ph = page.height
+                fun pageCopy() = page.copy(Bitmap.Config.ARGB_8888, true)
+
+                // 跑 3 去字 → ① 乾淨去字圖（最佳那張要拿來貼字）② 去字+路由框圖（第 2 排用）+ 各秒。
+                // 框＝markRegions 讀 region.onArt/dbgStd，而 onArt/dbgStd 在「本輪 inpaint 期間」被設定、又於下一輪開頭被重置
+                // → 必須在每輪 inpaint 之後、進下一輪之前，就地把「乾淨副本 + markRegions」做掉，否則只剩最後一輪的路由結果。
+                val cleanByMode = ArrayList<Bitmap>()                  // 各模式乾淨去字圖（順序＝modes；最佳那張貼字用，不可帶框）
+                val markedByMode = ArrayList<Bitmap>()                 // 各模式去字+路由框圖（第 2 排用）
+                val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms（排版只算最佳那個、其餘 0）
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
                     val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
@@ -288,29 +293,50 @@ class MainActivity : AppCompatActivity() {
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
                     inp.close()
-                    // 第一排：去字 + 路由框（auto 標引擎 std）+ 去字秒（先 copy 乾淨去字圖給第二排貼字）
-                    val r1 = cleaned.copy(Bitmap.Config.ARGB_8888, true)
-                    markRegions(r1, kept)
-                    labelBmp(r1, name, tInpaint)
-                    row1.add(r1)
-                    // 第二排：貼上譯文 + 整張秒（偵測+OCR+翻譯+去字+排版）
-                    val tR0 = System.currentTimeMillis()
-                    val rendered = Renderer.render(cleaned, kept, renderCfg, tf)
-                    val tRender = System.currentTimeMillis() - tR0
-                    // 下排標「整張」總時間（不標去字方式，免誤以為是去字耗時；方式看上排）
-                    labelBmp(rendered, "整張", tDetect + tOcr + tTranslate + tInpaint + tRender)
-                    row2.add(rendered)
-                    timings.add(Triple(name, tInpaint, tRender))
-                    log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaint + tRender) / 1000.0)}s")
+                    cleanByMode.add(cleaned) // 乾淨（不畫框）：最佳那張貼字用
+                    // 本輪路由（onArt/dbgStd）尚未被重置 → 立即在乾淨副本上畫框（綠=boxfill平塗／紅=onArt-lama + s/w 標）。
+                    val en = when (name) { "BoxFill" -> "Flat-fill"; "Auto-整頁" -> "Auto-whole"; else -> "Auto-tile" }
+                    val marked = cleaned.copy(Bitmap.Config.ARGB_8888, true)
+                        .also { markRegions(it, kept); labelBmp(it, name, en, tInpaint) }
+                    markedByMode.add(marked)
+                    timings.add(Triple(name, tInpaint, 0L)) // 排版時間下面只對最佳那個量、回填
+                    log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s")
                 }
 
-                // 左下（raw 正下方、本來空白處）＝逐階段時間總表
-                row2.add(0, buildTimingTable(page.width, page.height, tDetect, tOcr, tTranslate, timings))
+                // 「最佳成果」＝對 Auto-逐格 乾淨圖貼譯文（只渲染最佳；另兩個只比去字、不渲染）。
+                val bestClean = cleanByMode.last()
+                val tR0 = System.currentTimeMillis()
+                val bestRendered = Renderer.render(bestClean, kept, renderCfg, tf)
+                val tRender = System.currentTimeMillis() - tR0
+                timings[timings.lastIndex] = timings.last().copy(third = tRender) // 回填逐格排版時間到總表
+                val tInpaintBest = timings.last().second
+                log("[最佳·Auto-逐格] 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaintBest + tRender) / 1000.0)}s")
 
-                val big = mergeVertical(listOf(mergeHorizontal(row1), mergeHorizontal(row2)))
+                // 去字遮罩（Auto-逐格 config）：白＝要擦像素 → 第 1 排 c4 半透明紅疊在原圖上
+                val maskInp = Inpainter(lamaPath, InpainterConfig(method = "auto", wholeImage = false))
+                val removalMask = maskInp.buildMask(page, kept, detection.textMask)
+                maskInp.close()
+
+                // —— 4×2 格盤（每張影像格皆 page 尺寸＝同比例；兩排各 4×page 寬 → 同寬對齊）——
+                // 第 1 排：原圖（乾淨，無路由疊框）・偵測行框・去字遮罩・最佳成果（Auto-逐格 貼字）
+                val r1c1 = pageCopy().also { labelBmp(it, "原圖", "Raw", -1L) }
+                val r1c2 = pageCopy().also { drawLines(it, detection.lines); labelBmp(it, "偵測行框", "Detected lines", -1L) }
+                val r1c3 = overlayMask(page, removalMask, Color.RED).also { labelBmp(it, "去字遮罩", "Removal mask", -1L) }
+                val r1c4 = bestRendered.also { labelBmp(it, "最佳成果·逐格", "Result·tile", -1L) } // 不標秒（時間在右下表）
+                val row1 = mergeHorizontal(listOf(r1c1, r1c2, r1c3, r1c4))
+
+                // 第 2 排：3 去字成果（各帶本模式路由框＋去字秒）＋右下格（時間總表 + 硬體/設定資訊上下堆疊）
                 val hw = hwInfoLines()
                 hw.forEach { log(it) }
-                drawHwInfo(big, hw)
+                val infoCell = mergeVertical(
+                    listOf(
+                        buildTimingTable(pw, (ph * 0.55).toInt(), tDetect, tOcr, tTranslate, timings),
+                        buildHwBitmap(hw, pw, (ph * 0.45).toInt()),
+                    ),
+                ) // 上表下資訊、合計 ≈ page 高 → 與左側 3 去字格對齊
+                val row2 = mergeHorizontal(listOf(markedByMode[0], markedByMode[1], markedByMode[2], infoCell))
+
+                val big = mergeVertical(listOf(row1, row2))
                 val cmpName = "${runStamp}_inpaintcmp.png"
                 runCatching {
                     tree.findFile(cmpName)?.delete()
@@ -318,8 +344,8 @@ class MainActivity : AppCompatActivity() {
                         contentResolver.openOutputStream(uri)?.use { big.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     }
                 }
-                log("去背比較完成（${modes.size} 模式 × 去字/貼字 2 排 + 總表）→ 已存圖")
-                addImage("去背比較（${modes.size}模式 2排+總表）", big)
+                log("去背比較完成（原圖/偵測/去字遮罩/最佳成果 + 三模式去字+框 + 右下表格資訊）→ 已存圖")
+                addImage("去背比較（原圖/偵測/去字遮罩/最佳成果 + 三模式去字+框 + 右下表格資訊）", big)
             } catch (t: Throwable) {
                 Log.e(TAG, "去背比較失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
@@ -366,35 +392,115 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 在 bmp 右上角疊印「name + (秒)」標籤（黑底白字圓角矩形），直接修改傳入的 bmp 並回傳。ms<0 不印時間。 */
-    private fun labelBmp(bmp: Bitmap, name: String, ms: Long): Bitmap {
+    /**
+     * 在 bmp 上把每條偵測行框（TextLine.quad＝旋轉四邊形 4 點）描成細青線，直接改傳入的 bmp。
+     * 對照 markRegions 的「合併後氣泡框」：這裡是合併前的逐行框，看偵測/分群前的原始粒度。
+     */
+    private fun drawLines(bmp: Bitmap, lines: List<li.joye.yakuyomi.engine.TextLine>) {
         val canvas = Canvas(bmp)
-        val text = if (ms >= 0) "$name %.1fs".format(ms / 1000.0) else name
-        val textSize = (bmp.width / 26f).coerceAtLeast(14f)
-        val textPaint = Paint().apply {
-            color = Color.WHITE
-            this.textSize = textSize
-            isAntiAlias = true
-            typeface = Typeface.MONOSPACE
+        val paint = Paint().apply {
+            style = Paint.Style.STROKE; strokeWidth = 3f; isAntiAlias = true; color = Color.CYAN
         }
-        val textW = textPaint.measureText(text)
-        val pad = textSize * 0.4f
-        val boxW = textW + pad * 2
-        val boxH = textSize + pad * 2
-        val right = bmp.width.toFloat() - pad
-        val top = pad
-        val bgPaint = Paint().apply {
-            color = Color.BLACK
-            alpha = 200
-            isAntiAlias = true
+        for (line in lines) {
+            val q = line.quad
+            if (q.size < 4) continue
+            val path = android.graphics.Path().apply {
+                moveTo(q[0].x, q[0].y)
+                for (i in 1..3) lineTo(q[i].x, q[i].y)
+                close()
+            }
+            canvas.drawPath(path, paint)
         }
-        canvas.drawRoundRect(RectF(right - boxW, top, right, top + boxH), 8f, 8f, bgPaint)
-        canvas.drawText(text, right - boxW + pad, top + pad + textSize * 0.85f, textPaint)
+    }
+
+    /**
+     * 回傳 raw 的副本，並在 mask 為白（>127）的每個像素以 color 半透明（~50%）疊色。視覺化去字遮罩覆蓋範圍。
+     * mask 與 raw 同尺寸（去字遮罩本就以原圖尺寸生成）。
+     */
+    private fun overlayMask(raw: Bitmap, mask: Bitmap, color: Int): Bitmap {
+        val w = raw.width
+        val h = raw.height
+        val out = raw.copy(Bitmap.Config.ARGB_8888, true)
+        val src = IntArray(w * h); out.getPixels(src, 0, w, 0, 0, w, h)
+        val mpx = IntArray(w * h); mask.getPixels(mpx, 0, w, 0, 0, w, h)
+        val cr = (color shr 16) and 0xFF
+        val cg = (color shr 8) and 0xFF
+        val cb = color and 0xFF
+        for (i in src.indices) {
+            if ((mpx[i] and 0xFF) > 127) { // 遮罩像素＝白 → 與原像素 50/50 混色
+                val p = src[i]
+                val r = (((p shr 16) and 0xFF) + cr) / 2
+                val g = (((p shr 8) and 0xFF) + cg) / 2
+                val b = ((p and 0xFF) + cb) / 2
+                src[i] = Color.rgb(r, g, b)
+            }
+        }
+        out.setPixels(src, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    /** 把硬體/設定橫幅獨立畫成 w×h 的白底格（取代疊在圖上的 drawHwInfo）：mono 黑字、整塊垂直置中、字級自適應塞滿。 */
+    private fun buildHwBitmap(lines: List<String>, w: Int, h: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.WHITE)
+        val txt = Paint().apply {
+            color = Color.BLACK; isAntiAlias = true; typeface = Typeface.MONOSPACE; isFakeBoldText = true
+        }
+        // 字級：以 100px 試量「最寬行」實際寬度（含中日全形字，比 length 準）→ 寬塞 84% / 高塞 92%(每行1.5倍距) 取小者，夾合理範圍。
+        val probe = 100f
+        txt.textSize = probe
+        val widest = lines.maxOf { txt.measureText(it) }.coerceAtLeast(1f)
+        val byW = probe * (w * 0.84f) / widest
+        val byH = h * 0.92f / (lines.size * 1.5f)
+        val ts = minOf(byW, byH).coerceIn(16f, 48f)
+        txt.textSize = ts
+        val lineH = ts * 1.5f
+        val blockH = lineH * lines.size
+        val pad = w * 0.06f
+        var y = (h - blockH) / 2f + ts * 0.85f // 整塊垂直置中
+        for (line in lines) {
+            canvas.drawText(line, pad, y, txt)
+            y += lineH
+        }
         return bmp
     }
 
-    /** 硬體資訊兩行（裝置/SoC、核數/RAM/去字執行緒）＝去背時間數據的對照背景。 */
-    /** 效能比較圖左上角橫幅：版本 + 軟硬資訊 + 生效的效能參數（讓時間數據有對照背景）。 */
+    /** 單行標籤（en 留空）：舊呼叫端沿用，委派雙行版。 */
+    private fun labelBmp(bmp: Bitmap, name: String, ms: Long): Bitmap = labelBmp(bmp, name, "", ms)
+
+    /**
+     * 在 bmp 右上角疊印雙行標籤（黑底圓角矩形）：上＝中文 zh（ms≥0 接「 %.1fs」），下＝英文 en（小灰字）。
+     * en 為空＝只畫一行。直接修改傳入的 bmp 並回傳。
+     */
+    private fun labelBmp(bmp: Bitmap, zh: String, en: String, ms: Long): Bitmap {
+        val canvas = Canvas(bmp)
+        val zhText = if (ms >= 0) "$zh %.1fs".format(ms / 1000.0) else zh
+        val textSize = (bmp.width / 26f).coerceAtLeast(14f)
+        val enSize = textSize * 0.72f
+        val zhPaint = Paint().apply {
+            color = Color.WHITE; this.textSize = textSize; isAntiAlias = true; typeface = Typeface.MONOSPACE
+        }
+        val enPaint = Paint().apply {
+            color = Color.LTGRAY; this.textSize = enSize; isAntiAlias = true; typeface = Typeface.MONOSPACE
+        }
+        val hasEn = en.isNotEmpty()
+        val pad = textSize * 0.4f
+        val lineGap = if (hasEn) textSize * 0.2f else 0f
+        val textW = maxOf(zhPaint.measureText(zhText), if (hasEn) enPaint.measureText(en) else 0f)
+        val boxW = textW + pad * 2
+        val boxH = pad * 2 + textSize + (if (hasEn) lineGap + enSize else 0f)
+        val right = bmp.width.toFloat() - pad
+        val top = pad
+        val bgPaint = Paint().apply { color = Color.BLACK; alpha = 200; isAntiAlias = true }
+        canvas.drawRoundRect(RectF(right - boxW, top, right, top + boxH), 8f, 8f, bgPaint)
+        val left = right - boxW + pad
+        canvas.drawText(zhText, left, top + pad + textSize * 0.85f, zhPaint)
+        if (hasEn) canvas.drawText(en, left, top + pad + textSize + lineGap + enSize * 0.85f, enPaint)
+        return bmp
+    }
+
+    /** 硬體/設定資訊 5 行（版本・裝置/SoC/核數/RAM・Android/ABI・效能參數・LLM）＝去背時間數據的對照背景；由 buildHwBitmap 畫成第 3 排右格。 */
     private fun hwInfoLines(): List<String> {
         val cores = Runtime.getRuntime().availableProcessors()
         val mi = android.app.ActivityManager.MemoryInfo()
@@ -414,23 +520,6 @@ class MainActivity : AppCompatActivity() {
             "效能：OCR並發 x%d · 推論 intra-op %d緒 · XNNPACK CPU".format(OcrConfig().concurrency, InpainterConfig().intraThreads),
             "LLM：${tc.provider} · ${tc.model}",
         )
-    }
-
-    /** 在合圖左上角疊印硬體資訊（黑底白字）。 */
-    private fun drawHwInfo(bmp: Bitmap, lines: List<String>) {
-        val canvas = Canvas(bmp)
-        val ts = (bmp.height / 70f).coerceIn(18f, 40f)
-        val txt = Paint().apply {
-            color = Color.WHITE; textSize = ts; isAntiAlias = true
-            typeface = Typeface.MONOSPACE; isFakeBoldText = true
-        }
-        val bg = Paint().apply { color = Color.BLACK; alpha = 200 }
-        val pad = ts * 0.4f
-        val maxW = lines.maxOf { txt.measureText(it) }
-        canvas.drawRect(0f, 0f, maxW + pad * 2, (ts + pad) * lines.size + pad, bg)
-        lines.forEachIndexed { i, line ->
-            canvas.drawText(line, pad, pad + ts * 0.85f + i * (ts + pad), txt)
-        }
     }
 
     /** 把多張 Bitmap 橫向拼接（頂部對齊）。 */
@@ -626,12 +715,11 @@ class MainActivity : AppCompatActivity() {
         )
         // 測試圖（縮圖選單順序＝編號 1..N）
         private val TEST_IMAGES = listOf(
-            "test/page.png",   // 1
-            "test/01.jpg",     // 2
-            "test/demo2.png",  // 3
-            "test/demo3.png",  // 4
-            "test/demo4.png",  // 5
-            "test/failed.jpg", // 6
+            "test/demo01.jpg", // 1
+            "test/demo02.jpg", // 2
+            "test/demo03.png", // 3
+            "test/demo04.png", // 4
+            "test/demo05.png", // 5
         )
         private const val ALPHABET = "models/alphabet-all-v5.txt"
         private const val FONT = "fonts/NotoSansMonoCJK.ttc"
