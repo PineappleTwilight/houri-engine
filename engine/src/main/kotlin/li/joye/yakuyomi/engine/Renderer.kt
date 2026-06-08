@@ -17,10 +17,10 @@ enum class TextOrientation { VERTICAL, HORIZONTAL, AUTO }
  * M3 排版（純文字框法，可靠）：定位 + 大小都用文字框，框適度放大（[RenderConfig.expandW]/[RenderConfig.expandH]）給呼吸空間。
  * 對齊 parity/typeset_parity.py（§4 第二層：同輸入近輸出）。
  *   不靠氣泡 flood-fill——相鄰氣泡會連通成一塊、整個算錯，已棄用。
- *   直排：CJK 上→下、欄右→左、向上對齊、每欄少 [RenderConfig.colTrim] 字（縮短欄長、減少凸出）、標點旋轉。
+ *   直排：CJK 上→下、欄右→左、向上對齊、每欄少 [RenderConfig.colTrim] 字（縮短欄長、減少凸出）、標點旋轉、短 ASCII 串縱中橫（tate-chu-yoko，見 [RenderConfig.tateChuYoko]）。
  *   橫排：左→右、上→下、向上對齊。
  *   文字色：[RenderConfig.colorMode]=auto 取去字後背景亮度判黑/白字（白底黑字、黑底白字）；OCR color head 色相太雜不採用。
- * ★ 後續：tate-chu-yoko、字型可選。
+ * ★ 後續：字型可選。
  */
 object Renderer {
 
@@ -102,10 +102,11 @@ object Renderer {
         o in 0x3040..0x30FF || o in 0x4E00..0x9FFF || o in 0x3400..0x4DBF || o in 0xFF00..0xFFEF
     }
 
-    /** 直排：欄右→左、字上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 字。 */
+    /** 直排：欄右→左、格上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 格。每格＝1 字或 1 個縱中橫短串。 */
     private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
+        val cells = toVerticalCells(chars, cfg.tateChuYoko)  // 切格：一般字一格、短 ASCII 串併成一個縱中橫格
         val bw = (x1 - x0) * cfg.expandW         // 寬：放大後的文字框寬
         val colRoom = (y1 - y0) * cfg.expandH    // 直欄可用高（從文字框頂往下）
         var size = cfg.fontSizeMin
@@ -113,7 +114,7 @@ object Renderer {
         while (s >= cfg.fontSizeMin) {
             val lh = s * 1.05f; val cw = s * 1.1f
             val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
-            if (ceil(chars.length / cpc.toFloat()).toInt() * cw <= bw) { size = s; break }
+            if (ceil(cells.size / cpc.toFloat()).toInt() * cw <= bw) { size = s; break }
             s--
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
@@ -121,35 +122,83 @@ object Renderer {
         stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
         val lh = size * 1.05f; val cw = size * 1.1f
         val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
-        val columns = splitColumnsV(chars, cpc)       // 禁則：欄不以行頭禁則字開頭
+        val columns = splitColumnsV(cells, cpc)       // 禁則：欄不以行頭禁則字開頭
         val cols = columns.size
         val tcx = (x0 + x1) / 2f                  // 定位：水平置中於文字框中心
         val rightCx = tcx + cols * cw / 2f - cw / 2f
-        val blockH = columns.maxOf { it.length } * lh // 垂直置中：以最長欄高為塊高，置中於框
+        val blockH = columns.maxOf { it.size } * lh // 垂直置中：以最長欄格數為塊高，置中於框
         val startCy = (y0 + y1) / 2f - blockH / 2f
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
             var cy = startCy
-            for (ch in columns[col]) {
-                drawCharVertical(canvas, ch, cx, cy + lh / 2f, fill, stroke, cfg.fontBorder)
+            for (cell in columns[col]) {
+                if (cell.length == 1) {
+                    drawCharVertical(canvas, cell[0], cx, cy + lh / 2f, fill, stroke, cfg.fontBorder)
+                } else {
+                    drawTateChuYoko(canvas, cell, cx, cy + lh / 2f, cw, fill, stroke, cfg.fontBorder)
+                }
                 cy += lh
             }
         }
     }
 
-    /** 直排切欄＋行頭禁則：禁則字不置於欄頭、併回前一欄（最多 +2，避免暴衝）。 */
-    private fun splitColumnsV(chars: String, cpc: Int): List<String> {
-        val cols = ArrayList<String>()
+    /**
+     * 直排切格：一般字一格；連續短 ASCII 串（2–[MAX_TCY] 字的數字/字母/!?）併成一個縱中橫格（tate-chu-yoko）。
+     * 單字 ASCII（如獨立「5」）維持單格；過長串（> MAX_TCY，如英文長詞）退回逐字（避免水平壓太扁）。
+     */
+    private fun toVerticalCells(chars: String, enabled: Boolean): List<String> {
+        if (!enabled) return chars.map { it.toString() }
+        val cells = ArrayList<String>()
         var i = 0
         val n = chars.length
         while (i < n) {
+            if (isTcyChar(chars[i])) {
+                var j = i + 1
+                while (j < n && isTcyChar(chars[j])) j++
+                if (j - i in 2..MAX_TCY) {
+                    cells.add(chars.substring(i, j))                       // 一個縱中橫格
+                } else {
+                    for (k in i until j) cells.add(chars[k].toString())   // 單字或過長：逐字（維持原行為）
+                }
+                i = j
+            } else {
+                cells.add(chars[i].toString()); i++
+            }
+        }
+        return cells
+    }
+
+    private fun isTcyChar(c: Char): Boolean =
+        c in '0'..'9' || c in 'A'..'Z' || c in 'a'..'z' || c == '!' || c == '?'
+
+    /** 直排切欄＋行頭禁則：禁則字（單字標點）不置於欄頭、併回前一欄（最多 +2，避免暴衝）。 */
+    private fun splitColumnsV(cells: List<String>, cpc: Int): List<List<String>> {
+        val cols = ArrayList<List<String>>()
+        var i = 0
+        val n = cells.size
+        while (i < n) {
             var end = minOf(i + cpc, n)
             var ext = 0
-            while (end < n && chars[end] in NO_START && ext < 2) { end++; ext++ }
-            cols.add(chars.substring(i, end))
+            while (end < n && cells[end].length == 1 && cells[end][0] in NO_START && ext < 2) { end++; ext++ }
+            cols.add(cells.subList(i, end).toList())
             i = end
         }
         return cols
+    }
+
+    /** 縱中橫：把短 ASCII 串在一個直排格內水平並排、置中於欄心；超出格寬只橫向壓縮（高度不變、與鄰字視覺一致）。 */
+    private fun drawTateChuYoko(canvas: Canvas, group: String, cx: Float, cyc: Float, cellW: Float, fill: Paint, stroke: Paint, border: Boolean) {
+        val w = fill.measureText(group)
+        val fm = fill.fontMetrics
+        val baseline = cyc - (fm.ascent + fm.descent) / 2f
+        val target = cellW * 0.92f
+        val scaleX = if (w > target) target / w else 1f
+        canvas.save()
+        if (scaleX != 1f) canvas.scale(scaleX, 1f, cx, baseline)  // 只橫向縮、繞欄心
+        val tx = cx - w / 2f
+        if (border) canvas.drawText(group, tx, baseline, stroke)
+        canvas.drawText(group, tx, baseline, fill)
+        canvas.restore()
     }
 
     /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。 */
@@ -209,6 +258,7 @@ object Renderer {
 
     private const val ASCENT = 0.82f
     private const val STROKE_RATIO = 0.10f  // 描邊寬＝字級×此比例（隨字級縮放）
+    private const val MAX_TCY = 4  // 縱中橫一格最多併幾個 ASCII（涵蓋 2 位數年齡、4 位數年份；更長退回逐字避免壓太扁）
     private const val ROTATE_CHARS = "ー－—―‐~〜～…‥（）()「」『』【】〔〕［］｛｝〈〉《》＜＞<>｜|：;"
     // 行頭禁則：不可置於欄/行開頭（收尾標點、小假名）→ 併回前一欄/行（kinsoku）
     private const val NO_START = "、。，．：；！？”’）〕】｝」』》〉…‥ーゝゞヽヾ々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ"

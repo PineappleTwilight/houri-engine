@@ -119,4 +119,7 @@ data class RenderConfig(
     // 文字顏色：auto＝取去字後背景亮度判黑/白字（最穩、白底黑字/黑底白字）；mono＝一律黑字白邊
     val colorMode: String = "auto",
     val bgDark: Int = 110,       // auto：去字後背景平均亮度 < 此值＝暗底 → 白字
+    // 縱中橫（tate-chu-yoko）：直排時把連續短 ASCII 串（2–4 字的數字/字母/!?）併成一格水平並排（年齡「20」、年份「2020」、「!?」不再上下堆疊歪頭讀）。
+    // §4 第三層知情偏離：m-i-t/parity 逐字畫、無此邏輯；只影響直排內 ASCII 短串，CJK 不變。預設開、可關回逐字。
+    val tateChuYoko: Boolean = true,
 )
