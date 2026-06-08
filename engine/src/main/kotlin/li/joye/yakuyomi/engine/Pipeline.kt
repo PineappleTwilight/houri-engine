@@ -135,10 +135,19 @@ class Pipeline(
             val dbg = textRegions.take(2).joinToString(" ‖ ") { "${it.sourceText.take(8)}→${it.translatedText.take(8)}" }
             Log.w(TAG, "全數過濾 對齊$aligned/${textRegions.size} err=${tr?.lastError} 回應=${tr?.lastRaw}")
             inpaintJob.cancelAndJoin()
-            return@coroutineScope PageResult.Skipped(
-                "全數過濾 對齊$aligned/${textRegions.size} err=${tr?.lastError}｜回應=${tr?.lastRaw}｜$dbg",
-                PageStats(lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0),
-            )
+            // §11 盲點修正：分辨「網路/格式軟失敗」vs「真的全不可譯」。
+            // LlmTranslator 對網路/HTTP 例外是「catch + 回傳原文」（不丟例外）→ 全頁 translated==source → 落到這裡全數過濾。
+            // 若一律回 Skipped(標記略過、算已處理)，網路失敗的頁會被當「已翻」、整章不變紅（正是此盲點）。改用 lastError 分流：
+            //  - lastError != null（例外〔網路/HTTP〕或部分解析）→ Failed：不標記、之後重試、整章變紅（呼叫端 drain 標 ERROR）。
+            //  - lastError == null（LLM 正常全解析、但內容全被過濾，如整頁狀聲詞被原樣回 translated==source）→ Skipped：略過、不無限重試。
+            return@coroutineScope if (tr?.lastError != null) {
+                PageResult.Failed("全數過濾(LLM 失敗 ${tr.lastError})｜回應=${tr.lastRaw?.take(80)}")
+            } else {
+                PageResult.Skipped(
+                    "全數過濾 對齊$aligned/${textRegions.size}｜回應=${tr?.lastRaw}｜$dbg",
+                    PageStats(lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0),
+                )
+            }
         }
         // 失敗的區（不在 kept）→ 譯文改回原文＝去字後重貼 OCR 日文（TextRegion 無 equals override→HashSet 走 identity）。
         val keptSet = kept.toHashSet()
