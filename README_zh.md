@@ -101,4 +101,13 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 ## 授權
 
-未定。這裡的程式碼是用 Kotlin/ORT 從頭寫的，但專案沿用了 manga-image-translator 的 prompt 與預設、fork 自 mihon（Apache-2.0）、用了數個第三方模型權重與字型。公開前會做授權稽核。在那之前，請當作沒有散布授權。
+**GPL-3.0** — 見 [LICENSE](LICENSE)。這裡的程式碼是用 Kotlin/ORT 從頭寫的，但移植了 manga-image-translator 的 prompt、參數與分組；作為該 GPL-3.0 專案的衍生，本引擎為 GPL-3.0。
+
+各組件授權：
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0（prompt/協定、偵測/OCR/翻譯行為、文字行分組；48px CTC OCR 模型）
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — GPL-3.0（文字偵測模型）
+- [Koharu](https://github.com/mayocream/koharu) — GPL-3.0（`lama-manga.onnx` 去字模型）
+- [LaMa](https://github.com/advimman/lama) — Apache-2.0（去字底層架構）
+- [mihon](https://github.com/mihonapp/mihon) — Apache-2.0（reader fork 在另一個產品 repo；Apache-2.0 與 GPL-3.0 相容，故組合後的 app 為 GPL-3.0）
+
+模型權重**不由本專案散布**——自備（見設定說明），從上述來源依各自授權取得。字型未 bundle（系統 CJK fallback）。

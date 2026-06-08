@@ -101,4 +101,13 @@ The engine is a from-scratch Kotlin + ONNX Runtime implementation. It contains n
 
 ## License
 
-To be decided. The code here is written from scratch in Kotlin/ORT, but the project reuses manga-image-translator's prompts and defaults, forks mihon (Apache-2.0), and uses third-party model weights and fonts. A licensing audit will be done before any public release. Until then, assume no distribution license.
+**GPL-3.0** — see [LICENSE](LICENSE). The code here is written from scratch in Kotlin/ORT, but it ports manga-image-translator's prompts, parameters, and grouping; as a derivative of that GPL-3.0 project, this engine is GPL-3.0.
+
+Component licenses:
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0 (prompt/protocol, detection/OCR/translation behaviour, line grouping; 48px CTC OCR model)
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — GPL-3.0 (text-detection model)
+- [Koharu](https://github.com/mayocream/koharu) — GPL-3.0 (`lama-manga.onnx` inpainting model)
+- [LaMa](https://github.com/advimman/lama) — Apache-2.0 (base inpainting architecture)
+- [mihon](https://github.com/mihonapp/mihon) — Apache-2.0 (reader fork lives in the separate product repo; Apache-2.0 is GPL-3.0-compatible, so the combined app is GPL-3.0)
+
+Model weights are **not redistributed** by this project — bring your own (see setup) and obtain them from the sources above under their respective licenses. Fonts are not bundled (system CJK fallback).
