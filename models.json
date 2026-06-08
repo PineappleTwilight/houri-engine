@@ -1,0 +1,33 @@
+{
+  "version": "models-v1",
+  "note": "Auto-download manifest for the three ONNX models. ENGINE fetches this (ModelDownloader.fetchManifest), downloads each url into the app's models dir, and verifies sha256. Weights are GPL-3.0 (base LaMa Apache-2.0); see docs/MODELS.md. The url fields point at this repo's GitHub release assets and go live once the repo is public.",
+  "models": [
+    {
+      "role": "detector",
+      "name": "comictextdetector.pt.onnx",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v1/comictextdetector.pt.onnx",
+      "size": 94669756,
+      "sha256": "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f",
+      "license": "GPL-3.0",
+      "source": "https://github.com/dmMaze/comic-text-detector"
+    },
+    {
+      "role": "ocr",
+      "name": "ocr_48px_ctc.onnx",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v1/ocr_48px_ctc.onnx",
+      "size": 164974063,
+      "sha256": "3019b406dfc7b3dedf3d0a17a8b5f78c4b483712e3acaa3987db078d9b2c35d8",
+      "license": "GPL-3.0",
+      "source": "https://github.com/zyddnys/manga-image-translator"
+    },
+    {
+      "role": "inpainter",
+      "name": "lama-manga.onnx",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v1/lama-manga.onnx",
+      "size": 207482644,
+      "sha256": "4512adab295ee5a5e02ccd1bdf8d45dccbac88309d9cff1532ffd5de876f02a4",
+      "license": "GPL-3.0",
+      "source": "https://github.com/mayocream/koharu"
+    }
+  ]
+}
