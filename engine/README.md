@@ -70,7 +70,7 @@ The full list, with ranges and the effect of each, is in [`docs/PARAMETERS.md`](
 - `OcrConfig.concurrent = true`, `concurrency = 8`. OCR recognizes lines in parallel; on an 8-core phone this roughly halves OCR time, with no change to output.
 - `InpainterConfig.method = "auto"`, `wholeImage = true`. Flat-fills clean bubbles and runs one whole-image LaMa pass for text over artwork. `"boxfill"` flat-fills everything (fastest, on-art text becomes a colour block); `"auto"` with `wholeImage = false` runs per-region LaMa (slowest, sharpest).
 - `RenderConfig.orientation = AUTO`. Follows each region's detected direction, then rotates along the region's skew angle.
-- `TranslatorConfig.provider = "deepseek"`. Any OpenAI-compatible endpoint (set `apiBase` and `model`).
+- `TranslatorConfig.provider = "deepseek"`, with `apiBase` and `model`. Any OpenAI-compatible endpoint. `LlmProviders.ALL` carries presets for manga-image-translator's LLM set plus OpenRouter (all OpenAI-compatible; Gemini via its compat endpoint), and `LlmModels.list()` fetches a provider's live model list. See [`docs/PROVIDERS.md`](../docs/PROVIDERS.md).
 
 ### Language pair (not fixed to JP→CHT)
 

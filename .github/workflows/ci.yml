@@ -1,0 +1,40 @@
+name: CI
+
+# 每次 push / PR 驗證整個 repo 能否正常編譯（:engine 函式庫 + :app-sandbox 測試 app）。
+# 只做「編譯/組裝」檢查——桌面 parity（Python，需模型權重與 fixtures）仍是手動跑，不在 CI。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支上若有舊 build 仍在跑就取消，省 runner。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Compile engine + sandbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 與本機一致：build 目標 JVM 17，但用 JDK 21 跑 Gradle/AGP 9（開發機是 Studio jbr 21）。
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # 裝 cmdline-tools 並接受授權；compileSdk 由 AGP 依需求自動下載。
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Gradle 設定 + 跨 run 快取（用 repo 內 wrapper 的 Gradle 版本）。
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # api-keys.properties / local.properties 都 gitignored；缺檔時 build 已有後備
+      # （api key → 空字串、SDK 路徑 → ANDROID_HOME），故 CI 不需提供即可編譯。
+      - name: Assemble (compile check)
+        run: ./gradlew :engine:assembleDebug :app-sandbox:assembleDebug --no-daemon --stacktrace

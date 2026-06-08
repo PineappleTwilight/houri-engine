@@ -6,7 +6,7 @@
 
 狀態：引擎已在真機上端到端跑通（里程碑 M0–M3）。接進 reader（M4）進行中。
 
-本 repo 是**引擎**（`yakuyomi-engine`）。reader app 是另一個 [mihon](https://github.com/mihonapp/mihon) fork，用 submodule 引入這個引擎，見[儲存庫結構](#儲存庫結構)。
+本 repo 是**引擎**（`yakuyomi-engine`）。reader app 就是 **Yakuyomi**——一個 [mihon](https://github.com/mihonapp/mihon) fork，用 submodule 引入這個引擎，見[儲存庫結構](#儲存庫結構)。
 
 ## 這是什麼
 
@@ -27,7 +27,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 ![效能比較](docs/img/showcase.png)
 
-來自 sandbox app：同一頁跑過三種去字模式。上排是去字後、下排是貼完譯文的成品，左邊的表把每個模式各階段的用時拆開列出。橫幅記了裝置、生效的設定、跟 LLM。
+來自 sandbox app：同一頁走過整條 pipeline——偵測、信賴門檻、去字、貼完譯文的成品——並比較三種去字模式（BoxFill、Auto-整頁、Auto-逐格）。表把每個模式各階段的用時拆開列出；橫幅記了裝置、生效的設定、跟 LLM。
 
 ## 目標
 
@@ -39,7 +39,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 - **偵測** — comic-text-detector。回傳文字行四邊形，加一張逐像素筆畫遮罩，用來把去字限制在筆畫上。
 - **OCR** — 48px CTC 模型，每行一次前向、貪婪解碼。跑在 CPU 上（XNNPACK 會算錯這個模型）。文字行並發辨識，8 核手機上 OCR 大約砍半。
-- **翻譯** — 雲端 LLM，沿用 manga-image-translator 的行號協定。預設 DeepSeek，任何 OpenAI 相容的服務商都行。每頁請求在 semaphore 下並發以避開限流。某行翻譯失敗時退回原文，不會弄壞整頁。
+- **翻譯** — 雲端 LLM，沿用 manga-image-translator 的行號協定。任何 OpenAI 相容服務商都行；預設選單涵蓋 manga-image-translator 那組（OpenAI、DeepSeek、Gemini、Groq、Qwen、Sakura、自訂）外加 OpenRouter，各家的模型清單即時撈取。預設 DeepSeek。每頁請求在 semaphore 下並發以避開限流。某行翻譯失敗時退回原文，不會弄壞整頁。詳見 [docs/PROVIDERS.md](docs/PROVIDERS_zh.md)。
 - **去字** — 三個模式，拿速度換品質。對話框一律平塗（乾淨、無黃暈），模式之間只差在壓在畫面上的字怎麼處理：
 
   | 模式 | 畫面上的字 | 速度 |
@@ -64,7 +64,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 ## 模型
 
-權重不 commit、也不打包進 APK，由 app 從你選的資料夾載入。
+權重不 commit、也不打包進 APK。reader 可自動下載，或你手動放進指定的資料夾——出處、雜湊、授權見 [docs/MODELS_zh.md](docs/MODELS_zh.md)。
 
 | 階段 | 模型 | 來源 |
 |---|---|---|
@@ -81,7 +81,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 ./gradlew :app-sandbox:assembleDebug
 ```
 
-裝起來，指向放三個 `.onnx` 模型的資料夾，選測試圖，跑診斷或去字比較。reader app 在另一個 fork repo。
+裝起來，指向放三個 `.onnx` 模型的資料夾，選測試圖，跑診斷或去字比較。reader app（Yakuyomi）在另一個 fork repo。
 
 ## 設定
 

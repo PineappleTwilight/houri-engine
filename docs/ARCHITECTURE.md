@@ -34,7 +34,7 @@ Each stage in one line:
 - **Detector** — comic-text-detector. Letterbox preprocess, ONNX, then boxes (NMS + unclip) and a `seg` stroke mask. Text removal uses the mask so it erases strokes, not solid rectangles.
 - **Ocr** — 48px CTC. Crops each line (perspective-corrected, vertical lines rotated), recognizes it, greedy-decodes against the alphabet, drops lines below `minProb`. Lines run concurrently (see below).
 - **Grouping** — turns lines into bubble-sized regions in two stages: a permissive connect pass, then an MST split that breaks apart neighbours connected only transitively. The split is what stops dense bubbles from merging into one block. It also computes each region's reading order and skew angle.
-- **Translator** — m-i-t's `chatgpt.py` prompt and protocol over an OpenAI-compatible call, one request per page, no cross-page context. A region whose translation fails keeps its source text. The language pair is configurable: target via `toLangName`, source via the OCR model plus a prompt label. Default is Japanese to Traditional Chinese, not hardcoded.
+- **Translator** — m-i-t's `chatgpt.py` prompt and protocol over an OpenAI-compatible call, one request per page, no cross-page context. A region whose translation fails keeps its source text. The language pair is configurable: target via `toLangName`, source via the OCR model plus a prompt label. Default is Japanese to Traditional Chinese, not hardcoded. Providers are presets, all OpenAI-compatible (Gemini via its compat endpoint), with each provider's model list fetched live — see [PROVIDERS.md](PROVIDERS.md).
 - **TextFilter** — m-i-t's post-translation filter. A region is "usable" when its translation isn't blank, isn't bare digits, doesn't match the filter regex, and isn't identical to the source.
 - **Inpainter** — three modes: `boxfill` (flat-fill the masked area with the local background colour) and `auto` with `wholeImage` either on (one whole-image LaMa pass) or off (per-region LaMa). Auto flat-fills clean bubbles and sends only on-art text to LaMa. Default is auto with `wholeImage` on.
 - **Renderer** — text-box typesetting, no bubble flood-fill: font auto-sizing, kinsoku line breaks, vertical or horizontal, text colour from the cleaned background luminance, and canvas rotation along the region's skew angle.
@@ -76,6 +76,7 @@ engine/        Android library, the on-device pipeline (the product)
     Yakuyomi.kt, TranslationEngine.kt, ModelSet.kt   public entry (facade + types)
     Pipeline.kt, Detector.kt, Ocr.kt, Grouping.kt,
     LlmTranslator.kt, Inpainter.kt, Renderer.kt      stages
+    LlmProviders.kt, LlmModels.kt                    provider presets + live model-list fetch
     Geometry.kt, ImageOps.kt, TextFilter.kt          internal helpers
   src/test/kotlin/…                                  JVM unit tests
 app-sandbox/   throwaway test app (device timing, comparison images)

@@ -63,6 +63,8 @@ data class TranslatorConfig(
     val targetLang: String = "CHT",                                     // 〔設定〕config.target_lang
     val model: String = "deepseek-chat",                                // 〔設定〕
     val apiBase: String = "https://api.deepseek.com/chat/completions",  // 〔設定〕custom_openai 用
+    // ⚠️ toLangName / fromLangName 預設被 fork :domain 的 TranslationPreferences.DEFAULT_TARGET_LANG /
+    //   DEFAULT_SOURCE_LANG 鏡像（:domain 不能 import 引擎）。改這兩個請同步改那邊，否則 few-shot 判斷會 drift。
     val toLangName: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",  // 〔設定〕目標語言
     val fromLangName: String = "Japanese",          // 〔設定〕來源語言標註（空白＝讓 LLM 自己判）
     val sampleSource: String = DEFAULT_SAMPLE_SOURCE, // 〔設定〕few-shot 原文（空白＝不放範例）

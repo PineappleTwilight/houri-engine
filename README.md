@@ -6,7 +6,7 @@ English ｜ [中文](README_zh.md)
 
 Status: the engine runs end to end on a real device (milestones M0–M3). Reader integration (M4) is in progress.
 
-This repo is the **engine** (`yakuyomi-engine`). The reader app is a separate [mihon](https://github.com/mihonapp/mihon) fork that pulls the engine in as a submodule; see [Repository layout](#repository-layout).
+This repo is the **engine** (`yakuyomi-engine`). The reader app — **Yakuyomi** — is a [mihon](https://github.com/mihonapp/mihon) fork that pulls the engine in as a submodule; see [Repository layout](#repository-layout).
 
 ## What it is
 
@@ -27,7 +27,7 @@ The engine exposes one call, `translatePage(page): PageResult` (translated / ski
 
 ![Performance comparison](docs/img/showcase.png)
 
-From the sandbox app: one page run through the three text-removal modes. The top row is after removal, the bottom row is the finished translation, and the table on the left breaks down the time each stage takes per mode. The banner records the device, the active settings, and the LLM.
+From the sandbox app: one page taken through the pipeline — detection, confidence threshold, text removal, and the finished typeset — compared across the three text-removal modes (BoxFill, Auto-whole, Auto-tile). The table breaks down each stage's time per mode; the banner records the device, the active settings, and the LLM.
 
 ## Goals
 
@@ -39,7 +39,7 @@ From the sandbox app: one page run through the three text-removal modes. The top
 
 - **Detection** — comic-text-detector. Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.
 - **OCR** — a 48px CTC model, one forward per line, decoded greedily. Runs on CPU (XNNPACK miscomputes this model). Lines are recognized concurrently, which on an 8-core phone cuts OCR roughly in half.
-- **Translation** — a cloud LLM with the line-numbered protocol from manga-image-translator. DeepSeek by default; any OpenAI-compatible provider works. Per-page requests run concurrently under a semaphore to avoid rate limits. A failed line falls back to its source text rather than breaking the page.
+- **Translation** — a cloud LLM with the line-numbered protocol from manga-image-translator. Any OpenAI-compatible provider works; presets cover manga-image-translator's set (OpenAI, DeepSeek, Gemini, Groq, Qwen, Sakura, custom) plus OpenRouter, each with its model list fetched live. DeepSeek by default. Per-page requests run concurrently under a semaphore to avoid rate limits. A failed line falls back to its source text rather than breaking the page. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 - **Text removal** — three modes, trading speed for quality. Speech bubbles are always flat-filled (clean, no halo); the modes differ only in how text drawn over artwork is handled:
 
   | Mode | Artwork handling | Speed |
@@ -64,7 +64,7 @@ The engine stays reader-agnostic so it can be tested on its own; the app is a re
 
 ## Models
 
-Weights are not committed and not packed into the APK. The app loads them from a folder you choose.
+Weights are not committed and not packed into the APK. The reader can auto-download them, or you supply them manually from a folder you choose — see [docs/MODELS.md](docs/MODELS.md) for sources, checksums, and licensing.
 
 | Stage | Model | Source |
 |---|---|---|
@@ -81,7 +81,7 @@ The engine builds as a standard Android Gradle library. The sandbox app (`:app-s
 ./gradlew :app-sandbox:assembleDebug
 ```
 
-Install it, point it at a folder containing the three `.onnx` models, pick test images, and run a diagnostic or a text-removal comparison. The reader app lives in the separate fork repo.
+Install it, point it at a folder containing the three `.onnx` models, pick test images, and run a diagnostic or a text-removal comparison. The reader app, Yakuyomi, lives in the separate fork repo.
 
 ## Configuration
 

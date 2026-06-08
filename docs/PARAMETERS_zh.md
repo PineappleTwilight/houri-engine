@@ -16,7 +16,7 @@ reader app 把這些放在翻譯設定頁，按階段分組。常用的預設顯
 開關，預設關。章節下載完就翻。偵測、OCR、去字在裝置上跑；翻譯呼叫 LLM，所以跑的當下要連網。
 
 ### API key
-你的 LLM 金鑰（自備金鑰）。OpenAI 相容，預設 DeepSeek。存在 Android Keystore，不內建。
+你的 LLM 金鑰（自備金鑰），每個服務商各存一格，切換服務商不會弄丟。加密存在 Android Keystore，不內建。
 
 ### 目標語言
 LLM 翻成的語言。預設台灣繁體中文。預設帶一組日翻中的 few-shot 範例；換成別的目標語言時範例會拿掉，免得把輸出帶往中文。
@@ -25,7 +25,7 @@ LLM 翻成的語言。預設台灣繁體中文。預設帶一組日翻中的 few
 丟進 prompt 的提示。實際來源由 OCR 模型決定，所以這只是個標籤。留自動偵測即可，除非 OCR 輸出被標錯語言。
 
 ### 服務商／模型／API base
-引擎支援任何 OpenAI 相容的服務商，外加 Gemini，服務商、模型、API base 都可設。reader 目前只接了金鑰跟語言，所以跑 DeepSeek；服務商／模型／base 是引擎參數，還沒做成設定項。
+服務商是預設選單：manga-image-translator 的 LLM 那組（OpenAI、DeepSeek、Gemini、Groq、Qwen、Sakura、自訂）外加 OpenRouter，全部 OpenAI 相容。預設 DeepSeek。模型可手填，或按 **抓取模型** 從服務商撈即時清單；留空＝用該服務商的預設模型。API base 只在自架／自訂（Sakura、自訂）才出現，其餘用內建端點。完整清單與撈取機制見 [PROVIDERS.md](PROVIDERS_zh.md)。
 
 ---
 

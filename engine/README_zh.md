@@ -70,7 +70,7 @@ Yakuyomi.create(models, alphabet, apiKey, config)
 - `OcrConfig.concurrent = true`、`concurrency = 8`。OCR 把文字行並發辨識；8 核手機上 OCR 時間大約砍半，輸出不變。
 - `InpainterConfig.method = "auto"`、`wholeImage = true`。把乾淨泡泡平塗、對壓在畫面上的字跑一次整頁 LaMa。`"boxfill"` 全平塗（最快，畫面上的字變色塊）；`"auto"` 配 `wholeImage = false` 跑逐區 LaMa（最慢、最銳）。
 - `RenderConfig.orientation = AUTO`。跟著每區塊偵測到的方向，再沿區塊傾斜角旋轉。
-- `TranslatorConfig.provider = "deepseek"`。任何 OpenAI 相容端點（設 `apiBase` 跟 `model`）。
+- `TranslatorConfig.provider = "deepseek"`，配 `apiBase` 跟 `model`。任何 OpenAI 相容端點。`LlmProviders.ALL` 內建 manga-image-translator 的 LLM 那組外加 OpenRouter 的預設（全 OpenAI 相容；Gemini 走它的 compat 端點），`LlmModels.list()` 撈服務商的即時模型清單。詳見 [`docs/PROVIDERS_zh.md`](../docs/PROVIDERS_zh.md)。
 
 ### 語言對（不寫死日翻繁中）
 

@@ -16,7 +16,7 @@ Numeric settings are typed in and clamped to the range shown here (out-of-range 
 Switch, default off. Translates each chapter as it finishes downloading. Detection, OCR, and text removal run on the device; translation calls the LLM, so it needs a network connection while it runs.
 
 ### API key
-Your LLM key (bring your own key). OpenAI-compatible; DeepSeek by default. Stored in the Android Keystore, never bundled.
+Your LLM key (bring your own key), kept per provider so switching providers doesn't lose a key. Stored encrypted in the Android Keystore, never bundled.
 
 ### Target language
 The language the LLM translates into. Default is Taiwan-style Traditional Chinese. The default carries a Japanese-to-Chinese few-shot example; choosing another target drops the example so it doesn't pull the output toward Chinese.
@@ -25,7 +25,7 @@ The language the LLM translates into. Default is Taiwan-style Traditional Chines
 A hint passed to the prompt. The actual source is decided by the OCR model, so this is just a label. Leave it on auto-detect unless the OCR output is being mislabelled.
 
 ### Provider / model / API base
-The engine supports any OpenAI-compatible provider, plus Gemini, with the provider, model, and API base all configurable. The reader currently wires only the key and languages, so it runs DeepSeek; provider/model/base are engine parameters waiting for a settings entry.
+The provider is a preset picker: manga-image-translator's LLM set (OpenAI, DeepSeek, Gemini, Groq, Qwen, Sakura, custom) plus OpenRouter, all OpenAI-compatible. DeepSeek by default. The model can be typed, or fetched live from the provider with **fetch models**; leave it blank to use the provider's default. API base appears only for the self-hosted/custom presets (Sakura, Custom); the others use their built-in endpoint. See [PROVIDERS.md](PROVIDERS.md) for the full list and how the model fetch works.
 
 ---
 

@@ -34,7 +34,7 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 - **Detector** — comic-text-detector。letterbox 前處理、ONNX，產出框（NMS + unclip）跟一張 `seg` 筆畫遮罩。去字用這張遮罩，抹的是筆畫不是方塊。
 - **Ocr** — 48px CTC。把每行裁出來（透視校正、直書行轉正），辨識、對字典貪婪解碼，丟掉低於 `minProb` 的行。文字行並發跑（見下）。
 - **Grouping** — 把行併成氣泡大小的區塊，分兩階段：寬鬆的連邊，再用 MST 分裂把只靠傳遞才連起來的鄰居切開。這個分裂就是讓密集氣泡不黏成一塊的關鍵。同時算每個區塊的閱讀序跟傾斜角。
-- **Translator** — m-i-t 的 `chatgpt.py` prompt 與協定，走 OpenAI 相容呼叫，每頁一個請求、無跨頁上文。某區塊翻譯失敗就保留它的原文。語言對可設：目標走 `toLangName`、來源由 OCR 模型加 prompt 標籤決定。預設日翻繁中，不寫死。
+- **Translator** — m-i-t 的 `chatgpt.py` prompt 與協定，走 OpenAI 相容呼叫，每頁一個請求、無跨頁上文。某區塊翻譯失敗就保留它的原文。語言對可設：目標走 `toLangName`、來源由 OCR 模型加 prompt 標籤決定。預設日翻繁中，不寫死。服務商是預設選單、全 OpenAI 相容（Gemini 走它的 compat 端點），各家的模型清單即時撈取——見 [PROVIDERS.md](PROVIDERS_zh.md)。
 - **TextFilter** — m-i-t 的譯後過濾。一個區塊算「可用」的條件：譯文非空白、非純數字、不命中過濾 regex、且不等於原文。
 - **Inpainter** — 三個模式：`boxfill`（用局部背景色平塗遮罩區）、`auto` 配 `wholeImage` 開（整頁一次 LaMa）或關（逐區 LaMa）。auto 把乾淨泡泡平塗、只把壓在畫面上的字送 LaMa。預設 auto + `wholeImage` 開。
 - **Renderer** — 文字框排版，不做氣泡 flood-fill：字級自適應、行頭禁則、直或橫排、文字顏色取去字後背景亮度、畫布沿區塊傾斜角旋轉。
@@ -76,6 +76,7 @@ engine/        Android library，裝置端 pipeline（產品）
     Yakuyomi.kt, TranslationEngine.kt, ModelSet.kt   對外入口（facade + 型別）
     Pipeline.kt, Detector.kt, Ocr.kt, Grouping.kt,
     LlmTranslator.kt, Inpainter.kt, Renderer.kt      各階段
+    LlmProviders.kt, LlmModels.kt                    供應商預設 + 即時撈模型清單
     Geometry.kt, ImageOps.kt, TextFilter.kt          內部 helper
   src/test/kotlin/…                                  JVM 單元測試
 app-sandbox/   丟棄式測試 app（裝置計時、比較圖）
