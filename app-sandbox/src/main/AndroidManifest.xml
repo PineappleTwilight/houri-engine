@@ -5,8 +5,10 @@
 
     <application
         android:allowBackup="false"
-        android:label="Yakuyomi M0"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Yakuyomi Dev"
         android:largeHeap="true"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
 
