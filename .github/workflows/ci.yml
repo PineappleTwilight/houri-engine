@@ -34,6 +34,10 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # git 在 Windows/WSL 可能沒保留 gradlew 執行權限（已用 update-index 修為 100755，這道是保險）。
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
       # api-keys.properties / local.properties 都 gitignored；缺檔時 build 已有後備
       # （api key → 空字串、SDK 路徑 → ANDROID_HOME），故 CI 不需提供即可編譯。
       - name: Assemble (compile check)
