@@ -14,7 +14,7 @@ import kotlin.math.roundToInt
 enum class TextOrientation { VERTICAL, HORIZONTAL, AUTO }
 
 /**
- * M3 排版（純文字框法，可靠）：定位 + 大小都用文字框，框適度放大（[RenderConfig.expandW]/[RenderConfig.expandH]）給呼吸空間。
+ * 排版（純文字框法，可靠）：定位 + 大小都用文字框，框適度放大（[RenderConfig.expandW]/[RenderConfig.expandH]）給呼吸空間。
  * 對齊 parity/typeset_parity.py（§4 第二層：同輸入近輸出）。
  *   不靠氣泡 flood-fill——相鄰氣泡會連通成一塊、整個算錯，已棄用。
  *   直排：CJK 上→下、欄右→左、向上對齊、每欄少 [RenderConfig.colTrim] 字（縮短欄長、減少凸出）、標點旋轉、短 ASCII 串縱中橫（tate-chu-yoko，見 [RenderConfig.tateChuYoko]）。

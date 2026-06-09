@@ -79,7 +79,7 @@ engine/        Android library, the on-device pipeline (the product)
     LlmProviders.kt, LlmModels.kt                    provider presets + live model-list fetch
     Geometry.kt, ImageOps.kt, TextFilter.kt          internal helpers
   src/test/kotlin/…                                  JVM unit tests
-app-sandbox/   throwaway test app (device timing, comparison images)
+app-sandbox/   sandbox test app (device timing, comparison images)
 parity/        desktop Python validation harness (not shipped)
 docs/          this file, plus the parameter reference
 ```

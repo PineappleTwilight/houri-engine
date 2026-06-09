@@ -4,7 +4,7 @@
 
 [English](README.md) ｜ 中文
 
-狀態：引擎已在真機上端到端跑通（里程碑 M0–M3）。接進 reader（M4）進行中。
+狀態：整條 pipeline 在裝置上跑、驅動 Yakuyomi reader app——下載即翻、邊讀邊翻（即時翻譯）、換去字法免重翻的重繪都能用。第一版公開發佈準備中。
 
 本 repo 是**引擎**（`yakuyomi-engine`）。reader app 就是 **Yakuyomi**——一個 [mihon](https://github.com/mihonapp/mihon) fork，用 submodule 引入這個引擎，見[儲存庫結構](#儲存庫結構)。
 
@@ -23,7 +23,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
   翻好的 bitmap
 ```
 
-引擎只對外開一個呼叫，`translatePage(page): PageResult`（翻好／略過／失敗）。覆蓋原檔、「已翻譯」標記、續傳、跨頁批次是 reader app 的事。
+引擎只對外開一個呼叫，`translatePage(page): PageResult`（翻好／略過／失敗）。覆蓋原檔、「已翻譯」標記、續傳、背景翻譯佇列、邊讀邊翻是 reader app 的事。
 
 ![效能比較](docs/img/showcase.png)
 
@@ -49,6 +49,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
   | Auto-逐格 | 逐區 LaMa | 最慢、最銳 |
 
 - **排版** — 文字框排版，直排或橫排，字級自適應、垂直置中、描邊隨字級、行頭禁則、沿傾斜氣泡角度擺放。文字顏色依去字後的背景決定（亮底黑字、暗底白字）。
+- **重繪（analyze | render 切分）** — 翻好的頁會連同它的分析素材一起回傳：文字遮罩，加上帶著原文與譯文的區塊。之後換去字法、重新排版時不必重跑偵測／OCR／LLM——換去字模式、升級品質只花去字 + 排版兩個階段，不耗 token。
 - **語言** — 開箱即用日翻繁中。換目標語言、來源語言、few-shot 範例就能翻任何語言對。繁中輸出靠 prompt，沒有 OpenCC 後處理。
 
 ## 儲存庫結構
@@ -57,7 +58,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 | Repo | 角色 |
 |---|---|
-| `yakuyomi-engine`（這個） | 引擎：`:engine`（整條 pipeline，只開 `translatePage`）、丟棄式的 `:app-sandbox`（真機測試用）、`parity/` 桌面驗證工具。沒有 reader 程式碼。 |
+| `yakuyomi-engine`（這個） | 引擎：`:engine`（整條 pipeline，只開 `translatePage`）、`:app-sandbox`（真機跑 pipeline 用）、`parity/` 桌面驗證工具。沒有 reader 程式碼。 |
 | `Yakuyomi`（mihon fork） | reader app：mihon 加上下載 hook、翻譯設定、模型管理。用 git submodule + Gradle `includeBuild` 引入引擎。 |
 
 引擎跟 reader 解耦，才能自己單獨測；app 是真正的 mihon fork。引擎的改動 commit 在這裡，app 端 bump submodule 指標。

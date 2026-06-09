@@ -4,7 +4,7 @@ On-device detection, OCR, and text removal (ONNX Runtime) plus cloud-LLM transla
 
 English ｜ [中文](README_zh.md)
 
-Status: the engine runs end to end on a real device (milestones M0–M3). Reader integration (M4) is in progress.
+Status: the full pipeline runs on-device and drives the Yakuyomi reader app — translate-on-download, read-as-you-go live translation, and cheap re-rendering all work. First public release in preparation.
 
 This repo is the **engine** (`yakuyomi-engine`). The reader app — **Yakuyomi** — is a [mihon](https://github.com/mihonapp/mihon) fork that pulls the engine in as a submodule; see [Repository layout](#repository-layout).
 
@@ -23,7 +23,7 @@ page bitmap
   translated bitmap
 ```
 
-The engine exposes one call, `translatePage(page): PageResult` (translated / skipped / failed). Writing the file back, the "translated" marker, resume, and cross-page batching belong to the reader app.
+The engine exposes one call, `translatePage(page): PageResult` (translated / skipped / failed). Writing the file back, the "translated" marker, resume, the background translation queue, and read-as-you-go live translation belong to the reader app.
 
 ![Performance comparison](docs/img/showcase.png)
 
@@ -49,6 +49,7 @@ From the sandbox app: one page taken through the pipeline — detection, confide
   | Auto-tile | per-region LaMa | slowest, sharpest |
 
 - **Typesetting** — text-box layout, vertical or horizontal, with adaptive font size, vertical centering, outline scaled to the font, line-head kinsoku, and tilt-aware placement (text follows a slanted bubble's angle). Text colour is chosen from the cleaned background (black on light, white on dark).
+- **Re-rendering (analyze | render split)** — a translated page comes back with its analysis: the text mask, plus the regions carrying their source and target text. The text-removal method can then be changed and the page re-typeset without re-running detection, OCR, or the LLM — switching removal mode or upgrading quality costs only the removal and typeset stages, no tokens.
 - **Languages** — Japanese to Traditional Chinese out of the box. Set a different target, source, and few-shot example for any pair. Traditional-Chinese output relies on the prompt; there is no OpenCC post-processing.
 
 ## Repository layout
@@ -57,7 +58,7 @@ Two repos:
 
 | Repo | Role |
 |---|---|
-| `yakuyomi-engine` (this one) | the engine: `:engine` (the pipeline, exposing only `translatePage`), a throwaway `:app-sandbox` for testing on a device, and the `parity/` desktop validation harness. No reader code. |
+| `yakuyomi-engine` (this one) | the engine: `:engine` (the pipeline, exposing only `translatePage`), a `:app-sandbox` for exercising it on a device, and the `parity/` desktop validation harness. No reader code. |
 | `Yakuyomi` (a mihon fork) | the reader app: mihon with the download hook, translation settings, and model management. Consumes the engine as a git submodule via Gradle `includeBuild`. |
 
 The engine stays reader-agnostic so it can be tested on its own; the app is a real mihon fork. Engine work is committed here, and the app bumps the submodule pointer.

@@ -79,7 +79,7 @@ engine/        Android library，裝置端 pipeline（產品）
     LlmProviders.kt, LlmModels.kt                    供應商預設 + 即時撈模型清單
     Geometry.kt, ImageOps.kt, TextFilter.kt          內部 helper
   src/test/kotlin/…                                  JVM 單元測試
-app-sandbox/   丟棄式測試 app（裝置計時、比較圖）
+app-sandbox/   sandbox 測試 app（裝置計時、比較圖）
 parity/        桌面 Python 驗證工具（不出貨）
 docs/          這份，加參數參考
 ```
