@@ -73,6 +73,7 @@ class MainActivity : AppCompatActivity() {
         binding.pickFolderButton.setOnClickListener { folderPicker.launch(null) }
         binding.detectButton.setOnClickListener { runPipeline() }
         binding.inpaintCompareButton.setOnClickListener { runInpaintCompare() }
+        binding.repoDemoButton.setOnClickListener { runRepoDemo() }
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
@@ -131,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateButtons() {
         binding.detectButton.isEnabled = selected.isNotEmpty()
         binding.inpaintCompareButton.isEnabled = selected.size == 1
+        binding.repoDemoButton.isEnabled = selected.size == 1
     }
 
     private fun loadAssetThumbnail(path: String, target: Int): Bitmap {
@@ -360,6 +362,105 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 withContext(Dispatchers.Main) { updateButtons() }
+            }
+        }
+    }
+
+    /**
+     * 產生 repo demo（行銷展示圖）：對單張硬 case 頁，挑「背景最忙（字壓在畫面上）」的區，裁出乾淨 4 格特寫——
+     * 原圖 / BoxFill（疊字翻譯那樣）/ Yakuyomi 去字 / Yakuyomi 翻譯成品。無 debug 框/表格，直接放 README。
+     * Yakuyomi 那兩格用 Auto（整頁/逐格 由 spinner 選；BoxFill 選項退 Auto-整頁），BoxFill 永遠當對比。
+     */
+    private fun runRepoDemo() {
+        binding.detectButton.isEnabled = false
+        binding.inpaintCompareButton.isEnabled = false
+        binding.repoDemoButton.isEnabled = false
+        val imgPath = selected.firstOrNull()?.let { TEST_IMAGES[it] }
+        // 展示圖固定用 Auto-逐格（最銳、最佳品質；一次性、慢無妨）→ 不吃下拉、免每次記得選。BoxFill 永遠當對比。
+        val method = "auto"; val whole = false; val modeLabel = "Auto-tile（逐格）"
+        lifecycleScope.launch(Dispatchers.Default) {
+            clearOutputs()
+            logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
+            try {
+                val tree = runTree ?: run { log("✗ 請先按「選擇模型資料夾」"); return@launch }
+                if (imgPath == null) { log("✗ repo demo 需選「單一」張測試圖"); return@launch }
+                val detF = findOnnx(tree, "detect", "comictext")
+                val ocrF = findOnnx(tree, "ocr")
+                val lamaF = findOnnx(tree, "lama")
+                if (detF == null || ocrF == null || lamaF == null) {
+                    log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）"); return@launch
+                }
+                log("▶ 產生 repo demo（硬區 4 格：原圖 / BoxFill / Yakuyomi去字 / Yakuyomi翻譯）— $imgPath（去字=$modeLabel，需連網翻譯）")
+                val page = loadAssetBitmap(imgPath)
+                val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
+                val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
+
+                // 前段：偵測 → OCR → 分群 → 翻譯 → 過濾（與「效能比較」同一套）
+                val detector = Detector(ensureLocal(detF))
+                val detection = detector.detect(page); detector.close()
+                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
+                ocr.recognize(page, detection.lines); ocr.close()
+                val regions = Grouping.group(detection.lines)
+                val translator = LlmTranslator(BuildConfig.DEEPSEEK_API_KEY, TranslatorConfig())
+                val cht = translator.translate(regions.map { it.sourceText })
+                regions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
+                val kept = regions.filter { r ->
+                    val t = r.translatedText.trim()
+                    t.isNotEmpty() && !t.all { it.isDigit() } && !r.sourceText.trim().equals(t, ignoreCase = true)
+                }
+                if (kept.isEmpty()) { log("✗ 全數過濾（無有效譯文）：${translator.lastError}"); return@launch }
+                val lamaPath = ensureLocal(lamaF)
+
+                // BoxFill 去字（對比用＝疊字翻譯的天花板）
+                kept.forEach { it.onArt = false; it.dbgStd = -1f }
+                val bf = Inpainter(lamaPath, InpainterConfig(method = "boxfill", wholeImage = true))
+                val cleanBox = bf.inpaint(page, kept, detection.textMask); bf.close()
+                // Yakuyomi 去字（Auto；dbgStd 在此被設定，用來挑硬區）
+                kept.forEach { it.onArt = false; it.dbgStd = -1f }
+                val au = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
+                val cleanAuto = au.inpaint(page, kept, detection.textMask); au.close()
+                // Yakuyomi 翻譯嵌字（在乾淨去字「副本」上貼字 → cleanAuto 本身保持乾淨給第 3 格）
+                val translated = Renderer.render(
+                    cleanAuto.copy(Bitmap.Config.ARGB_8888, true), kept, RenderConfig(orientation = TextOrientation.AUTO), tf,
+                )
+
+                // 挑硬區：背景最忙（dbgStd 最高）；無 std 則挑面積最大區
+                val busiest = kept.filter { it.dbgStd >= 0f }.maxByOrNull { it.dbgStd }
+                    ?: kept.maxByOrNull { (it.x1 - it.x0) * (it.y1 - it.y0) } ?: kept.first()
+                val pad = ((busiest.y1 - busiest.y0) * 0.4f).coerceAtLeast(40f).toInt()
+                val cx0 = (busiest.x0.toInt() - pad).coerceAtLeast(0)
+                val cy0 = (busiest.y0.toInt() - pad).coerceAtLeast(0)
+                val cx1 = (busiest.x1.toInt() + pad).coerceAtMost(page.width)
+                val cy1 = (busiest.y1.toInt() + pad).coerceAtMost(page.height)
+                fun crop(b: Bitmap) =
+                    Bitmap.createBitmap(b, cx0, cy0, cx1 - cx0, cy1 - cy0).copy(Bitmap.Config.ARGB_8888, true)
+
+                val cells = listOf(
+                    crop(page).also { labelBmp(it, "1. Original", "", -1L) },
+                    crop(cleanBox).also { labelBmp(it, "2. Box-fill", "", -1L) },
+                    crop(cleanAuto).also { labelBmp(it, "3. Yakuyomi: erased", "", -1L) },
+                    crop(translated).also { labelBmp(it, "4. Yakuyomi: translated", "", -1L) },
+                )
+                val demo = mergeHorizontal(cells)
+                saveNamed(tree, "${runStamp}_repodemo.png", demo)
+                saveNamed(tree, "${runStamp}_repodemo_fullpage.png", translated)
+                log("✓ repo demo 完成（硬區 std=${"%.1f".format(busiest.dbgStd)}）→ 存 _repodemo.png（4 格）+ _repodemo_fullpage.png（全頁譯）")
+                addImage("repo demo（硬區 4 格：原圖 / BoxFill / Yakuyomi 去字 / Yakuyomi 翻譯）", demo)
+            } catch (t: Throwable) {
+                Log.e(TAG, "repo demo 失敗", t)
+                log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                withContext(Dispatchers.Main) { updateButtons() }
+            }
+        }
+    }
+
+    /** 用指定檔名存 PNG 到資料夾（覆蓋同名）。 */
+    private fun saveNamed(tree: DocumentFile, name: String, bmp: Bitmap) {
+        runCatching {
+            tree.findFile(name)?.delete()
+            tree.createFile("image/png", name)?.uri?.let { uri ->
+                contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
         }
     }
@@ -704,7 +805,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.7-rework" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
+        private const val BUILD_TAG = "v0.9-repodemo-tile" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
 
         private const val PREF_TREE = "modelTree"
         // 去字方式選單（順序＝position：0 BoxFill / 1 Auto-整頁 / 2 Auto-逐格）

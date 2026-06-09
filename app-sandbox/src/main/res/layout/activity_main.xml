@@ -69,6 +69,13 @@
                 android:text="效能比較" />
         </LinearLayout>
 
+        <Button
+            android:id="@+id/repoDemoButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="產生 repo demo（硬區 4 格行銷圖）" />
+
         <Switch
             android:id="@+id/genLogSwitch"
             android:layout_width="wrap_content"
