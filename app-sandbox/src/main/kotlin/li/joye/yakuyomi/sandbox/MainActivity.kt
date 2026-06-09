@@ -161,6 +161,20 @@ class MainActivity : AppCompatActivity() {
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
             // 方向鎖 AUTO、效能用引擎最優預設（OCR 並發/8、intraThreads 6、RenderConfig 預設 AUTO）→ 只設去字方法。
             val cfg = EngineConfig(inpainter = InpainterConfig(method = method, wholeImage = whole))
+            // 記憶體峰值取樣：背景每 150ms 抽「總 PSS（含 native）」與 native heap，記 max。
+            // 量的是 runtime 真峰值（3 顆 ONNX session + ORT 工作記憶體 + bitmap），不是模型檔大小。
+            // 要乾淨的「單頁峰值」就只選 1 張圖（多選會累積結果 bitmap 在 UI、把峰值墊高）。
+            val memBasePss = android.os.Debug.getPss() // KB，載入模型前基線
+            val memPeakPss = java.util.concurrent.atomic.AtomicLong(memBasePss)
+            val memPeakNative = java.util.concurrent.atomic.AtomicLong(0)
+            val memSampler = launch(Dispatchers.Default) {
+                while (true) { // cancel 時下方 delay 丟 CancellationException 自動跳出
+                    memPeakPss.updateAndGet { maxOf(it, android.os.Debug.getPss()) }
+                    val natKb = android.os.Debug.getNativeHeapAllocatedSize() / 1024
+                    memPeakNative.updateAndGet { maxOf(it, natKb) }
+                    kotlinx.coroutines.delay(150)
+                }
+            }
             try {
                 val tree = runTree
                 if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
@@ -205,6 +219,14 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "診斷失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
             } finally {
+                memSampler.cancel()
+                val peakMb = memPeakPss.get() / 1024.0
+                val baseMb = memBasePss / 1024.0
+                val natMb = memPeakNative.get() / 1024.0
+                log(
+                    "📊 記憶體峰值（去字=$modeLabel，%d張）：總PSS %.0fMB（載入前基線 %.0fMB、淨增 %.0fMB）· native heap 峰值 %.0fMB"
+                        .format(imgs.size, peakMb, baseMb, peakMb - baseMb, natMb),
+                )
                 if (saveLog) {
                     val ok = writeLog()
                     withContext(Dispatchers.Main) {
@@ -288,13 +310,26 @@ class MainActivity : AppCompatActivity() {
                 val cleanByMode = ArrayList<Bitmap>()                  // 各模式乾淨去字圖（順序＝modes；最佳那張貼字用，不可帶框）
                 val markedByMode = ArrayList<Bitmap>()                 // 各模式去字+路由框圖（第 2 排用）
                 val timings = ArrayList<Triple<String, Long, Long>>() // name, 去字ms, 排版ms（排版只算最佳那個、其餘 0）
+                // 各模式去字階段「總 PSS」峰值（KB），順序＝modes。涵蓋 Inpainter 建構（載 lama）→ inpaint→close。
+                // 注意：此處 det/ocr 已 close → 只反映「單去字階段」峰值；全 app 三模型同時在的真峰值看 runPipeline。
+                val peakByMode = ArrayList<Long>()
                 for ((name, method, whole) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
+                    val peakKb = java.util.concurrent.atomic.AtomicLong(android.os.Debug.getPss())
+                    val sampler = launch(Dispatchers.Default) {
+                        while (true) { // cancel 時 delay 丟 CancellationException 自動跳出
+                            peakKb.updateAndGet { maxOf(it, android.os.Debug.getPss()) }
+                            kotlinx.coroutines.delay(100)
+                        }
+                    }
                     val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
                     inp.close()
+                    sampler.cancel()
+                    peakByMode.add(peakKb.get())
+                    log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s｜記憶體峰值 ${"%.0f".format(peakKb.get() / 1024.0)}MB")
                     cleanByMode.add(cleaned) // 乾淨（不畫框）：最佳那張貼字用
                     // 本輪路由（onArt/dbgStd）尚未被重置 → 立即在乾淨副本上畫框（綠=boxfill平塗／紅=onArt-lama + s/w 標）。
                     val en = when (name) { "BoxFill" -> "Flat-fill"; "Auto-整頁" -> "Auto-whole"; else -> "Auto-tile" }
@@ -302,7 +337,6 @@ class MainActivity : AppCompatActivity() {
                         .also { markRegions(it, kept); labelBmp(it, name, en, tInpaint) }
                     markedByMode.add(marked)
                     timings.add(Triple(name, tInpaint, 0L)) // 排版時間下面只對最佳那個量、回填
-                    log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s")
                 }
 
                 // 「最佳成果」＝對 Auto-逐格 乾淨圖貼譯文（只渲染最佳；另兩個只比去字、不渲染）。
@@ -332,7 +366,7 @@ class MainActivity : AppCompatActivity() {
                 hw.forEach { log(it) }
                 val infoCell = mergeVertical(
                     listOf(
-                        buildTimingTable(pw, (ph * 0.55).toInt(), tDetect, tOcr, tTranslate, timings),
+                        buildTimingTable(pw, (ph * 0.55).toInt(), tDetect, tOcr, tTranslate, timings, peakByMode),
                         buildHwBitmap(hw, pw, (ph * 0.45).toInt()),
                     ),
                 ) // 上表下資訊、合計 ≈ page 高 → 與左側 3 去字格對齊
@@ -658,6 +692,7 @@ class MainActivity : AppCompatActivity() {
         w: Int, h: Int,
         tDetect: Long, tOcr: Long, tTranslate: Long,
         timings: List<Triple<String, Long, Long>>, // name, 去字ms, 排版ms
+        peakKbByMode: List<Long>, // 各模式去字階段「總 PSS」峰值（KB），順序＝timings
     ): Bitmap {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
@@ -665,6 +700,7 @@ class MainActivity : AppCompatActivity() {
         val stages = listOf(
             "偵測" to "Detect", "辨識" to "OCR", "翻譯" to "Translate",
             "去字" to "Inpaint", "排版" to "Render", "整張" to "Total",
+            "記憶體" to "Mem MB", // 去字階段總 PSS 峰值（非時間，故 fmt 不同）
         )
         val cols = 1 + timings.size
         val rowsN = 1 + stages.size
@@ -707,7 +743,8 @@ class MainActivity : AppCompatActivity() {
                     2 -> fmt(tTranslate)
                     3 -> fmt(t.second)
                     4 -> fmt(t.third)
-                    else -> fmt(tDetect + tOcr + tTranslate + t.second + t.third)
+                    5 -> fmt(tDetect + tOcr + tTranslate + t.second + t.third)
+                    else -> "%.0f".format((peakKbByMode.getOrNull(i) ?: 0L) / 1024.0) // 記憶體峰值 MB
                 }
                 put(i + 1, si + 1, v, si == 5) // 整張那列粗體
             }

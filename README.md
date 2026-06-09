@@ -27,11 +27,11 @@ The engine exposes one call, `translatePage(page): PageResult` (translated / ski
 
 ![Performance comparison](docs/img/showcase.png)
 
-From the sandbox app: one page taken through the pipeline — detection, confidence threshold, text removal, and the finished typeset — compared across the three text-removal modes (BoxFill, Auto-whole, Auto-tile). The table breaks down each stage's time per mode; the banner records the device, the active settings, and the LLM.
+From the sandbox app: one page taken through the pipeline — detection, confidence threshold, text removal, and the finished typeset — compared across the three text-removal modes (BoxFill, Auto-whole, Auto-tile). The table breaks down each stage's time and the peak memory per mode; the banner records the device, the active settings, and the LLM.
 
 ## Goals
 
-- **Throughput.** A reader should not stall on translation. OCR processes a page's lines concurrently, text removal overlaps the translation network wait, and the download worker translates pages ahead of where you read. A page is roughly 10–16 s on a Snapdragon 8 Gen 3, depending on the text-removal mode.
+- **Throughput.** A reader should not stall on translation. OCR processes a page's lines concurrently, text removal overlaps the translation network wait, and the download worker translates pages ahead of where you read. A page is roughly 10–16 s on a Snapdragon 8 Gen 3, depending on the text-removal mode. The three models run on the CPU; peak memory is about 1.4–1.5 GB on that device — no GPU and nothing close to 16 GB of RAM required.
 - **Configurable, and ready to be public.** Provider, model, API base, key, and language pair are all settings (bring your own key). Models are loaded from a folder you pick, not bundled (bring your own model). About 20 engine parameters are exposed; see [docs/PARAMETERS.md](docs/PARAMETERS.md).
 - **Never make the library worse.** A page is overwritten only when translation succeeds. If a page has no text, or every line fails, or the network drops, the original is kept untouched. Blocks whose translation fails keep their Japanese text instead of being blanked.
 
