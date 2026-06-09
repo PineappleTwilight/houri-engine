@@ -4,9 +4,9 @@
 
 [English](README.md) ｜ 中文
 
-狀態：整條 pipeline 在裝置上跑、驅動 Yakuyomi reader app——下載即翻、邊讀邊翻（即時翻譯）、換去字法免重翻的重繪都能用。第一版公開發佈準備中。
+狀態：整條 pipeline 在裝置上跑、驅動 Yakuyomi reader app——下載即翻、邊讀邊翻（即時翻譯）、換去字法免重翻的重繪都能用。reader 的[第一版公開發佈](https://github.com/joyeli/Yakuyomi/releases/latest)已出。
 
-本 repo 是**引擎**（`yakuyomi-engine`）。reader app 就是 **Yakuyomi**——一個 [mihon](https://github.com/mihonapp/mihon) fork，用 submodule 引入這個引擎，見[儲存庫結構](#儲存庫結構)。
+本 repo 是**引擎**（`yakuyomi-engine`）——翻譯函式庫，不是可安裝的 app。**要 app？** 那是 reader **Yakuyomi**，一個 [mihon](https://github.com/mihonapp/mihon) fork：[**下載簽章 APK**](https://github.com/joyeli/Yakuyomi/releases/latest) 或看它的 [repo](https://github.com/joyeli/Yakuyomi)。這個引擎 repo 以 submodule 引入它,見[儲存庫結構](#儲存庫結構)。
 
 ## 這是什麼
 

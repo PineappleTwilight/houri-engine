@@ -4,9 +4,9 @@ On-device detection, OCR, and text removal (ONNX Runtime) plus cloud-LLM transla
 
 English ｜ [中文](README_zh.md)
 
-Status: the full pipeline runs on-device and drives the Yakuyomi reader app — translate-on-download, read-as-you-go live translation, and cheap re-rendering all work. First public release in preparation.
+Status: the full pipeline runs on-device and drives the Yakuyomi reader app — translate-on-download, read-as-you-go live translation, and cheap re-rendering all work. The reader's [first public release](https://github.com/joyeli/Yakuyomi/releases/latest) is out.
 
-This repo is the **engine** (`yakuyomi-engine`). The reader app — **Yakuyomi** — is a [mihon](https://github.com/mihonapp/mihon) fork that pulls the engine in as a submodule; see [Repository layout](#repository-layout).
+This repo is the **engine** (`yakuyomi-engine`) — the translation library, not an installable app. **Want the app?** It's the reader, **Yakuyomi**, a [mihon](https://github.com/mihonapp/mihon) fork: [**download the signed APK**](https://github.com/joyeli/Yakuyomi/releases/latest) or see its [repo](https://github.com/joyeli/Yakuyomi). This engine repo pulls into it as a submodule; see [Repository layout](#repository-layout).
 
 ## What it is
 
