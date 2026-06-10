@@ -86,12 +86,16 @@ class Detector(
         }
         val small = Bitmap.createBitmap(gray, nw, nh, Bitmap.Config.ARGB_8888)
         val scaled = Bitmap.createScaledBitmap(small, origW, origH, true) // 雙線性，比照 cv2.resize
-        small.recycle()
+        // ★ createScaledBitmap 在「目標尺寸＝來源尺寸」時回傳同一物件（scaled === small）→ 不可先 recycle small，
+        //   否則等於把 scaled 也 recycle 掉、下面 getPixels 會崩（"getPixels on a recycled bitmap"）。
+        //   觸發條件：頁尺寸使 r=min(size/h,size/w)=1.0（如 720×1024、size=1024）→ nw,nh==origW,origH。
+        //   故：先 getPixels，再「只在 scaled 為不同物件時」recycle 它，最後一律 recycle small。
         val th = (cfg.segThreshold * 255f).toInt()
         val px = IntArray(origW * origH)
         scaled.getPixels(px, 0, origW, 0, 0, origW, origH)
+        if (scaled !== small) scaled.recycle()
+        small.recycle()
         for (i in px.indices) px[i] = if ((px[i] and 0xFF) > th) MASK_ON else MASK_OFF
-        scaled.recycle()
         return Bitmap.createBitmap(px, origW, origH, Bitmap.Config.ARGB_8888)
     }
 
