@@ -11,6 +11,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
+/** LLM 一次請求的 token 用量（OpenAI 相容 `usage`）。供統計：成本/用量只記 token，不計價。 */
+data class Usage(val promptTokens: Int, val completionTokens: Int)
+
 /**
  * 雲端 LLM 翻譯（OpenAI 相容）。參數見 [TranslatorConfig]（provider/model/base/lang/temp 皆可設定）。
  *
@@ -39,8 +42,17 @@ class LlmTranslator(
     var lastRaw: String? = null
         private set
 
+    /**
+     * 最近一次 [translate] 請求回報的 token 用量（OpenAI 相容 `usage`；代理/自架未回＝null）。
+     * 每次 [translate] 開頭重置、成功 request 後填入 → 呼叫端（Pipeline）在 translate() 回傳後立即讀，計入 [PageStats]。
+     * 逐頁翻譯在章內循序（跨頁併發未做）⇒ 此單值不會 race。
+     */
+    var lastUsage: Usage? = null
+        private set
+
     override suspend fun translate(queries: List<String>): List<String> {
         if (queries.isEmpty()) return emptyList()
+        lastUsage = null
         return try {
             val raw = request(buildMessages(queries))
             lastRaw = raw.take(220)
@@ -95,8 +107,12 @@ class LlmTranslator(
         client.newCall(req).execute().use { resp ->
             val text = resp.body.string() // okhttp5：body 非空
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
-            JSONObject(text)
-                .getJSONArray("choices").getJSONObject(0)
+            val obj = JSONObject(text)
+            // 擷取 token 用量（非串流＝整包 usage 都在 body；缺欄/代理不回＝視為 0、由呼叫端當未知）。
+            obj.optJSONObject("usage")?.let { u ->
+                lastUsage = Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
+            }
+            obj.getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").getString("content")
         }
     }

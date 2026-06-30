@@ -40,6 +40,8 @@ data class PageStats(
     val inpaintMs: Long,
     val renderMs: Long,
     val wallMs: Long = 0,   // 實際牆鐘時間（去字‖翻譯重疊 ⇒ 通常 < totalMs；省下的＝重疊掉的）
+    val promptTokens: Int = 0,      // 本頁 LLM 請求的 prompt token（無 LLM/代理不回＝0）。供統計：用量只記、不計價。
+    val completionTokens: Int = 0,  // 本頁 LLM 請求的 completion token。
 ) {
     /** 各階段純計算時間之和（不含重疊修正）；實際耗時看 [wallMs]。 */
     val totalMs: Long get() = detectMs + ocrMs + translateMs + inpaintMs + renderMs
@@ -112,6 +114,8 @@ class Pipeline(
         }
 
         var translateMs = 0L
+        var promptTok = 0
+        var completionTok = 0
         if (translator != null) {
             val tTr = System.currentTimeMillis()
             val cht = try {
@@ -121,6 +125,8 @@ class Pipeline(
                 inpaintJob.cancelAndJoin() // 翻譯掛 → 丟棄去字、留原圖（§11；native run 不可中斷，cancel 實為等它跑完再丟）
                 return@coroutineScope PageResult.Failed("translate: ${t.message}")
             }
+            // 擷取本頁 token 用量（translate() 回傳後立即讀，逐頁循序＝不會 race；無 LLM/代理不回＝0）。
+            (translator as? LlmTranslator)?.lastUsage?.let { promptTok = it.promptTokens; completionTok = it.completionTokens }
             textRegions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
             translateMs = System.currentTimeMillis() - tTr
         } else {
@@ -145,7 +151,10 @@ class Pipeline(
             } else {
                 PageResult.Skipped(
                     "全數過濾 對齊$aligned/${textRegions.size}｜回應=${tr?.lastRaw}｜$dbg",
-                    PageStats(lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0),
+                    PageStats(
+                        lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0,
+                        promptTokens = promptTok, completionTokens = completionTok,
+                    ),
                 )
             }
         }
@@ -167,7 +176,10 @@ class Pipeline(
 
         PageResult.Translated(
             finalPage,
-            PageStats(lines.size, regions.size, kept.size, detectMs, ocrMs, translateMs, inpaintMs, renderMs, System.currentTimeMillis() - tWall),
+            PageStats(
+                lines.size, regions.size, kept.size, detectMs, ocrMs, translateMs, inpaintMs, renderMs,
+                System.currentTimeMillis() - tWall, promptTok, completionTok,
+            ),
             PageAnalysis(detection.textMask, textRegions),
         )
     }
