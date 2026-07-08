@@ -4,8 +4,8 @@
 
 repo   = https://github.com/zyddnys/manga-image-translator
 branch = main
-commit = d5a3eee4a7b7b7754b71baa2ee82309dfff468bc
-date   = 2026-05-24
+commit = efdc229de8aa0f3d4051ad97664adc62dd5ac605
+date   = 2026-07-01
 
 # watched paths（最新 layout）：
 #   偵測 = manga_translator/detection/ctd.py (+ ctd_utils/)  ← comic-text-detector
