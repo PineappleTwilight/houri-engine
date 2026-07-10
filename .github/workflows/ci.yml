@@ -30,6 +30,10 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # 引擎的 NCNN 原生層需要 NDK + CMake（externalNativeBuild）；釘住與 engine/build.gradle.kts 一致的版本。
+      - name: Install NDK + CMake
+        run: yes | sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
+
       # Gradle 設定 + 跨 run 快取（用 repo 內 wrapper 的 Gradle 版本）。
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

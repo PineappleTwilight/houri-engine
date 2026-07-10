@@ -2,7 +2,7 @@
 
 English ｜ [中文](README_zh.md)
 
-An on-device manga translation library (Android, Kotlin + ONNX Runtime). Give it a page bitmap, get back a translated page bitmap. Detection, OCR, and text removal run on the device; translation calls a cloud LLM (OpenAI-compatible).
+An on-device manga translation library (Android, Kotlin, NCNN + ONNX Runtime). Give it a page bitmap, get back a translated page bitmap. Detection, OCR, and text removal run on the device (detection and removal on NCNN, OCR on ONNX Runtime); translation calls a cloud LLM (OpenAI-compatible).
 
 The module is reader-agnostic. Its only job is `translatePage(bitmap) -> PageResult`. Overwriting files, markers, resume, and cross-page batching are the caller's responsibility (see [Result handling](#result-handling)). The reader app (the [Yakuyomi](https://github.com/joyeli/Yakuyomi) mihon fork) consumes it via Gradle composite build.
 
@@ -11,14 +11,17 @@ Group: `li.joye.yakuyomi:engine`. Min SDK 26.
 ## Quick start
 
 ```kotlin
-// 1. Point at the three model files on local disk (see Models).
+// 1. Point at the model files on local disk (see Models). Detection and text
+//    removal are NCNN (.param + .bin pairs); OCR is ONNX Runtime (.onnx).
+//    Easiest is to let the engine pick them out of a folder listing:
+val models = ModelSet.resolve(localModelFiles) ?: return // null = not all present
+// or name the files explicitly (NCNN roles take the .param path; the matching
+// .bin must sit alongside it):
 val models = ModelSet(
-    detector  = "/path/comictextdetector.pt.onnx",
-    ocr       = "/path/ocr_48px_ctc.onnx",
-    inpainter = "/path/lama-manga.onnx",
+    detectorNcnn     = "/path/detector_noblk.ncnn.param",
+    ocr              = "/path/ocr_int8.onnx",
+    aotInpainterNcnn = "/path/mit_aot_fixed512.ncnn.param",
 )
-// or let the engine pick them out of a folder listing:
-val models = ModelSet.resolve(localOnnxFiles) ?: return // null = not all present
 
 // 2. Load the OCR alphabet (in the engine assets) and your API key.
 val alphabet: List<String> = assets.open("models/alphabet-all-v5.txt").bufferedReader().readLines()
@@ -38,17 +41,17 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 
 ## Models (BYOM)
 
-The engine ships no model weights. The host supplies three ONNX files plus the OCR alphabet:
+The engine ships no model weights. The host supplies the model files plus the OCR alphabet. Detection and text removal are NCNN (each a `.param` + `.bin` pair — both files required); OCR is ONNX Runtime:
 
-| Role | File (typical name) | What it does | Source |
-|---|---|---|---|
-| detector | `comictextdetector.pt.onnx` | text boxes + stroke mask | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
-| ocr | `ocr_48px_ctc.onnx` | 48px CTC Japanese OCR | manga-image-translator |
-| inpainter | `lama-manga.onnx` | LaMa text removal | [Koharu](https://github.com/mayocream/koharu) |
+| Role | File (typical name) | Backend | What it does | Source |
+|---|---|---|---|---|
+| detector | `detector_noblk.ncnn.param` (+ `.bin`) | NCNN | text boxes + stroke mask | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| ocr | `ocr_int8.onnx` | ONNX Runtime | 48px CTC Japanese OCR, int8 dynamic quantization | manga-image-translator |
+| inpainter | `mit_aot_fixed512.ncnn.param` (+ `.bin`) | NCNN | AOT-GAN text removal | [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-`ModelSet.resolve(files)` maps a flat `(filename, localPath)` listing to the three roles by name (`detect`/`comictext` to detector, `ocr` to ocr, `lama`/`inpaint` to inpainter) and returns `null` if any is missing. Use that as your "ready to translate?" check.
+`ModelSet.resolve(files)` maps a flat `(filename, localPath)` listing to the roles by name and extension (`.param` NCNN: `detect`/`comictext` to detector, `aot` to inpainter; `.onnx` ORT: `ocr` to ocr, plus optional `detect`/`comictext` and `lama`/`aot` fallbacks) and returns `null` if OCR, a detector, or an inpainter is missing. Use that as your "ready to translate?" check.
 
-Paths must be local files, not SAF/content URIs: ORT calls `createSession(path)` into native memory. Don't read weights into the JVM heap with `readBytes()`; the heap is capped around 512 MB regardless of device RAM and will OOM. If the source is SAF, copy to `filesDir` first and pass the path.
+Paths must be local files, not SAF/content URIs: the backends load from the path into native memory. Don't read weights into the JVM heap with `readBytes()`; the heap is capped around 512 MB regardless of device RAM and will OOM. If the source is SAF, copy to `filesDir` first and pass the path.
 
 ## Configuration
 
@@ -57,7 +60,7 @@ Everything is a `data class` with defaults; override only what you need:
 ```kotlin
 val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // drop low-confidence OCR
-    inpainter  = InpainterConfig(method = "auto"),        // "boxfill" | "auto" (+ wholeImage)
+    inpainter  = InpainterConfig(method = "auto_aot"),    // "boxfill" (fast) | "auto_aot" (AI)
     render     = RenderConfig(orientation = TextOrientation.AUTO),
     translator = TranslatorConfig(model = "deepseek-chat", batchSize = 8),
 )
@@ -66,9 +69,9 @@ Yakuyomi.create(models, alphabet, apiKey, config)
 
 The full list, with ranges and the effect of each, is in [`docs/PARAMETERS.md`](../docs/PARAMETERS.md). A few defaults worth knowing:
 
-- `OcrConfig.useXnnpack = false`. Must stay off: XNNPACK miscomputes the 48px CTC model on real hardware and OCR returns empty. The detector and inpainter use XNNPACK fine.
+- `OcrConfig.useXnnpack = false`. Must stay off: XNNPACK miscomputes the 48px CTC model on real hardware and OCR returns empty. OCR is the only ONNX Runtime model; the detector and inpainter run on NCNN.
 - `OcrConfig.concurrent = true`, `concurrency = 8`. OCR recognizes lines in parallel; on an 8-core phone this roughly halves OCR time, with no change to output.
-- `InpainterConfig.method = "auto"`, `wholeImage = true`. Flat-fills clean bubbles and runs one whole-image LaMa pass for text over artwork. `"boxfill"` flat-fills everything (fastest, on-art text becomes a colour block); `"auto"` with `wholeImage = false` runs per-region LaMa (slowest, sharpest).
+- `InpainterConfig.method = "auto_aot"`, `wholeImage = true`. Two flavours of text removal: `"boxfill"` (fast text removal) flat-fills every text region with the nearest background colour — instant, cleanest on flat bubbles, but paints a colour block over busy artwork; `"auto_aot"` (AI text removal, default) flat-fills clean bubbles and rebuilds the background under busy areas with a whole-page AOT-GAN pass (`tileSize = 768`).
 - `RenderConfig.orientation = AUTO`. Follows each region's detected direction, then rotates along the region's skew angle.
 - `TranslatorConfig.provider = "deepseek"`, with `apiBase` and `model`. Any OpenAI-compatible endpoint. `LlmProviders.ALL` carries presets for manga-image-translator's LLM set plus OpenRouter (all OpenAI-compatible; Gemini via its compat endpoint), and `LlmModels.list()` fetches a provider's live model list. See [`docs/PROVIDERS.md`](../docs/PROVIDERS.md).
 
@@ -101,7 +104,7 @@ Per-region resilience is built in: if one bubble fails to translate, the engine 
 
 ## Lifecycle and threading
 
-- `TranslationEngine : AutoCloseable`. `close()` releases the detector/ocr/inpainter ONNX sessions (native memory). Always `use { }` or `close()`.
+- `TranslationEngine : AutoCloseable`. `close()` releases the detector, OCR, and inpainter native sessions (the OCR ONNX Runtime session plus the detector and inpainter NCNN nets). Always `use { }` or `close()`.
 - `translatePage` is `suspend`, one page at a time per instance. It uses coroutines internally (parallel OCR, removal overlapping translation), but don't call it concurrently on a single instance.
 - The input bitmap isn't recycled by the engine. `Translated.page` is a new bitmap.
 
@@ -125,7 +128,7 @@ See [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for the design rationale a
 The factory is the recommended path. For per-stage debugging (a detection overlay, say) you can construct the stages yourself and assemble a `Pipeline`, but then you own their lifecycle:
 
 ```kotlin
-val detector = Detector(models.detector, config.detector)
+val detector = Detector(models.detectorNcnn, config.detector)
 val detection = detector.detect(page)   // lines + textMask, draw your overlay
 // …
 detector.close()                         // close what you create

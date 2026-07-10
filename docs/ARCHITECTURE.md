@@ -9,34 +9,34 @@ How Yakuyomi translates a page, why the project is split the way it is, and how 
 | | On-device (`engine/`, Kotlin) | Desktop (`parity/`, Python) |
 |---|---|---|
 | Role | the product; runs on the phone | a validation harness; runs on a laptop |
-| Stack | Kotlin, ONNX Runtime, Android Canvas | Python, numpy/cv2, onnxruntime, PIL |
+| Stack | Kotlin, NCNN + ONNX Runtime, Android Canvas | Python, numpy/cv2, onnxruntime, PIL |
 | Ships | yes (the library) | no (dev only) |
 | Purpose | translate pages | check the Kotlin port against the reference |
 
-The engine is the deliverable. The parity harness exists because the engine re-implements [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (m-i-t, Python/torch) in Kotlin/ONNX, and that port can't be diffed line for line. The harness runs the same stages in Python so we can confirm "same input, close output" before trusting the Kotlin version. See [`parity/README.md`](../parity/README.md).
+The engine is the deliverable. The parity harness exists because the engine re-implements [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (m-i-t, Python/torch) in Kotlin (NCNN + ONNX Runtime), and that port can't be diffed line for line. The harness runs the same stages in Python so we can confirm "same input, close output" before trusting the Kotlin version. See [`parity/README.md`](../parity/README.md).
 
 ## Per-page data flow
 
 ```
 page bitmap
-  Detector (ONNX)    text lines (rotated quads) + per-pixel stroke mask
-  Ocr (ONNX)         Japanese text per line (48px CTC, greedy decode)
+  Detector (NCNN)    text lines (rotated quads) + per-pixel stroke mask
+  Ocr (ONNX int8)    Japanese text per line (48px CTC, greedy decode)
   Grouping (Kotlin)  lines -> bubble regions (connect, then MST-split; reading order; skew angle)
   Translator (LLM)   target text, one request per page, no rolling context
   TextFilter         decide which regions have a usable translation
-  Inpainter (ONNX)   erase the original text (flat-fill, or LaMa)
+  Inpainter (NCNN)   erase the original text (flat-fill, or AOT-GAN)
   Renderer (Canvas)  draw the translation back (vertical/horizontal, rotated to region angle)
 translated page bitmap
 ```
 
 Each stage in one line:
 
-- **Detector** — comic-text-detector. Letterbox preprocess, ONNX, then boxes (NMS + unclip) and a `seg` stroke mask. Text removal uses the mask so it erases strokes, not solid rectangles.
-- **Ocr** — 48px CTC. Crops each line (perspective-corrected, vertical lines rotated), recognizes it, greedy-decodes against the alphabet, drops lines below `minProb`. Lines run concurrently (see below).
+- **Detector** — comic-text-detector. Letterbox preprocess, NCNN at a fixed 1024, then boxes (NMS + unclip) and a `seg` stroke mask. Text removal uses the mask so it erases strokes, not solid rectangles.
+- **Ocr** — 48px CTC, a dynamically-quantized int8 ONNX model (~3.6× faster than fp32 on ARM, 165→44 MB). Crops each line (perspective-corrected, vertical lines rotated), recognizes it, greedy-decodes against the alphabet, drops lines below `minProb`. Lines run concurrently (see below).
 - **Grouping** — turns lines into bubble-sized regions in two stages: a permissive connect pass, then an MST split that breaks apart neighbours connected only transitively. The split is what stops dense bubbles from merging into one block. It also computes each region's reading order and skew angle.
 - **Translator** — m-i-t's `chatgpt.py` prompt and protocol over an OpenAI-compatible call, one request per page, no cross-page context. A region whose translation fails keeps its source text. The language pair is configurable: target via `toLangName`, source via the OCR model plus a prompt label. Default is Japanese to Traditional Chinese, not hardcoded. Providers are presets, all OpenAI-compatible (Gemini via its compat endpoint), with each provider's model list fetched live — see [PROVIDERS.md](PROVIDERS.md).
 - **TextFilter** — m-i-t's post-translation filter. A region is "usable" when its translation isn't blank, isn't bare digits, doesn't match the filter regex, and isn't identical to the source.
-- **Inpainter** — three modes: `boxfill` (flat-fill the masked area with the local background colour) and `auto` with `wholeImage` either on (one whole-image LaMa pass) or off (per-region LaMa). Auto flat-fills clean bubbles and sends only on-art text to LaMa. Default is auto with `wholeImage` on.
+- **Inpainter** — two modes: `boxfill` (**fast** removal: flat-fill the masked area with the nearest background colour — quick but coarse) and AOT-GAN (**AI** removal, the default: an NCNN whole-image pass at 768 px that reconstructs the background for higher quality). The old per-region (per-tile) path is gone; LaMa is retired.
 - **Renderer** — text-box typesetting, no bubble flood-fill: font auto-sizing, kinsoku line breaks, vertical or horizontal, text colour from the cleaned background luminance, and canvas rotation along the region's skew angle.
 
 `Pipeline.kt` holds the orchestration and the invariant that the page is never overwritten with something worse than the original.
@@ -54,19 +54,20 @@ Three places, for throughput:
 The engine aligns on behaviour, not source. Three layers, tightest first:
 
 1. **Copy verbatim.** Language-independent data: the prompt and protocol, per-stage thresholds and defaults, the config schema, model choice, and processing order. This reuses m-i-t's tuning instead of re-deriving it.
-2. **Match behaviour, implement freely.** The *what* tracks m-i-t; the *how* follows Kotlin/ONNX idioms. Detection post-processing, coordinate inverse-mapping, mask generation, the grouping two-stage, reading order, concurrent translation. The test is "same input, close output".
-3. **Informed divergence, recorded in code.** Platform-forced or deliberate trade-offs: ONNX instead of torch, no CUDA, no rolling translation context, the text-removal mode ladder.
+2. **Match behaviour, implement freely.** The *what* tracks m-i-t; the *how* follows Kotlin/NCNN/ONNX idioms. Detection post-processing, coordinate inverse-mapping, mask generation, the grouping two-stage, reading order, concurrent translation. The test is "same input, close output".
+3. **Informed divergence, recorded in code.** Platform-forced or deliberate trade-offs: NCNN and ONNX instead of torch, no CUDA, no rolling translation context, the two text-removal modes.
 
-Forced rewrites, since everything else is ported as is: torch to ORT `session.run`; cv2/PIL to Bitmap/Canvas/hand-rolled; numpy to Kotlin; async httpx/CLI/YAML to OkHttp, coroutines, and a small config loader; the manga-ocr autoregressive decode; and any CUDA/GPU assumption.
+Forced rewrites, since everything else is ported as is: torch to NCNN or ORT `session.run`; cv2/PIL to Bitmap/Canvas/hand-rolled; numpy to Kotlin; async httpx/CLI/YAML to OkHttp, coroutines, and a small config loader; the manga-ocr autoregressive decode; and any CUDA/GPU assumption.
 
 ## On-device realities
 
 Learned by running on real hardware:
 
-- **XNNPACK miscomputes the OCR model**, so it returns empty text. `OcrConfig.useXnnpack` stays off (CPU only). The detector and inpainter run on XNNPACK fine.
+- **XNNPACK miscomputes the OCR model**, so it returns empty text. `OcrConfig.useXnnpack` stays off (CPU only). OCR is the only ONNX Runtime model now; the detector and inpainter run on NCNN.
 - **Load models off-heap.** `createSession(path)` reads weights into native memory. Reading them into the JVM heap with `readBytes()` hits the per-app heap cap (around 512 MB regardless of device RAM) and OOMs. BYOM copies the picked file to `filesDir` first, then passes the path.
 - **Preprocessing must match the Python export exactly** — resize, normalize, NCHW order. This is the main source of silent divergence, and most of why the parity harness exists.
-- **Inference threads.** Detection and LaMa use a thread count tuned to the device's big cores (six on the Snapdragon 8 Gen 3 test device); adding the slow efficiency cores makes a pass slower, not faster.
+- **Inference threads.** Detection and AOT-GAN inpainting use a thread count tuned to the device's big cores (six on the Snapdragon 8 Gen 3 test device); adding the slow efficiency cores makes a pass slower, not faster.
+- **NCNN is GPU/NPU-ready, but CPU-only for now.** The detector and inpainter run on NCNN with fixed input shapes, so their layers are Vulkan-capable and a GPU backend can be switched on later. An NPU (Hexagon) backend would need int8 QDQ, which the OCR model's dynamic width blocks. CPU is already fast enough (about 5 s/page on the Snapdragon 8 Gen 3), so both stay off.
 
 ## Repo layout
 

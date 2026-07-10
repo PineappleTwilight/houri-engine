@@ -2,33 +2,37 @@
 
 English ｜ [中文](MODELS_zh.md)
 
-The engine ships no model weights. It needs three ONNX files, supplied two ways — manually (bring your own model) or by auto-download from this repo's release. Both land in the same models folder; downstream resolution is identical.
+The engine ships no model weights. It needs three models — a detector, an OCR model, and a text-removal (inpaint) model — supplied two ways: manually (bring your own model) or by auto-download from this repo's release. Two of them run on NCNN and ship as `.param` + `.bin` pairs; OCR is a single int8 ONNX file — five files in all. Both routes land in the same models folder; downstream resolution is identical.
 
 ## The three models
 
-| Role | File | Size | License | Source |
-|---|---|---|---|---|
-| Detection | `comictextdetector.pt.onnx` | ~95 MB | GPL-3.0 | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
-| OCR | `ocr_48px_ctc.onnx` | ~165 MB | GPL-3.0 | exported here from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) weights |
-| Text removal | `lama-manga.onnx` | ~207 MB | GPL-3.0 (base LaMa Apache-2.0) | [Koharu](https://github.com/mayocream/koharu) |
+| Role | Backend | File(s) | Size | License | Source |
+|---|---|---|---|---|---|
+| Detection | NCNN | `detector_noblk.ncnn.param` + `.bin` | ~41 MB | GPL-3.0 | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| OCR | ONNX (int8) | `ocr_int8.onnx` | ~44 MB | GPL-3.0 | exported here from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) weights |
+| Text removal | NCNN | `mit_aot_fixed512.ncnn.param` + `.bin` | ~11 MB | GPL-3.0 | AOT-GAN from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
+
+**v2 backends.** Detection and text removal moved from ONNX Runtime to NCNN (fixed-shape, Vulkan + ARM-NEON; ~2.9× faster detection on device); OCR stays on ONNX Runtime but is now int8 dynamic-quantized (QUInt8 — ~3.6× faster on ARM, 96.7% CTC parity vs fp32, 165 MB → 44 MB). Total on-device weights dropped from ~470 MB to ~92 MB. The NCNN graphs are fixed-shape and Vulkan/NPU-capable — GPU/NPU-ready but not yet enabled; plain CPU is already fast enough (~5 s/page on an SD 8 Gen 3). v1's LaMa inpaint is retired and removed; AOT-GAN (manga-image-translator's inpaint) replaces it.
 
 Exact bytes and checksums are pinned in [`models.json`](../models.json):
 
 ```
-comictextdetector.pt.onnx   94669756  sha256 1a86ace7…071d718f
-ocr_48px_ctc.onnx          164974063  sha256 3019b406…9b2c35d8
-lama-manga.onnx            207482644  sha256 4512adab…876f02a4
+detector_noblk.ncnn.param      18707  sha256 851c33de…c6f72794
+detector_noblk.ncnn.bin     41116904  sha256 e9c9c64f…bfb2b7dd
+ocr_int8.onnx               43625294  sha256 353e68a5…29fa4c5c
+mit_aot_fixed512.ncnn.param    33810  sha256 f21ef860…ee7d32b5
+mit_aot_fixed512.ncnn.bin   11366088  sha256 a52db45e…5e3560b6
 ```
 
 ## Redistribution and licensing
 
-These weights are GPL-3.0 (the base LaMa architecture is Apache-2.0). This project redistributes them under those licenses, with attribution to the sources above, purely as a convenience for auto-download. The OCR model is our own `torch.onnx.export` of manga-image-translator's weights, so there is no upstream ONNX to point at — it is hosted here. If you prefer, obtain the weights yourself from the sources and use bring-your-own-model.
+These weights are all GPL-3.0. This project redistributes them under that license, with attribution to the sources above, purely as a convenience for auto-download. The OCR model is our own int8-quantized ONNX export of manga-image-translator's weights, and the NCNN detector and AOT-GAN inpaint are our own conversions of the upstream weights — there is no upstream distributable to point at, so they are hosted here. If you prefer, obtain the original weights yourself from the sources and use bring-your-own-model.
 
 ## Getting the models
 
-**Auto-download (reader).** The reader fetches all three from this repo's release in one step, verifying each file's sha256 against [`models.json`](../models.json). Same result as bring-your-own-model, just automated.
+**Auto-download (reader).** The reader fetches every file listed in the manifest from this repo's release in one step, verifying each file's sha256 against [`models.json`](../models.json). Same result as bring-your-own-model, just automated.
 
-**Bring your own model (manual).** Put the three `.onnx` files in the models folder you point the app at. They are resolved by name — `detect`/`comictext` → detector, `ocr` → OCR, `lama`/`inpaint` → text removal.
+**Bring your own model (manual).** Put the files in the models folder you point the app at (NCNN roles need both the `.param` and its `.bin`). They are resolved by name and extension — a `.param` matching `detect`/`comictext` → detector, a `.param` matching `aot` → text removal, an `.onnx` matching `ocr` → OCR. Optional ORT fallbacks are still recognised: an `.onnx` matching `detect`/`comictext`, and an `.onnx` matching `lama` for the retired LaMa path.
 
 ## Verification
 

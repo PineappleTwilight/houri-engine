@@ -11,6 +11,7 @@ date   = 2026-07-01
 #   偵測 = manga_translator/detection/ctd.py (+ ctd_utils/)  ← comic-text-detector
 #          模型 comictextdetector.pt.onnx（comic-text-detector 最新版）
 #   OCR  = manga_translator/ocr/  （48px CTC）               ※ M1
+#   去字 = manga_translator/inpainting/  （AOT-GAN）          ← v2 去字模型（AOT-GAN 取代 LaMa）
 #   翻譯 = manga_translator/translators/chatgpt.py           ※ M2（最新版已含）
 #
 # 同步紀律：定期對 watched paths 跑  git diff <此 commit>..main，

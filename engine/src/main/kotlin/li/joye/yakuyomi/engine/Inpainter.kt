@@ -23,15 +23,26 @@ class Inpainter(
     private val cfg: InpainterConfig = InpainterConfig(),
 ) : AutoCloseable {
 
+    // 後端二選一：.param → NCNN AOT（P1、整頁固定 512、手機 CPU 快）；.onnx → ORT（LaMa/AOT 逐格/所有其他方法）。
+    private val useNcnn = modelPath.endsWith(".param")
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession
-    /** 實際生效的 EP（"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log/圖確認。 */
+    private var session: OrtSession? = null
+    private var ncnnHandle: Long = 0L
+    /** 實際生效的後端（"NCNN-CPU"/"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log/圖確認。 */
     val ep: String
 
     init {
-        val opts = OrtSession.SessionOptions()
-        ep = opts.applyEp(cfg.intraThreads, TAG)
-        session = env.createSession(modelPath, opts) // 路徑載入＝native 記憶體、不佔 JVM heap
+        if (useNcnn) {
+            check(NcnnBackend.available) { "NCNN 原生庫未載入，無法用 .param 去字模型" }
+            val bin = modelPath.removeSuffix(".param") + ".bin"
+            ncnnHandle = NcnnBackend.createNet(modelPath, bin, false) // CPU
+            check(ncnnHandle != 0L) { "NCNN AOT 模型載入失敗：$modelPath" }
+            ep = "NCNN-CPU"
+        } else {
+            val opts = OrtSession.SessionOptions()
+            ep = opts.applyEp(cfg.intraThreads, TAG)
+            session = env.createSession(modelPath, opts) // 路徑載入＝native 記憶體、不佔 JVM heap
+        }
     }
 
     suspend fun inpaint(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Bitmap = coroutineScope {
@@ -46,8 +57,23 @@ class Inpainter(
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
 
-        // 標記「壓在畫面上」(lama 重建)的區 → Renderer 給黑字粗白邊（auto 在下方逐區設、boxfill 全白泡不設）
-        if (cfg.method == "lama") regions.forEach { it.onArt = true }
+        // 標記「壓在畫面上」(lama/aot 重建)的區 → Renderer 給黑字粗白邊（auto 在下方逐區設、boxfill 全白泡不設）
+        if (cfg.method == "lama" || cfg.method == "aot") regions.forEach { it.onArt = true }
+
+        if (cfg.method == "aot") {
+            // AOT-GAN 去字（m-i-t 漫畫權重）：全卷積 → 可原生解析度逐格（不像 LaMa 鎖 512 必降採樣）。
+            //   wholeImage=false → 逐格原生（銳、~2s，最佳畫質，桌機 parity 實證勝過 LaMa）；
+            //   wholeImage=true  → 整頁縮 512 一次（~0.4s，最快，但整頁降採樣→字糊，同 LaMa 整頁）。
+            if (cfg.wholeImage) {
+                runWindowAot(page, maskBmp, intArrayOf(0, 0, w, h), native = false)?.let { compositePixels(result, maskPx, it) }
+            } else {
+                for (win in regions.mapNotNull { windowOf(it, w, h) }) {
+                    runWindowAot(page, maskBmp, win, native = true)?.let { compositePixels(result, maskPx, it) }
+                }
+            }
+            maskBmp.recycle()
+            return@coroutineScope result
+        }
 
         if (cfg.method == "boxfill") {
             // 逐區「平塗背景色」（取代就近取色 boxFill）：修大遮罩中心 FILL_REACH 搆不到 → 殘留原文暗痕（紅圈雜訊）。
@@ -62,8 +88,9 @@ class Inpainter(
             maskBmp.recycle()
             return@coroutineScope result
         }
-        if (cfg.method == "auto") {
+        if (cfg.method == "auto" || cfg.method == "auto_aot") {
             // auto：每區用「未膨脹 textMask」量背景——白(均值≥autoWhiteThreshold)且均勻(std<autoStdThreshold)＝對話框
+            //   → 平塗；否則忙碌區跑模型。auto=LaMa 忙碌引擎、auto_aot=AOT 忙碌引擎（session 即對應模型，見 Yakuyomi.create）。
             //   → 平塗背景色（保證無殘留；避開 boxfill 在大遮罩中心因 FILL_REACH 搆不到而留的「中間殘字」）；
             //   否則(臉/頭髮/壓畫面) → lama 逐區重建紋理。對齊桌面 parity/auto_diag.py。
             val px = IntArray(w * h)
@@ -85,12 +112,15 @@ class Inpainter(
                 val busyMaskPx = buildSegMask(busy, textMask, w, h)
                 val busyMaskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 busyMaskBmp.setPixels(busyMaskPx, 0, w, 0, 0, w, h)
+                val useAot = cfg.method == "auto_aot" // 忙碌區去字引擎：auto_aot→AOT（原生逐格/縮512整頁）、auto→LaMa
                 if (cfg.wholeImage) {
-                    runWindow(page, busyMaskBmp, intArrayOf(0, 0, w, h)) // auto整頁：忙碌區整頁一次 lama（快、糊）
+                    val win = intArrayOf(0, 0, w, h) // 整頁：忙碌區一次（lama/aot 皆縮 512，快、糊）
+                    (if (useAot) runWindowAot(page, busyMaskBmp, win, native = false) else runWindow(page, busyMaskBmp, win))
                         ?.let { compositePixels(result, busyMaskPx, it) }
                 } else {
-                    for (win in busy.mapNotNull { windowOf(it, w, h) }) { // auto逐格：每忙碌區一次 lama（慢、銳）
-                        runWindow(page, busyMaskBmp, win)?.let { compositePixels(result, busyMaskPx, it) }
+                    for (win in busy.mapNotNull { windowOf(it, w, h) }) { // 逐格：每忙碌區一次（lama縮512 / aot原生，銳）
+                        (if (useAot) runWindowAot(page, busyMaskBmp, win, native = true) else runWindow(page, busyMaskBmp, win))
+                            ?.let { compositePixels(result, busyMaskPx, it) }
                     }
                 }
                 busyMaskBmp.recycle()
@@ -242,6 +272,23 @@ class Inpainter(
     private class BgStat(val meanLum: Float, val std: Float, val color: Int)
 
     /**
+     * 頁面忙碌度：回傳「非乾淨白泡」（壓在畫面上、std/白度未達 auto 對話框判準）的區數。
+     * 給自適應 tile／路由決策用（判準同 auto：`std<autoStdThreshold && meanLum>=autoWhiteThreshold`＝乾淨、否則忙碌）。
+     * 不跑去字模型、只量背景，可對任一 Inpainter 實例呼叫。
+     */
+    fun busyRegionCount(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Int {
+        val w = page.width; val h = page.height
+        val px = IntArray(w * h); page.getPixels(px, 0, w, 0, 0, w, h)
+        val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
+        var busy = 0
+        for (r in regions) {
+            val s = bgStats(px, tightPx, r, w, h)
+            if (!(s.std < cfg.autoStdThreshold && s.meanLum >= cfg.autoWhiteThreshold)) busy++
+        }
+        return busy
+    }
+
+    /**
      * 區 bbox 內「非文字(背景)」像素的亮度均值+std+平均色。tightPx＝未膨脹 textMask（量得到筆畫間的白）。
      * 白且均勻=對話框(走平塗)、不白或有紋理=臉/壓畫面(走 lama)。對齊 auto_diag.bg_stats。
      */
@@ -337,7 +384,7 @@ class Inpainter(
         val imgTensor = imageToNCHW(crop512, tile)
         val maskTensor = maskTo1CH(mask512, tile)
         return try {
-            session.run(mapOf(INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
+            session!!.run(mapOf(INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
                 val outT = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
                 val res512 = nchwToBitmap(outT, tile)
                 val resWin = Bitmap.createScaledBitmap(res512, ww, wh, true)
@@ -357,6 +404,112 @@ class Inpainter(
             if (maskCropBmp !== maskBmp) maskCropBmp.recycle() // 同上：整窗時別回收輸入遮罩
             mask512.recycle()
         }
+    }
+
+    /**
+     * 對一塊視窗跑一次 AOT-GAN（縮到目標尺寸→推論→放回視窗尺寸）；I/O 契約與 LaMa 不同：
+     * img∈[-1,1] 且洞歸零（m-i-t `img*(1-mask)`）、mask∈{0,1}(1=擦)、輸出∈[-1,1]、input 名 "img"。
+     * @param native true＝原生解析度（尺寸取整到 /8，AOT 全卷積可任意尺寸→線稿保得住）；false＝縮 [cfg.tileSize]（整頁快速用）。
+     */
+    private fun runWindowAot(page: Bitmap, maskBmp: Bitmap, win: IntArray, native: Boolean): WinOut? {
+        val wx0 = win[0]; val wy0 = win[1]; val ww = win[2]; val wh = win[3]
+        // native：尺寸取整到 /8（AOT 全卷積可任意尺寸→原生解析度、線稿不糊）；非 native＝縮 tileSize（整頁快速用）。
+        val tw = if (native) ((ww + 7) / 8) * 8 else cfg.tileSize
+        val th = if (native) ((wh + 7) / 8) * 8 else cfg.tileSize
+        val cropBmp = Bitmap.createBitmap(page, wx0, wy0, ww, wh)
+        val cropScaled = Bitmap.createScaledBitmap(cropBmp, tw, th, true)
+        val maskCropBmp = Bitmap.createBitmap(maskBmp, wx0, wy0, ww, wh)
+        val maskScaled = Bitmap.createScaledBitmap(maskCropBmp, tw, th, false)
+        return try {
+            val resScaled: Bitmap = if (useNcnn) {
+                // NCNN AOT 只在整頁(native=false)路由到這（固定方形 tileSize、同尺寸復用安全）；逐格變尺寸會崩、由 Yakuyomi.create 擋在 ORT。
+                check(tw == th) { "NCNN AOT 需方形輸入，got ${tw}x$th" }
+                val imgChw = aotImageChw(cropScaled, maskScaled, tw, th)
+                val maskArr = maskArr(maskScaled, tw, th)
+                val out = FloatArray(3 * tw * th)
+                val rc = NcnnBackend.inpaintAot(ncnnHandle, imgChw, maskArr, tw, out)
+                check(rc == 0) { "NCNN AOT 推論失敗 rc=$rc" }
+                aotArrToBitmap(out, tw, th)
+            } else {
+                val imgTensor = aotImageTensor(cropScaled, maskScaled, tw, th)
+                val maskTensor = maskToNCHW(maskScaled, tw, th)
+                try {
+                    session!!.run(mapOf(AOT_INPUT_IMAGE to imgTensor, INPUT_MASK to maskTensor)).use { res ->
+                        val outT = res.get(OUT_NAME).orElseThrow { IllegalStateException("缺輸出 $OUT_NAME") } as OnnxTensor
+                        aotOutToBitmap(outT, tw, th)
+                    }
+                } finally {
+                    imgTensor.close()
+                    maskTensor.close()
+                }
+            }
+            val resWin = Bitmap.createScaledBitmap(resScaled, ww, wh, true)
+            val px = IntArray(ww * wh)
+            resWin.getPixels(px, 0, ww, 0, 0, ww, wh)
+            if (resWin !== resScaled) resScaled.recycle()
+            resWin.recycle()
+            WinOut(wx0, wy0, ww, wh, px)
+        } catch (t: Throwable) {
+            Log.w(TAG, "AOT 去字單窗失敗：${t.message}"); null
+        } finally {
+            if (cropBmp !== page) cropBmp.recycle()
+            cropScaled.recycle()
+            if (maskCropBmp !== maskBmp) maskCropBmp.recycle()
+            maskScaled.recycle()
+        }
+    }
+
+    /** AOT 影像的裸 NCHW 陣列 [3*area]：RGB→[-1,1]，遮罩處歸零（m-i-t `img*(1-mask)`）。ORT/NCNN 共用。 */
+    private fun aotImageChw(imgBmp: Bitmap, maskBmp: Bitmap, w: Int, h: Int): FloatArray {
+        val area = w * h
+        val px = IntArray(area); imgBmp.getPixels(px, 0, w, 0, 0, w, h)
+        val mp = IntArray(area); maskBmp.getPixels(mp, 0, w, 0, 0, w, h)
+        val chw = FloatArray(3 * area)
+        for (i in 0 until area) {
+            if ((mp[i] and 0xFF) > 127) continue // 洞＝0（FloatArray 預設 0）
+            val p = px[i]
+            chw[i] = ((p shr 16) and 0xFF) / 127.5f - 1f
+            chw[area + i] = ((p shr 8) and 0xFF) / 127.5f - 1f
+            chw[2 * area + i] = (p and 0xFF) / 127.5f - 1f
+        }
+        return chw
+    }
+
+    /** AOT 影像張量 [1,3,h,w]（ORT 版，包 [aotImageChw]）。 */
+    private fun aotImageTensor(imgBmp: Bitmap, maskBmp: Bitmap, w: Int, h: Int): OnnxTensor =
+        OnnxTensor.createTensor(env, FloatBuffer.wrap(aotImageChw(imgBmp, maskBmp, w, h)), longArrayOf(1, 3, h.toLong(), w.toLong()))
+
+    /** 遮罩的裸陣列 [area]（1=擦）。ORT/NCNN 共用。 */
+    private fun maskArr(bmp: Bitmap, w: Int, h: Int): FloatArray {
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        val m = FloatArray(w * h)
+        for (i in px.indices) m[i] = if ((px[i] and 0xFF) > 127) 1f else 0f
+        return m
+    }
+
+    /** 遮罩張量 [1,1,h,w]（ORT 版，包 [maskArr]）。 */
+    private fun maskToNCHW(bmp: Bitmap, w: Int, h: Int): OnnxTensor =
+        OnnxTensor.createTensor(env, FloatBuffer.wrap(maskArr(bmp, w, h)), longArrayOf(1, 1, h.toLong(), w.toLong()))
+
+    /** AOT 輸出陣列 [3*area]∈[-1,1] → Bitmap（(x+1)*127.5）。ORT/NCNN 共用。 */
+    private fun aotArrToBitmap(arr: FloatArray, w: Int, h: Int): Bitmap {
+        val area = w * h
+        val px = IntArray(area)
+        for (i in 0 until area) {
+            val r = ((arr[i] + 1f) * 127.5f).toInt().coerceIn(0, 255)
+            val g = ((arr[area + i] + 1f) * 127.5f).toInt().coerceIn(0, 255)
+            val b = ((arr[2 * area + i] + 1f) * 127.5f).toInt().coerceIn(0, 255)
+            px[i] = Color.rgb(r, g, b)
+        }
+        return Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    /** AOT 輸出 [1,3,h,w]∈[-1,1] → Bitmap（ORT 版，讀張量後包 [aotArrToBitmap]）。 */
+    private fun aotOutToBitmap(t: OnnxTensor, w: Int, h: Int): Bitmap {
+        val arr = FloatArray(3 * w * h)
+        t.floatBuffer.get(arr, 0, 3 * w * h)
+        return aotArrToBitmap(arr, w, h)
     }
 
     private fun imageToNCHW(bmp: Bitmap, n: Int): OnnxTensor {
@@ -411,12 +564,17 @@ class Inpainter(
     }
 
     override fun close() {
-        session.close()
+        session?.close()
+        if (ncnnHandle != 0L) {
+            NcnnBackend.releaseNet(ncnnHandle)
+            ncnnHandle = 0L
+        }
     }
 
     companion object {
         private const val TAG = "Inpainter"
-        private const val INPUT_IMAGE = "image"
+        private const val INPUT_IMAGE = "image"    // LaMa 影像輸入名
+        private const val AOT_INPUT_IMAGE = "img"  // AOT-GAN 影像輸入名（與 LaMa 不同）
         private const val INPUT_MASK = "mask"
         private const val OUT_NAME = "output"
         private const val FILL_REACH = 64 // box-fill 就近取色：每方向最遠找幾像素的非遮罩背景

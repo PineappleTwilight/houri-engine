@@ -20,38 +20,75 @@ class Detector(
     private val cfg: DetectorConfig = DetectorConfig(),
 ) : AutoCloseable {
 
+    // 後端二選一：.param → NCNN（P2、手機 CPU 比 ORT-XNNPACK 快 ~3.7×）；.onnx → ORT。
+    private val useNcnn = modelPath.endsWith(".param")
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession
-    /** 實際生效的 EP（"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log/圖確認。 */
+    private var session: OrtSession? = null
+    private var ncnnHandle: Long = 0L
+    /** 實際生效的後端（"NCNN-CPU"/"XNNPACK"/"CPU"）；無 adb 時由呼叫端寫進 log/圖確認。 */
     val ep: String
 
     init {
-        val options = OrtSession.SessionOptions()
-        ep = options.applyEp(cfg.intraThreads, TAG)
-        session = env.createSession(modelPath, options) // 從路徑載入＝native 記憶體、不佔 JVM heap
-        Log.i(TAG, "session inputs=${session.inputNames} outputs=${session.outputNames} ep=$ep")
+        if (useNcnn) {
+            check(NcnnBackend.available) { "NCNN 原生庫未載入，無法用 .param 偵測模型" }
+            val bin = modelPath.removeSuffix(".param") + ".bin"
+            ncnnHandle = NcnnBackend.createNet(modelPath, bin, false) // CPU（實測勝 Vulkan）
+            check(ncnnHandle != 0L) { "NCNN 偵測模型載入失敗：$modelPath" }
+            ep = "NCNN-CPU"
+            Log.i(TAG, "NCNN detector loaded $modelPath ep=$ep")
+        } else {
+            val options = OrtSession.SessionOptions()
+            ep = options.applyEp(cfg.intraThreads, TAG)
+            session = env.createSession(modelPath, options) // 從路徑載入＝native 記憶體、不佔 JVM heap
+            Log.i(TAG, "session inputs=${session!!.inputNames} outputs=${session!!.outputNames} ep=$ep")
+        }
     }
 
     fun detect(page: Bitmap): Detection {
         val size = cfg.inputSize
-        val inputName = session.inputNames.first()
-        val pre = ImageOps.toDetectorInput(env, page, size)
-        pre.tensor.use { input ->
-            session.run(mapOf(inputName to input)).use { result ->
-                val area = size * size
-                // det[1,2,H,W] channel 0＝文字行 DB 圖 → 文字框
-                val det = result.get(OUT_DET).orElseThrow {
-                    IllegalStateException("模型缺少輸出 '$OUT_DET'，實際有 ${session.outputNames}")
-                } as OnnxTensor
-                val prob = FloatArray(area)
-                det.floatBuffer.get(prob, 0, area)
-                val lines = linesFromProbMap(prob, size, pre.ratio, page.width, page.height)
-                // seg[1,1,H,W]＝逐像素文字機率 → letterbox 還原 → 原圖尺寸細筆畫二值遮罩（去字用）
-                val textMask = segToMask(result, size, pre.ratio, page.width, page.height)
-                Log.i(TAG, "偵測到 ${lines.size} 個文字行")
-                return Detection(lines, textMask)
+        val area = size * size
+        val prob: FloatArray  // det channel 0＝文字行 DB 圖
+        val segArr: FloatArray // seg[1,1,H,W]＝逐像素文字機率
+        val ratio: Float
+
+        if (useNcnn) {
+            val pre = ImageOps.detectorChw(page, size)
+            val det = FloatArray(2 * area) // ch0=det, ch1=blk 邊界（此處只用 ch0）
+            val seg = FloatArray(area)
+            val rc = NcnnBackend.detect(ncnnHandle, pre.chw, size, det, seg)
+            check(rc == 0) { "NCNN 偵測推論失敗 rc=$rc" }
+            prob = det.copyOfRange(0, area)
+            segArr = seg
+            ratio = pre.ratio
+        } else {
+            val s = session!!
+            val pre = ImageOps.toDetectorInput(env, page, size)
+            pre.tensor.use { input ->
+                s.run(mapOf(s.inputNames.first() to input)).use { result ->
+                    val det = result.get(OUT_DET).orElseThrow {
+                        IllegalStateException("模型缺少輸出 '$OUT_DET'，實際有 ${s.outputNames}")
+                    } as OnnxTensor
+                    val p = FloatArray(area)
+                    det.floatBuffer.get(p, 0, area)
+                    val seg = result.get(OUT_SEG).orElseThrow {
+                        IllegalStateException("模型缺少輸出 '$OUT_SEG'，實際有 ${s.outputNames}")
+                    } as OnnxTensor
+                    val sg = FloatArray(area)
+                    seg.floatBuffer.get(sg, 0, area)
+                    val lines = linesFromProbMap(p, size, pre.ratio, page.width, page.height)
+                    val textMask = segToMask(sg, size, pre.ratio, page.width, page.height)
+                    Log.i(TAG, "偵測到 ${lines.size} 個文字行")
+                    return Detection(lines, textMask)
+                }
             }
+            error("unreachable")
         }
+
+        val lines = linesFromProbMap(prob, size, ratio, page.width, page.height)
+        // seg → letterbox 還原 → 原圖尺寸細筆畫二值遮罩（去字用）
+        val textMask = segToMask(segArr, size, ratio, page.width, page.height)
+        Log.i(TAG, "偵測到 ${lines.size} 個文字行")
+        return Detection(lines, textMask)
     }
 
     /**
@@ -60,18 +97,12 @@ class Detector(
      * 對齊 parity/seg_validate.py（裁 pad → cv2.resize 雙線性 → >segThreshold）。
      */
     private fun segToMask(
-        result: OrtSession.Result,
+        s: FloatArray,
         size: Int,
         ratio: Float,
         origW: Int,
         origH: Int,
     ): Bitmap {
-        val seg = result.get(OUT_SEG).orElseThrow {
-            IllegalStateException("模型缺少輸出 '$OUT_SEG'，實際有 ${session.outputNames}")
-        } as OnnxTensor
-        val area = size * size
-        val s = FloatArray(area)
-        seg.floatBuffer.get(s, 0, area)
         val nw = (origW * ratio).roundToInt().coerceIn(1, size)
         val nh = (origH * ratio).roundToInt().coerceIn(1, size)
         // 有效區轉灰階小圖
@@ -175,7 +206,11 @@ class Detector(
     }
 
     override fun close() {
-        session.close()
+        session?.close()
+        if (ncnnHandle != 0L) {
+            NcnnBackend.releaseNet(ncnnHandle)
+            ncnnHandle = 0L
+        }
     }
 
     companion object {

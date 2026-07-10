@@ -1,33 +1,58 @@
 {
-  "version": "models-v1",
-  "note": "Auto-download manifest for the three ONNX models. ENGINE fetches this (ModelDownloader.fetchManifest), downloads each url into the app's models dir, and verifies sha256. Weights are GPL-3.0 (base LaMa Apache-2.0); see docs/MODELS.md. The url fields point at this repo's GitHub release assets and go live once the repo is public.",
+  "version": "models-v2",
+  "note": "Auto-download manifest. The engine fetches this (ModelDownloader.fetchManifest), downloads each url into the app's models dir, and verifies sha256. v2 switches the on-device backends: NCNN detector + int8 OCR + NCNN AOT-GAN inpaint (replaces v1's ORT detector + fp32 OCR + LaMa) — ~2.9x faster detection, ~3.6x faster OCR, ~5.5x smaller total, GPU/NPU-ready (fixed-shape NCNN, not yet enabled). NCNN roles ship as .param + .bin pairs (both required). Weights are GPL-3.0 (base LaMa retired); see docs/MODELS.md. Urls point at this repo's GitHub release assets.",
   "models": [
     {
       "role": "detector",
-      "name": "comictextdetector.pt.onnx",
-      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v1/comictextdetector.pt.onnx",
-      "size": 94669756,
-      "sha256": "1a86ace74961413cbd650002e7bb4dcec4980ffa21b2f19b86933372071d718f",
+      "backend": "ncnn",
+      "name": "detector_noblk.ncnn.param",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/detector_noblk.ncnn.param",
+      "size": 18707,
+      "sha256": "851c33def760a7c3fb7cb932512b47a7b00798906fb37d00132b0ee4c6f72794",
+      "license": "GPL-3.0",
+      "source": "https://github.com/dmMaze/comic-text-detector"
+    },
+    {
+      "role": "detector",
+      "backend": "ncnn",
+      "name": "detector_noblk.ncnn.bin",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/detector_noblk.ncnn.bin",
+      "size": 41116904,
+      "sha256": "e9c9c64f84a8f5457bc1caf5a5acf917ec1bd24df641ccf22058c5afbfb2b7dd",
       "license": "GPL-3.0",
       "source": "https://github.com/dmMaze/comic-text-detector"
     },
     {
       "role": "ocr",
-      "name": "ocr_48px_ctc.onnx",
-      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v1/ocr_48px_ctc.onnx",
-      "size": 164974063,
-      "sha256": "3019b406dfc7b3dedf3d0a17a8b5f78c4b483712e3acaa3987db078d9b2c35d8",
+      "backend": "onnxruntime",
+      "name": "ocr_int8.onnx",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/ocr_int8.onnx",
+      "size": 43625294,
+      "sha256": "353e68a5506a6b8967905cd9b3c59e67708df1bc6812e105aa54d4e829fa4c5c",
       "license": "GPL-3.0",
-      "source": "https://github.com/zyddnys/manga-image-translator"
+      "source": "https://github.com/zyddnys/manga-image-translator",
+      "note": "48px CTC, int8 dynamic quantization (QUInt8) — ~3.6x faster on ARM, 96.7% CTC parity vs fp32, 165MB -> 44MB."
     },
     {
       "role": "inpainter",
-      "name": "lama-manga.onnx",
-      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v1/lama-manga.onnx",
-      "size": 207482644,
-      "sha256": "4512adab295ee5a5e02ccd1bdf8d45dccbac88309d9cff1532ffd5de876f02a4",
+      "backend": "ncnn",
+      "name": "mit_aot_fixed512.ncnn.param",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/mit_aot_fixed512.ncnn.param",
+      "size": 33810,
+      "sha256": "f21ef860d21a6cdf60dfb1742c08d1c0d98837bceeb2ee3fe9c2dbbeee7d32b5",
       "license": "GPL-3.0",
-      "source": "https://github.com/mayocream/koharu"
+      "source": "https://github.com/zyddnys/manga-image-translator",
+      "note": "AOT-GAN manga inpaint (m-i-t). Fully-convolutional; run at whole-page tile 768 by default."
+    },
+    {
+      "role": "inpainter",
+      "backend": "ncnn",
+      "name": "mit_aot_fixed512.ncnn.bin",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/mit_aot_fixed512.ncnn.bin",
+      "size": 11366088,
+      "sha256": "a52db45eafc1dd2aa4ce9a339c711917fa98fefb31ce4506d4c95e8b5e3560b6",
+      "license": "GPL-3.0",
+      "source": "https://github.com/zyddnys/manga-image-translator"
     }
   ]
 }

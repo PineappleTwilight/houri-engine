@@ -1,6 +1,6 @@
 # Yakuyomi — 漫畫翻譯引擎
 
-偵測、OCR、去字在裝置上跑（ONNX Runtime），翻譯走雲端 LLM。預設日文翻繁體中文，來源與目標語言都可改。
+偵測與去字在裝置上跑（NCNN）、OCR 也在裝置上（ONNX Runtime、int8），翻譯走雲端 LLM。預設日文翻繁體中文，來源與目標語言都可改。
 
 [English](README.md) ｜ 中文
 
@@ -10,16 +10,16 @@
 
 ## 這是什麼
 
-Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime + Canvas），只有翻譯連網：
+Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（偵測與去字走 NCNN、OCR 走 ONNX Runtime、排版走 Canvas），只有翻譯連網：
 
 ```
 頁 bitmap
-  偵測  (ONNX)   文字行框 + 逐像素筆畫遮罩
-  OCR   (ONNX)   每行一次前向  ->  原文
-  分群           把對齊的行併成氣泡區塊
-  翻譯  (LLM)    每頁一個請求、批次、限流
-  去字  (ONNX)   抹掉原文（平塗或 LaMa）
-  排版  (Canvas) 把譯文畫回去
+  偵測  (NCNN)      文字行框 + 逐像素筆畫遮罩
+  OCR   (ONNX·int8) 每行一次前向  ->  原文
+  分群              把對齊的行併成氣泡區塊
+  翻譯  (LLM)       每頁一個請求、批次、限流
+  去字  (NCNN)      抹掉原文（平塗，或 AOT-GAN 重建）
+  排版  (Canvas)    把譯文畫回去
   翻好的 bitmap
 ```
 
@@ -27,26 +27,29 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 ![效能比較](docs/img/showcase.png)
 
-來自 sandbox app：同一頁走過整條 pipeline——偵測、信賴門檻、去字、貼完譯文的成品——並比較三種去字模式（BoxFill、Auto-整頁、Auto-逐格）。表把每個模式各階段的用時與記憶體峰值拆開列出；橫幅記了裝置、生效的設定、跟 LLM。
+來自 sandbox app：同一頁走過整條 pipeline——偵測、去字遮罩、兩種去字模式（含各自偵測到的區塊）、貼完譯文的成品——表把每個階段的用時與記憶體峰值拆開列出；橫幅記了裝置、生效的設定、跟 LLM。
+
+![去字 vs 平塗](docs/img/removal-compare.png)
+
+壓在畫面上的字是難題。平塗（多數疊字翻譯的做法）會在頭髮上塗一塊色塊；Yakuyomi 的 AI 去字會先重建底下的髮絲，再把譯文排上去。
 
 ## 目標
 
-- **吞吐。** reader 不該卡在翻譯上。OCR 把一頁的文字行並發辨識、去字跟翻譯的網路等待重疊跑、下載 worker 在你讀到之前先翻好後面的頁。一頁在 Snapdragon 8 Gen 3 上大約 10–16 秒，視去字方法而定。三顆模型都跑在 CPU 上；該裝置上記憶體峰值約 1.4–1.5 GB——不需要 GPU，更遠不到 16 GB RAM。
+- **吞吐。** reader 不該卡在翻譯上。OCR 走 int8 量化（ARM 上比 fp32 快 ~3.6×）、偵測與去字走 NCNN（手機優化、偵測比 ORT 快 ~2.9×）、去字跟翻譯的網路等待重疊跑、下載 worker 在你讀到之前先翻好後面的頁。一頁在 Snapdragon 8 Gen 3 上大約 **5 秒**。全部跑在 CPU 上；該裝置上記憶體峰值約 1.9–2.1 GB——不需要 GPU，更遠不到 16 GB RAM。NCNN 模型用固定輸入 shape + Vulkan-capable 層，所以 **GPU/NPU-ready，但加速尚未啟用**（CPU 已經夠快）。
 - **可設定，能公開。** 服務商、模型、API base、金鑰、語言對都是設定（自備金鑰）。模型從你選的資料夾載入，不打包進 APK（自備模型）。約 20 個引擎參數可調，見 [docs/PARAMETERS_zh.md](docs/PARAMETERS_zh.md)。
 - **絕不讓書庫變更糟。** 只有翻譯成功才覆蓋該頁。整頁沒文字、整頁翻譯失敗、或網路斷線，原圖原封不動。單一區塊翻譯失敗時保留它的日文，而不是清空。
 
 ## 能做什麼
 
-- **偵測** — comic-text-detector。回傳文字行四邊形，加一張逐像素筆畫遮罩，用來把去字限制在筆畫上。
-- **OCR** — 48px CTC 模型，每行一次前向、貪婪解碼。跑在 CPU 上（XNNPACK 會算錯這個模型）。文字行並發辨識，8 核手機上 OCR 大約砍半。
-- **翻譯** — 雲端 LLM，沿用 manga-image-translator 的行號協定。任何 OpenAI 相容服務商都行；預設選單涵蓋 manga-image-translator 那組（OpenAI、DeepSeek、Gemini、Groq、Qwen、Sakura、自訂）外加 OpenRouter，各家的模型清單即時撈取。預設 DeepSeek。每頁請求在 semaphore 下並發以避開限流。某行翻譯失敗時退回原文，不會弄壞整頁。詳見 [docs/PROVIDERS.md](docs/PROVIDERS_zh.md)。
-- **去字** — 三個模式，拿速度換品質。對話框一律平塗（乾淨、無黃暈），模式之間只差在壓在畫面上的字怎麼處理：
+- **偵測** — comic-text-detector 跑在 NCNN 上（手機優化的 NEON/Winograd kernel，真機比 ORT-XNNPACK 快 ~2.9×）。回傳文字行四邊形，加一張逐像素筆畫遮罩，用來把去字限制在筆畫上。
+- **OCR** — 48px CTC 模型跑在 ONNX Runtime 上，**int8 動態量化**（ARM 快 ~3.6×、對 fp32 有 96.7% CTC parity、大小只剩四分之一）。每行一次前向、貪婪解碼、文字行並發辨識。跑純 CPU MLAS（XNNPACK 會算錯這個模型）。
+- **翻譯** — 雲端 LLM，沿用 manga-image-translator 的行號協定。任何 OpenAI 相容服務商都行；預設選單涵蓋 manga-image-translator 那組（OpenAI、DeepSeek、Gemini、Groq、Qwen、Sakura、自訂）外加 OpenRouter，各家的模型清單即時撈取。預設 DeepSeek。每頁請求在 semaphore 下並發以避開限流。某行翻譯失敗時退回原文，不會弄壞整頁。詳見 [docs/PROVIDERS_zh.md](docs/PROVIDERS_zh.md)。
+- **去字** — NCNN 上兩個模式。對話框一律平塗（乾淨、無黃暈），模式之間只差在壓在畫面上的字怎麼處理：
 
-  | 模式 | 畫面上的字 | 速度 |
+  | 模式 | 做法 | 速度 |
   |---|---|---|
-  | BoxFill | 平塗（變色塊） | 最快 |
-  | Auto-整頁（預設） | 整頁一次 LaMa | 平衡 |
-  | Auto-逐格 | 逐區 LaMa | 最慢、最銳 |
+  | 快速去字（BoxFill） | 就近取背景色平塗（壓畫面會變色塊） | 最快 |
+  | AI 去字（預設） | AOT-GAN 重建字底下的畫面，整頁跑 tile 768 | 較慢、銳——而且藏在翻譯等待底下 |
 
 - **排版** — 文字框排版，直排或橫排，字級自適應、垂直置中、描邊隨字級、行頭禁則、沿傾斜氣泡角度擺放。文字顏色依去字後的背景決定（亮底黑字、暗底白字）。
 - **重繪（analyze | render 切分）** — 翻好的頁會連同它的分析素材一起回傳：文字遮罩，加上帶著原文與譯文的區塊。之後換去字法、重新排版時不必重跑偵測／OCR／LLM——換去字模式、升級品質只花去字 + 排版兩個階段，不耗 token。
@@ -67,12 +70,14 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 權重不 commit、也不打包進 APK。reader 可自動下載，或你手動放進指定的資料夾——出處、雜湊、授權見 [docs/MODELS_zh.md](docs/MODELS_zh.md)。
 
-| 階段 | 模型 | 來源 |
-|---|---|---|
-| 偵測 | comic-text-detector | [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
-| OCR | 48px CTC | 權重來自 [manga-image-translator](https://github.com/zyddnys/manga-image-translator)，在這裡轉成 ONNX |
-| 去字 | LaMa（漫畫微調） | `lama-manga.onnx` 來自 [Koharu](https://github.com/mayocream/koharu)；架構為 [advimman/LaMa](https://github.com/advimman/lama) |
-| 字型 | Noto Sans/Serif CJK、思源 | CJK 算繪（OFL / Apache） |
+| 階段 | 模型 | 後端 | 來源 |
+|---|---|---|---|
+| 偵測 | comic-text-detector（`.ncnn.param`/`.bin`） | NCNN | [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| OCR | 48px CTC，int8 量化（`.onnx`） | ONNX Runtime | 權重來自 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
+| 去字 | AOT-GAN 漫畫 inpaint（`.ncnn.param`/`.bin`） | NCNN | 來自 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
+| 字型 | Noto Sans/Serif CJK、思源 | — | CJK 算繪（OFL / Apache） |
+
+NCNN 角色是 `.param` + `.bin` 成對（兩個都要）。整套約 92 MB。
 
 ## 建置
 
@@ -82,7 +87,7 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 ./gradlew :app-sandbox:assembleDebug
 ```
 
-裝起來，指向放三個 `.onnx` 模型的資料夾，選測試圖，跑診斷或去字比較。reader app（Yakuyomi）在另一個 fork repo。
+裝起來，指向放模型的資料夾（NCNN 偵測與去字成對檔，加 int8 OCR 的 `.onnx`），選測試圖，跑診斷或去字比較。reader app（Yakuyomi）在另一個 fork repo。
 
 ## 設定
 
@@ -90,25 +95,25 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（ONNX Runtime +
 
 ## 與 manga-image-translator 的關係
 
-引擎是純 Kotlin + ONNX Runtime 從頭實作，不含 manga-image-translator 的原始碼。借的是行為——翻譯 prompt 與協定、參數預設、模型選擇與處理順序。細節與分層對齊原則在 [docs/ARCHITECTURE_zh.md](docs/ARCHITECTURE_zh.md)。
+引擎是純 Kotlin 從頭實作，不含 manga-image-translator 的原始碼。借的是行為——翻譯 prompt 與協定、參數預設、模型選擇與處理順序。細節與分層對齊原則在 [docs/ARCHITECTURE_zh.md](docs/ARCHITECTURE_zh.md)。
 
 ## 致謝
 
 - [mihon](https://github.com/mihonapp/mihon) — app fork 的來源（Apache-2.0）
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt 與行為參考
-- [Koharu](https://github.com/mayocream/koharu) — `lama-manga.onnx` 模型與 ONNX 匯出參考
-- [comic-text-detector](https://github.com/dmMaze/comic-text-detector)、[LaMa](https://github.com/advimman/lama) — 模型與架構
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt 與行為參考；OCR 與 AOT-GAN 去字模型權重
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — 文字偵測模型
+- [ncnn](https://github.com/Tencent/ncnn) — 偵測與去字的裝置端推論 runtime
 - Noto Sans/Serif CJK、思源 — 字型
 
 ## 授權
 
-**GPL-3.0** — 見 [LICENSE](LICENSE)。這裡的程式碼是用 Kotlin/ORT 從頭寫的，但移植了 manga-image-translator 的 prompt、參數與分組；作為該 GPL-3.0 專案的衍生，本引擎為 GPL-3.0。
+**GPL-3.0** — 見 [LICENSE](LICENSE)。這裡的程式碼是用 Kotlin 從頭寫的，但移植了 manga-image-translator 的 prompt、參數與分組；作為該 GPL-3.0 專案的衍生，本引擎為 GPL-3.0。
 
 各組件授權：
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0（prompt/協定、偵測/OCR/翻譯行為、文字行分組；48px CTC OCR 模型）
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0（prompt/協定、偵測/OCR/去字行為、文字行分組；48px CTC OCR 模型與 AOT-GAN 去字模型）
 - [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — GPL-3.0（文字偵測模型）
-- [Koharu](https://github.com/mayocream/koharu) — GPL-3.0（`lama-manga.onnx` 去字模型）
-- [LaMa](https://github.com/advimman/lama) — Apache-2.0（去字底層架構）
+- [ncnn](https://github.com/Tencent/ncnn) — BSD-3-Clause（推論 runtime，靜態連結）
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) — MIT（OCR 推論 runtime）
 - [mihon](https://github.com/mihonapp/mihon) — Apache-2.0（reader fork 在另一個產品 repo；Apache-2.0 與 GPL-3.0 相容，故組合後的 app 為 GPL-3.0）
 
-模型權重**不由本專案散布**——自備（見設定說明），從上述來源依各自授權取得。字型未 bundle（系統 CJK fallback）。
+模型權重皆 GPL-3.0，透過本 repo 的 [`models-v2` release](https://github.com/joyeli/yakuyomi-engine/releases/tag/models-v2) **散布**供一鍵自動下載（見 [docs/MODELS_zh.md](docs/MODELS_zh.md)）；也可從上述來源自備。字型未 bundle（系統 CJK fallback）。

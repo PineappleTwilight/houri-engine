@@ -149,18 +149,20 @@ class MainActivity : AppCompatActivity() {
         binding.inpaintCompareButton.isEnabled = false
         val saveLog = binding.genLogSwitch.isChecked
         runSaveImg = binding.genImgSwitch.isChecked
-        val (method, whole, modeLabel) = when (binding.inpaintSpinner.selectedItemPosition) {
-            0 -> Triple("boxfill", true, "boxfill")
-            1 -> Triple("auto", true, "auto整頁")
-            else -> Triple("auto", false, "auto逐格")
+        // 去字方法：整頁 AOT 固定 768（真機 A/B 定案）。boxfill 不用 tile。
+        val (method, modeLabel) = when (binding.inpaintSpinner.selectedItemPosition) {
+            0 -> "boxfill" to "快速去字"
+            else -> "aot" to "AI 去字"
         }
+        val whole = true
+        val tileSize = 768
         val sel = selected.toList() // 快照（鈕已 disable，執行中不變）
         val imgs = sel.map { TEST_IMAGES[it] }
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
             // 方向鎖 AUTO、效能用引擎最優預設（OCR 並發/8、intraThreads 6、RenderConfig 預設 AUTO）→ 只設去字方法。
-            val cfg = EngineConfig(inpainter = InpainterConfig(method = method, wholeImage = whole))
+            val cfg = EngineConfig(inpainter = InpainterConfig(method = method, wholeImage = whole, tileSize = tileSize))
             // 記憶體峰值取樣：背景每 150ms 抽「總 PSS（含 native）」與 native heap，記 max。
             // 量的是 runtime 真峰值（3 顆 ONNX session + ORT 工作記憶體 + bitmap），不是模型檔大小。
             // 要乾淨的「單頁峰值」就只選 1 張圖（多選會累積結果 bitmap 在 UI、把峰值墊高）。
@@ -179,17 +181,34 @@ class MainActivity : AppCompatActivity() {
                 val tree = runTree
                 if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
                 if (imgs.isEmpty()) { log("✗ 請先點縮圖選至少一張測試圖"); return@launch }
-                val detF = findOnnx(tree, "detect", "comictext")
+                // 定案：OCR = int8 動態量化版（已取代 fp32、真機 ARM 3.6× 加速、品質 96.7% parity·記憶體降）。
                 val ocrF = findOnnx(tree, "ocr")
-                val lamaF = findOnnx(tree, "lama")
-                if (detF == null || ocrF == null || lamaF == null) {
-                    log("✗ 模型不齊（需含 detect/ocr/lama 的 3 個 .onnx）"); return@launch
+                val detF = findOnnx(tree, "detect", "comictext") // ORT 偵測：純 NCNN 後選配備援（通常無）
+                val lamaF = findOnnx(tree, "lama") // LaMa 已退役、選配（模型夾通常沒有）
+                val aotF = findOnnx(tree, "aotgan") // AOT 去字（現行主去字；逐格 varying shape ＋ NCNN 關時走這顆）
+                // 定案：偵測 + 整頁去字一律走 NCNN（放進模型夾即用；只 OCR 留 ORT）。逐格去字變動尺寸恆 ORT。
+                val detNcnn = ensureNcnnPair(tree, "detect")
+                val aotNcnn = ensureNcnnPair(tree, "aot")
+                if (ocrF == null) { log("✗ 缺 OCR 模型（ocr .onnx）"); return@launch }
+                if (detNcnn == null && detF == null) {
+                    log("✗ 缺偵測模型（需 detector*.ncnn.param 或 detect .onnx）"); return@launch
+                }
+                if (aotNcnn == null && aotF == null && lamaF == null) {
+                    log("✗ 缺去字模型（需 *aot*.ncnn.param / aotgan.onnx / lama-manga.onnx）"); return@launch
                 }
                 log("▶ 診斷 ${imgs.size} 張｜去字=$modeLabel")
                 log("… 載入模型（首次複製到 filesDir 較久）")
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
-                val models = ModelSet(ensureLocal(detF), ensureLocal(ocrF), ensureLocal(lamaF))
+                log("後端：偵測=${if (detNcnn != null) "NCNN" else "ORT(備援)"}｜整頁去字=${if (aotNcnn != null) "NCNN" else "ORT(備援)"}｜OCR=ORT-int8｜逐格=ORT")
+                val models = ModelSet(
+                    detector = detF?.let { ensureLocal(it) }, // ORT 偵測備援（純 NCNN 後通常 null）
+                    ocr = ensureLocal(ocrF),
+                    inpainter = lamaF?.let { ensureLocal(it) }, // LaMa 選配
+                    aotInpainter = aotF?.let { ensureLocal(it) },
+                    detectorNcnn = detNcnn,
+                    aotInpainterNcnn = aotNcnn,
+                )
                 log("✓ 模型就緒，開跑")
                 Yakuyomi.create(models, alphabet, BuildConfig.DEEPSEEK_API_KEY, cfg, tf).use { engine ->
                     var total = 0L
@@ -241,6 +260,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 把一串同尺寸的格子排成 cols 欄網格（最後一列不足補深灰空格）。用於去字全比較。 */
+    private fun gridOf(cells: List<Bitmap>, cols: Int): Bitmap {
+        val cw = cells.first().width
+        val ch = cells.first().height
+        val blank = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888).also { Canvas(it).drawColor(Color.rgb(24, 24, 24)) }
+        val rows = ArrayList<Bitmap>()
+        var i = 0
+        while (i < cells.size) {
+            val row = (0 until cols).map { cells.getOrNull(i + it) ?: blank }
+            rows.add(mergeHorizontal(row))
+            i += cols
+        }
+        return mergeVertical(rows)
+    }
+
     private fun runInpaintCompare() {
         binding.detectButton.isEnabled = false
         binding.inpaintCompareButton.isEnabled = false
@@ -253,20 +287,19 @@ class MainActivity : AppCompatActivity() {
                 val tree = runTree
                 if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
                 if (imgPath == null) { log("✗ 效能比較需選「單一」張測試圖"); return@launch }
-                val detF = findOnnx(tree, "detect", "comictext")
                 val ocrF = findOnnx(tree, "ocr")
-                val lamaF = findOnnx(tree, "lama")
-                if (detF == null || ocrF == null || lamaF == null) {
-                    log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）"); return@launch
+                val detPath = resolveDetectorPath(tree) // NCNN 優先、ORT 備援
+                if (detPath == null || ocrF == null) {
+                    log("✗ 模型不齊（需偵測 .ncnn.param/.onnx + ocr .onnx）"); return@launch
                 }
                 val orient = TextOrientation.AUTO // 鎖定
-                log("▶ 去背比較 4×2 盤（原圖/偵測/去字遮罩/最佳成果 + 三模式去字+框 + 右下表格資訊）— $imgPath（需連網翻譯）")
+                log("▶ 去字全比較（原圖/偵測/遮罩/最佳成果 + 全去字法 boxfill·auto·AOT + 時間表）— $imgPath（需連網翻譯）")
                 val page = loadAssetBitmap(imgPath)
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
 
                 // 共用前段（3 模式共用、只跑一次）：偵測→OCR→分群→翻譯→過濾；逐階段計時供總表。
-                val detector = Detector(ensureLocal(detF))
+                val detector = Detector(detPath) // NCNN 偵測（.param→NCNN 後端）
                 val tD0 = System.currentTimeMillis()
                 val detection = detector.detect(page)
                 val tDetect = System.currentTimeMillis() - tD0
@@ -293,14 +326,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 log("共用前段：偵測${"%.1f".format(tDetect / 1000.0)}s OCR${"%.1f".format(tOcr / 1000.0)}s 翻譯${"%.1f".format(tTranslate / 1000.0)}s｜${detection.lines.size}行 ${regions.size}區 留${kept.size}")
 
-                // 3 去字模式（LaMa-逐格 移除：實測品質≈Auto-逐格、卻多半分鐘）；泡泡三者都平塗，差別只在忙碌區
+                // 兩門別比較（乾淨泡泡都平塗、差別在忙碌區）：BoxFill（忙碌也平塗）／AOT-整頁（平塗乾淨+AOT整頁忙碌·預設）。
+                // 逐格已移除。去字基底＝NCNN AOT `.param`（boxfill 不跑它、auto_aot 整頁跑它；maskInp buildMask 也不跑模型）。
+                val inpaintBase = resolveInpaintPath(tree) ?: run { log("✗ 缺去字模型（需 *aot*.ncnn.param）"); return@launch }
+                // 去字比較：BoxFill vs AOT-整頁（固定 768·定案）。第三元素＝tileSize。
                 val modes = listOf(
-                    Triple("BoxFill",   "boxfill", true),
-                    Triple("Auto-整頁", "auto",    true),
-                    Triple("Auto-逐格", "auto",    false),
+                    Triple("快速去字", "boxfill", 768),
+                    Triple("AI 去字", "aot", 768),
                 )
                 val renderCfg = RenderConfig(orientation = orient)
-                val lamaPath = ensureLocal(lamaF)
                 val pw = page.width; val ph = page.height
                 fun pageCopy() = page.copy(Bitmap.Config.ARGB_8888, true)
 
@@ -313,7 +347,7 @@ class MainActivity : AppCompatActivity() {
                 // 各模式去字階段「總 PSS」峰值（KB），順序＝modes。涵蓋 Inpainter 建構（載 lama）→ inpaint→close。
                 // 注意：此處 det/ocr 已 close → 只反映「單去字階段」峰值；全 app 三模型同時在的真峰值看 runPipeline。
                 val peakByMode = ArrayList<Long>()
-                for ((name, method, whole) in modes) {
+                for ((name, method, tile) in modes) {
                     regions.forEach { it.onArt = false; it.dbgStd = -1f } // 重置，避免上一輪 stale 顏色/std
                     val peakKb = java.util.concurrent.atomic.AtomicLong(android.os.Debug.getPss())
                     val sampler = launch(Dispatchers.Default) {
@@ -322,7 +356,7 @@ class MainActivity : AppCompatActivity() {
                             kotlinx.coroutines.delay(100)
                         }
                     }
-                    val inp = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
+                    val inp = Inpainter(inpaintBase, InpainterConfig(method = method, wholeImage = true, tileSize = tile))
                     val t0 = System.currentTimeMillis()
                     val cleaned = inp.inpaint(page, kept, detection.textMask)
                     val tInpaint = System.currentTimeMillis() - t0
@@ -331,48 +365,52 @@ class MainActivity : AppCompatActivity() {
                     peakByMode.add(peakKb.get())
                     log("[$name] 去字${"%.1f".format(tInpaint / 1000.0)}s｜記憶體峰值 ${"%.0f".format(peakKb.get() / 1024.0)}MB")
                     cleanByMode.add(cleaned) // 乾淨（不畫框）：最佳那張貼字用
-                    // 本輪路由（onArt/dbgStd）尚未被重置 → 立即在乾淨副本上畫框（綠=boxfill平塗／紅=onArt-lama + s/w 標）。
-                    val en = when (name) { "BoxFill" -> "Flat-fill"; "Auto-整頁" -> "Auto-whole"; else -> "Auto-tile" }
+                    // 本輪路由（onArt/dbgStd）尚未被重置 → 立即在乾淨副本上畫辨識框（markRegions：綠=平塗／紅=onArt-重建 + std）。
                     val marked = cleaned.copy(Bitmap.Config.ARGB_8888, true)
-                        .also { markRegions(it, kept); labelBmp(it, name, en, tInpaint) }
+                        .also { markRegions(it, kept); labelBmp(it, name, if (method == "aot") "768px" else "", tInpaint) }
                     markedByMode.add(marked)
                     timings.add(Triple(name, tInpaint, 0L)) // 排版時間下面只對最佳那個量、回填
                 }
 
-                // 「最佳成果」＝對 Auto-逐格 乾淨圖貼譯文（只渲染最佳；另兩個只比去字、不渲染）。
-                val bestClean = cleanByMode.last()
+                // 「最佳成果」＝對 AI 去字 乾淨圖貼譯文。
+                val bestIdx = modes.indexOfFirst { it.first == "AI 去字" }.takeIf { it >= 0 }
+                    ?: modes.lastIndex
+                val bestClean = cleanByMode[bestIdx]
                 val tR0 = System.currentTimeMillis()
                 val bestRendered = Renderer.render(bestClean, kept, renderCfg, tf)
                 val tRender = System.currentTimeMillis() - tR0
-                timings[timings.lastIndex] = timings.last().copy(third = tRender) // 回填逐格排版時間到總表
-                val tInpaintBest = timings.last().second
-                log("[最佳·Auto-逐格] 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaintBest + tRender) / 1000.0)}s")
+                timings[bestIdx] = timings[bestIdx].copy(third = tRender) // 回填最佳排版時間到總表
+                val tInpaintBest = timings[bestIdx].second
+                log("[最佳·${modes[bestIdx].first}] 排版${"%.1f".format(tRender / 1000.0)}s 整張${"%.1f".format((tDetect + tOcr + tTranslate + tInpaintBest + tRender) / 1000.0)}s")
 
-                // 去字遮罩（Auto-逐格 config）：白＝要擦像素 → 第 1 排 c4 半透明紅疊在原圖上
-                val maskInp = Inpainter(lamaPath, InpainterConfig(method = "auto", wholeImage = false))
+                // 去字遮罩（Auto-逐格 config）：白＝要擦像素 → 半透明紅疊在原圖上
+                val maskInp = Inpainter(inpaintBase, InpainterConfig(method = "auto", wholeImage = false))
                 val removalMask = maskInp.buildMask(page, kept, detection.textMask)
                 maskInp.close()
 
-                // —— 4×2 格盤（每張影像格皆 page 尺寸＝同比例；兩排各 4×page 寬 → 同寬對齊）——
-                // 第 1 排：原圖（乾淨，無路由疊框）・偵測行框・去字遮罩・最佳成果（Auto-逐格 貼字）
-                val r1c1 = pageCopy().also { labelBmp(it, "原圖", "Raw", -1L) }
-                val r1c2 = pageCopy().also { drawLines(it, detection.lines); labelBmp(it, "偵測行框", "Detected lines", -1L) }
-                val r1c3 = overlayMask(page, removalMask, Color.RED).also { labelBmp(it, "去字遮罩", "Removal mask", -1L) }
-                val r1c4 = bestRendered.also { labelBmp(it, "最佳成果·逐格", "Result·tile", -1L) } // 不標秒（時間在右下表）
-                val row1 = mergeHorizontal(listOf(r1c1, r1c2, r1c3, r1c4))
-
-                // 第 2 排：3 去字成果（各帶本模式路由框＋去字秒）＋右下格（時間總表 + 硬體/設定資訊上下堆疊）
+                // —— 網格（2 選項專用排版：6 圖格 2×3 無留白 + 資訊列橫向鋪滿在底）——
+                // 序 row1：原圖・偵測行框・去字遮罩／row2：快速去字・AI去字（各含辨識框）・最佳成果／底：時間表+硬體
                 val hw = hwInfoLines()
                 hw.forEach { log(it) }
-                val infoCell = mergeVertical(
+                val imgCells = listOf(
+                    pageCopy().also { labelBmp(it, "原圖", "Raw", -1L) },
+                    pageCopy().also { drawLines(it, detection.lines); labelBmp(it, "偵測行框", "Detected lines", -1L) },
+                    overlayMask(page, removalMask, Color.RED).also { labelBmp(it, "去字遮罩", "Removal mask", -1L) },
+                ) + markedByMode + listOf(
+                    bestRendered.also { labelBmp(it, "最佳·${modes[bestIdx].first}", "Result", -1L) },
+                )
+                val imgGrid = gridOf(imgCells, 3) // 6 格 → 2×3、無空白格
+                // 資訊列：時間表 + 硬體並排、合寬＝3 格（鋪滿 grid 寬、消除底部留白）
+                val gridW = pw * 3
+                val infoH = (ph * 0.62).toInt()
+                val infoW1 = gridW / 2
+                val infoStrip = mergeHorizontal(
                     listOf(
-                        buildTimingTable(pw, (ph * 0.55).toInt(), tDetect, tOcr, tTranslate, timings, peakByMode),
-                        buildHwBitmap(hw, pw, (ph * 0.45).toInt()),
+                        buildTimingTable(infoW1, infoH, tDetect, tOcr, tTranslate, timings, peakByMode),
+                        buildHwBitmap(hw, gridW - infoW1, infoH),
                     ),
-                ) // 上表下資訊、合計 ≈ page 高 → 與左側 3 去字格對齊
-                val row2 = mergeHorizontal(listOf(markedByMode[0], markedByMode[1], markedByMode[2], infoCell))
-
-                val big = mergeVertical(listOf(row1, row2))
+                )
+                val big = mergeVertical(listOf(imgGrid, infoStrip))
                 val cmpName = "${runStamp}_inpaintcmp.png"
                 runCatching {
                     tree.findFile(cmpName)?.delete()
@@ -380,8 +418,8 @@ class MainActivity : AppCompatActivity() {
                         contentResolver.openOutputStream(uri)?.use { big.compress(Bitmap.CompressFormat.PNG, 100, it) }
                     }
                 }
-                log("去背比較完成（原圖/偵測/去字遮罩/最佳成果 + 三模式去字+框 + 右下表格資訊）→ 已存圖")
-                addImage("去背比較（原圖/偵測/去字遮罩/最佳成果 + 三模式去字+框 + 右下表格資訊）", big)
+                log("去字全比較完成（全去字法 boxfill/auto/AOT + 遮罩 + 最佳成果 + 時間表）→ 已存圖")
+                addImage("去字全比較（boxfill/auto/AOT + 遮罩 + 最佳成果 + 時間表）", big)
             } catch (t: Throwable) {
                 Log.e(TAG, "去背比較失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
@@ -410,19 +448,22 @@ class MainActivity : AppCompatActivity() {
         binding.inpaintCompareButton.isEnabled = false
         binding.repoDemoButton.isEnabled = false
         val imgPath = selected.firstOrNull()?.let { TEST_IMAGES[it] }
-        // 展示圖固定用 Auto-逐格（最銳、最佳品質；一次性、慢無妨）→ 不吃下拉、免每次記得選。BoxFill 永遠當對比。
-        val method = "auto"; val whole = false; val modeLabel = "Auto-tile（逐格）"
+        // 展示圖固定用 AI 去字（AOT·NCNN·定案主去字）→ 不吃下拉、免每次記得選。BoxFill 永遠當對比。
+        val method = "aot"; val whole = true; val modeLabel = "AI 去字"
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
             try {
                 val tree = runTree ?: run { log("✗ 請先按「選擇模型資料夾」"); return@launch }
                 if (imgPath == null) { log("✗ repo demo 需選「單一」張測試圖"); return@launch }
-                val detF = findOnnx(tree, "detect", "comictext")
                 val ocrF = findOnnx(tree, "ocr")
-                val lamaF = findOnnx(tree, "lama")
-                if (detF == null || ocrF == null || lamaF == null) {
-                    log("✗ 模型不齊（需 detect/ocr/lama 的 3 個 .onnx）"); return@launch
+                val detPath = resolveDetectorPath(tree) // NCNN 優先、ORT 備援
+                val inpaintBase = resolveInpaintPath(tree) // NCNN AOT 優先
+                if (detPath == null || ocrF == null) {
+                    log("✗ 模型不齊（需偵測 .ncnn.param/.onnx + ocr .onnx）"); return@launch
+                }
+                if (inpaintBase == null) {
+                    log("✗ 缺去字模型（需 *aot*.ncnn.param）"); return@launch
                 }
                 log("▶ 產生 repo demo（硬區 4 格：原圖 / BoxFill / Yakuyomi去字 / Yakuyomi翻譯）— $imgPath（去字=$modeLabel，需連網翻譯）")
                 val page = loadAssetBitmap(imgPath)
@@ -430,7 +471,7 @@ class MainActivity : AppCompatActivity() {
                 val tf = runCatching { Typeface.createFromAsset(assets, FONT) }.getOrNull()
 
                 // 前段：偵測 → OCR → 分群 → 翻譯 → 過濾（與「效能比較」同一套）
-                val detector = Detector(ensureLocal(detF))
+                val detector = Detector(detPath) // NCNN 偵測（.param→NCNN 後端）
                 val detection = detector.detect(page); detector.close()
                 val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
                 ocr.recognize(page, detection.lines); ocr.close()
@@ -443,15 +484,14 @@ class MainActivity : AppCompatActivity() {
                     t.isNotEmpty() && !t.all { it.isDigit() } && !r.sourceText.trim().equals(t, ignoreCase = true)
                 }
                 if (kept.isEmpty()) { log("✗ 全數過濾（無有效譯文）：${translator.lastError}"); return@launch }
-                val lamaPath = ensureLocal(lamaF)
 
                 // BoxFill 去字（對比用＝疊字翻譯的天花板）
                 kept.forEach { it.onArt = false; it.dbgStd = -1f }
-                val bf = Inpainter(lamaPath, InpainterConfig(method = "boxfill", wholeImage = true))
+                val bf = Inpainter(inpaintBase, InpainterConfig(method = "boxfill", wholeImage = true))
                 val cleanBox = bf.inpaint(page, kept, detection.textMask); bf.close()
                 // Yakuyomi 去字（Auto；dbgStd 在此被設定，用來挑硬區）
                 kept.forEach { it.onArt = false; it.dbgStd = -1f }
-                val au = Inpainter(lamaPath, InpainterConfig(method = method, wholeImage = whole))
+                val au = Inpainter(inpaintBase, InpainterConfig(method = method, wholeImage = whole))
                 val cleanAuto = au.inpaint(page, kept, detection.textMask); au.close()
                 // Yakuyomi 翻譯嵌字（在乾淨去字「副本」上貼字 → cleanAuto 本身保持乾淨給第 3 格）
                 val translated = Renderer.render(
@@ -780,6 +820,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun findFile(tree: DocumentFile, contains: String, suffix: String): DocumentFile? =
+        tree.listFiles().firstOrNull { f ->
+            val n = f.name?.lowercase() ?: return@firstOrNull false
+            n.contains(contains) && n.endsWith(suffix)
+        }
+
+
     private suspend fun clearOutputs() = withContext(Dispatchers.Main) {
         binding.logText.text = ""
         // 輸出區第 0 個＝logText，其餘＝上次結果圖/標籤 → 清掉只留 logText（控件區在另一容器，不受影響）
@@ -826,6 +873,24 @@ class MainActivity : AppCompatActivity() {
         return out.absolutePath
     }
 
+    /** NCNN 模型：找 `<key>*.ncnn.param` + 同名 `.bin`，兩者都複製到 filesDir，回本機 .param 路徑（缺任一回 null）。 */
+    private fun ensureNcnnPair(tree: DocumentFile, key: String): String? {
+        val param = findFile(tree, key, ".param") ?: return null
+        val bin = findFile(tree, key, ".bin") ?: return null
+        ensureLocal(bin) // .bin 必須與 .param 同在 filesDir（Detector/Inpainter 由 .param 推 .bin）
+        return ensureLocal(param)
+    }
+
+    /** 偵測模型路徑：NCNN `.param` 優先（定案主後端），無則 ORT `.onnx` 備援；都無回 null。給直接建 Detector 的 dev 工具用。 */
+    private fun resolveDetectorPath(tree: DocumentFile): String? =
+        ensureNcnnPair(tree, "detect") ?: findOnnx(tree, "detect", "comictext")?.let { ensureLocal(it) }
+
+    /** 去字模型路徑：NCNN AOT `.param` 優先（整頁·定案主），無則 ORT aotgan/lama 備援；都無回 null。給直接建 Inpainter 的 dev 工具用。 */
+    private fun resolveInpaintPath(tree: DocumentFile): String? =
+        ensureNcnnPair(tree, "aot")
+            ?: findOnnx(tree, "aotgan")?.let { ensureLocal(it) }
+            ?: findOnnx(tree, "lama")?.let { ensureLocal(it) }
+
     private fun currentTree(): DocumentFile? {
         val s = prefs.getString(PREF_TREE, null) ?: return null
         return runCatching { DocumentFile.fromTreeUri(this, Uri.parse(s)) }.getOrNull()
@@ -842,14 +907,14 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v0.9-repodemo-tile" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
+        private const val BUILD_TAG = "v2.0-ncnn" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
+        // NCNN 推論由引擎 NcnnBackend（libyakuyomi_ncnn）負責；sandbox 不再自帶 benchmark 用的 libncnn_jni。
 
         private const val PREF_TREE = "modelTree"
-        // 去字方式選單（順序＝position：0 BoxFill / 1 Auto-整頁 / 2 Auto-逐格）
+        // 去字兩門別：0 快速去字（BoxFill·就近取色平塗）/ 1 AI 去字（AOT-GAN 重建背景·整頁 768·預設）
         private val INPAINT_MODES = listOf(
-            "BoxFill（高速低質）",
-            "Auto-整頁（速質平均）",
-            "Auto-逐格（低速高質）",
+            "快速去字（極速·低質）",
+            "AI 去字（高品質·預設）",
         )
         // 測試圖（縮圖選單順序＝編號 1..N）
         private val TEST_IMAGES = listOf(

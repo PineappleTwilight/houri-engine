@@ -1,6 +1,6 @@
 # Yakuyomi — manga translation engine
 
-On-device detection, OCR, and text removal (ONNX Runtime) plus cloud-LLM translation. Japanese to Traditional Chinese by default; any source and target language can be set.
+On-device detection and text removal (NCNN) and OCR (ONNX Runtime, int8), plus cloud-LLM translation. Japanese to Traditional Chinese by default; any source and target language can be set.
 
 English ｜ [中文](README_zh.md)
 
@@ -10,15 +10,15 @@ This repo is the **engine** (`yakuyomi-engine`) — the translation library, not
 
 ## What it is
 
-Yakuyomi translates manga pages. Four of the five stages run on the device with ONNX Runtime and Canvas; only translation calls out to a network LLM:
+Yakuyomi translates manga pages. Four of the five stages run on the device (NCNN for detection and text removal, ONNX Runtime for OCR, Canvas for typesetting); only translation calls out to a network LLM:
 
 ```
 page bitmap
-  detect    (ONNX)  text-line boxes + per-pixel stroke mask
-  OCR       (ONNX)  one forward per line  ->  source text
+  detect    (NCNN)   text-line boxes + per-pixel stroke mask
+  OCR       (ONNX·int8)  one forward per line  ->  source text
   group             merge aligned lines into bubble regions
   translate (LLM)   one request per page, batched, rate-limited
-  remove    (ONNX)  erase the original text (flat-fill or LaMa)
+  remove    (NCNN)   erase the original text (flat-fill or AOT-GAN reconstruction)
   typeset   (Canvas) draw the translation back
   translated bitmap
 ```
@@ -27,26 +27,29 @@ The engine exposes one call, `translatePage(page): PageResult` (translated / ski
 
 ![Performance comparison](docs/img/showcase.png)
 
-From the sandbox app: one page taken through the pipeline — detection, confidence threshold, text removal, and the finished typeset — compared across the three text-removal modes (BoxFill, Auto-whole, Auto-tile). The table breaks down each stage's time and the peak memory per mode; the banner records the device, the active settings, and the LLM.
+From the sandbox app: one page taken through the pipeline — detection, removal mask, the two text-removal modes with their detected regions, and the finished typeset — with a table breaking down each stage's time and peak memory, and a banner recording the device, the active settings, and the LLM.
+
+![Text removal vs box-fill](docs/img/removal-compare.png)
+
+Text over artwork is the hard case. A box-fill (what most overlay translators do) smears a colour block over the hair; Yakuyomi's AI removal reconstructs the strands underneath before typesetting the translation.
 
 ## Goals
 
-- **Throughput.** A reader should not stall on translation. OCR processes a page's lines concurrently, text removal overlaps the translation network wait, and the download worker translates pages ahead of where you read. A page is roughly 10–16 s on a Snapdragon 8 Gen 3, depending on the text-removal mode. The three models run on the CPU; peak memory is about 1.4–1.5 GB on that device — no GPU and nothing close to 16 GB of RAM required.
+- **Throughput.** A reader should not stall on translation. OCR runs int8-quantized (~3.6× faster than fp32 on ARM); detection and removal run on NCNN (mobile-tuned, ~2.9× faster than ORT for detection); text removal overlaps the translation network wait; and the download worker translates pages ahead of where you read. A page is roughly **5 s** on a Snapdragon 8 Gen 3. Everything runs on the CPU; peak memory is about 1.9–2.1 GB on that device — no GPU and nothing close to 16 GB of RAM required. The NCNN models use fixed input shapes and Vulkan-capable layers, so they are **GPU/NPU-ready, though acceleration is not yet enabled** (CPU is already fast enough).
 - **Configurable, and ready to be public.** Provider, model, API base, key, and language pair are all settings (bring your own key). Models are loaded from a folder you pick, not bundled (bring your own model). About 20 engine parameters are exposed; see [docs/PARAMETERS.md](docs/PARAMETERS.md).
 - **Never make the library worse.** A page is overwritten only when translation succeeds. If a page has no text, or every line fails, or the network drops, the original is kept untouched. Blocks whose translation fails keep their Japanese text instead of being blanked.
 
 ## What it can do
 
-- **Detection** — comic-text-detector. Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.
-- **OCR** — a 48px CTC model, one forward per line, decoded greedily. Runs on CPU (XNNPACK miscomputes this model). Lines are recognized concurrently, which on an 8-core phone cuts OCR roughly in half.
+- **Detection** — comic-text-detector on NCNN (mobile-tuned NEON/Winograd kernels, ~2.9× faster than ORT-XNNPACK on device). Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.
+- **OCR** — a 48px CTC model on ONNX Runtime, **int8 dynamic-quantized** (~3.6× faster on ARM, 96.7% CTC parity vs fp32, and a quarter the size). One forward per line, decoded greedily; lines are recognized concurrently. Runs on pure CPU MLAS (XNNPACK miscomputes this model).
 - **Translation** — a cloud LLM with the line-numbered protocol from manga-image-translator. Any OpenAI-compatible provider works; presets cover manga-image-translator's set (OpenAI, DeepSeek, Gemini, Groq, Qwen, Sakura, custom) plus OpenRouter, each with its model list fetched live. DeepSeek by default. Per-page requests run concurrently under a semaphore to avoid rate limits. A failed line falls back to its source text rather than breaking the page. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
-- **Text removal** — three modes, trading speed for quality. Speech bubbles are always flat-filled (clean, no halo); the modes differ only in how text drawn over artwork is handled:
+- **Text removal** — two modes on NCNN. Speech bubbles are always flat-filled (clean, no halo); the modes differ in how text drawn over artwork is handled:
 
-  | Mode | Artwork handling | Speed |
+  | Mode | How | Speed |
   |---|---|---|
-  | BoxFill | flat-fill (becomes a colour block) | fastest |
-  | Auto-whole (default) | one whole-image LaMa pass | balanced |
-  | Auto-tile | per-region LaMa | slowest, sharpest |
+  | Fast (BoxFill) | flat-fill with the nearest background colour (becomes a colour block over artwork) | fastest |
+  | AI removal (default) | AOT-GAN reconstructs the artwork under the text, whole-page at tile 768 | slower, sharp — and hidden under the translation wait |
 
 - **Typesetting** — text-box layout, vertical or horizontal, with adaptive font size, vertical centering, outline scaled to the font, line-head kinsoku, and tilt-aware placement (text follows a slanted bubble's angle). Text colour is chosen from the cleaned background (black on light, white on dark).
 - **Re-rendering (analyze | render split)** — a translated page comes back with its analysis: the text mask, plus the regions carrying their source and target text. The text-removal method can then be changed and the page re-typeset without re-running detection, OCR, or the LLM — switching removal mode or upgrading quality costs only the removal and typeset stages, no tokens.
@@ -67,12 +70,14 @@ The engine stays reader-agnostic so it can be tested on its own; the app is a re
 
 Weights are not committed and not packed into the APK. The reader can auto-download them, or you supply them manually from a folder you choose — see [docs/MODELS.md](docs/MODELS.md) for sources, checksums, and licensing.
 
-| Stage | Model | Source |
-|---|---|---|
-| Detection | comic-text-detector | [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
-| OCR | 48px CTC | weights from [manga-image-translator](https://github.com/zyddnys/manga-image-translator), exported to ONNX here |
-| Text removal | LaMa (manga fine-tune) | `lama-manga.onnx` from [Koharu](https://github.com/mayocream/koharu); architecture from [advimman/LaMa](https://github.com/advimman/lama) |
-| Fonts | Noto Sans/Serif CJK, Source Han | CJK rendering (OFL / Apache) |
+| Stage | Model | Backend | Source |
+|---|---|---|---|
+| Detection | comic-text-detector (`.ncnn.param`/`.bin`) | NCNN | [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| OCR | 48px CTC, int8-quantized (`.onnx`) | ONNX Runtime | weights from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
+| Text removal | AOT-GAN manga inpaint (`.ncnn.param`/`.bin`) | NCNN | from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
+| Fonts | Noto Sans/Serif CJK, Source Han | — | CJK rendering (OFL / Apache) |
+
+NCNN roles ship as a `.param` + `.bin` pair (both required). The full set is about 92 MB.
 
 ## Building
 
@@ -82,7 +87,7 @@ The engine builds as a standard Android Gradle library. The sandbox app (`:app-s
 ./gradlew :app-sandbox:assembleDebug
 ```
 
-Install it, point it at a folder containing the three `.onnx` models, pick test images, and run a diagnostic or a text-removal comparison. The reader app, Yakuyomi, lives in the separate fork repo.
+Install it, point it at a folder containing the models (the NCNN detector and inpaint pairs plus the int8 OCR `.onnx`), pick test images, and run a diagnostic or a text-removal comparison. The reader app, Yakuyomi, lives in the separate fork repo.
 
 ## Configuration
 
@@ -90,25 +95,25 @@ Every tunable parameter, its range, and the effect of changing it is documented 
 
 ## How it relates to manga-image-translator
 
-The engine is a from-scratch Kotlin + ONNX Runtime implementation. It contains no manga-image-translator source code; what it borrows is behaviour — the translation prompt and protocol, the parameter defaults, the model choice and processing order. The details, and the layered alignment policy, are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The engine is a from-scratch Kotlin implementation. It contains no manga-image-translator source code; what it borrows is behaviour — the translation prompt and protocol, the parameter defaults, the model choice and processing order. The details, and the layered alignment policy, are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Credits
 
 - [mihon](https://github.com/mihonapp/mihon) — the reader the app forks (Apache-2.0)
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt and behaviour reference
-- [Koharu](https://github.com/mayocream/koharu) — the `lama-manga.onnx` model and ONNX-export reference
-- [comic-text-detector](https://github.com/dmMaze/comic-text-detector), [LaMa](https://github.com/advimman/lama) — models and architectures
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt and behaviour reference; the OCR and AOT-GAN inpaint model weights
+- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — the text-detection model
+- [ncnn](https://github.com/Tencent/ncnn) — the on-device inference runtime for detection and removal
 - Noto Sans/Serif CJK, Source Han — fonts
 
 ## License
 
-**GPL-3.0** — see [LICENSE](LICENSE). The code here is written from scratch in Kotlin/ORT, but it ports manga-image-translator's prompts, parameters, and grouping; as a derivative of that GPL-3.0 project, this engine is GPL-3.0.
+**GPL-3.0** — see [LICENSE](LICENSE). The code here is written from scratch in Kotlin, but it ports manga-image-translator's prompts, parameters, and grouping; as a derivative of that GPL-3.0 project, this engine is GPL-3.0.
 
 Component licenses:
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0 (prompt/protocol, detection/OCR/translation behaviour, line grouping; 48px CTC OCR model)
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0 (prompt/protocol, detection/OCR/removal behaviour, line grouping; 48px CTC OCR model and AOT-GAN inpaint model)
 - [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — GPL-3.0 (text-detection model)
-- [Koharu](https://github.com/mayocream/koharu) — GPL-3.0 (`lama-manga.onnx` inpainting model)
-- [LaMa](https://github.com/advimman/lama) — Apache-2.0 (base inpainting architecture)
+- [ncnn](https://github.com/Tencent/ncnn) — BSD-3-Clause (inference runtime, statically linked)
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) — MIT (OCR inference runtime)
 - [mihon](https://github.com/mihonapp/mihon) — Apache-2.0 (reader fork lives in the separate product repo; Apache-2.0 is GPL-3.0-compatible, so the combined app is GPL-3.0)
 
-Model weights are **not redistributed** by this project — bring your own (see setup) and obtain them from the sources above under their respective licenses. Fonts are not bundled (system CJK fallback).
+Model weights are all GPL-3.0 and are **redistributed** through this repo's [`models-v2` release](https://github.com/joyeli/yakuyomi-engine/releases/tag/models-v2) for one-tap auto-download (see [docs/MODELS.md](docs/MODELS.md)); you can also bring your own from the sources above. Fonts are not bundled (system CJK fallback).

@@ -28,6 +28,7 @@ android {
             "\"${apiKeys.getProperty("DEEPSEEK_API_KEY", "")}\"",
         )
         // 只打 arm64-v8a（實機）：砍掉 armeabi-v7a/x86/x86_64 的 ORT native libs ≈ 省 55MB，雲端手動安裝快很多
+        // NCNN 原生層由 :engine 提供（libyakuyomi_ncnn）；sandbox 不再自帶 native build。
         ndk { abiFilters += "arm64-v8a" }
     }
 
@@ -86,4 +87,5 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("androidx.documentfile:documentfile:1.0.1") // SAF 資料夾讀檔
     implementation("androidx.activity:activity-ktx:1.8.2")      // registerForActivityResult / OpenDocumentTree
+    // ORT/NCNN 推論全在 :engine 內；sandbox 只透過引擎介面（Detector/Ocr/Inpainter/Yakuyomi），不直接依賴 runtime。
 }

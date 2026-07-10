@@ -6,8 +6,8 @@ package li.joye.yakuyomi.engine
  * 參考使用者的 m-i-t config_deepseek.json，但**預設值對齊本專案實際使用的模型**：
  *   偵測 = comic-text-detector（非 m-i-t 的 default 偵測器）
  *   OCR  = 48px CTC（非 48px 自回歸）
- *   去字 = Koharu lama-manga.onnx（固定 512；非 lama_large）
- * 因此部分數值與該 config 的 default/48px/lama_large 不同，差異處以註解標出。
+ *   去字 = AOT-GAN（m-i-t inpainting.ckpt，NCNN·整頁 768；LaMa 已退役）
+ * 因此部分數值與該 config 的 default/48px 不同，差異處以註解標出。
  *
  * 設定粒度：§11 v1 全域。標〔設定〕者＝預期在設定頁開放調整（頻繁調，如直/橫排、provider/key/語言）；
  * 未標者＝預設，留可控空間（仍在此結構內），需要時可快速加進設定 UI。
@@ -77,16 +77,17 @@ data class TranslatorConfig(
 )
 
 data class InpainterConfig(
-    // 〔設定〕去字方法（真機實測拍板預設＝lama 整頁：見下）：
-    //   lama+wholeImage＝整頁縮 512 跑一次 LaMa（~6s 去字、~18s/頁）。【預設】從不醜爆（最多輕微暈開），跨整個庫最安全。
-    //   boxfill        ＝取氣泡底色填字區（瞬間、~12s/頁、平/單色泡泡最乾淨）。但多彩/壓在畫面上的字會塗錯色塊＝失敗得很醜，故不當預設。
-    //   lama+逐區       ＝每區各跑一次 LaMa（小泡較銳利，但 N 區＝N× 整頁算力 ⇒ ~81s/頁；大/彩色泡泡仍會糊）。
-    // ※ 不開 concurrency／獨立 session：去字是純 CPU、核數固定，平行切核不增總算力（實測並發≈序列）。逐區慢是「做 N 倍的事」，平行救不了。
-    // 預設 auto：每區判背景——白且均勻＝對話框→平塗背景白（瞬間、保證無殘留）；否則(臉/髮/壓畫面)→lama逐區重建。
-    // 對齊桌面 parity/auto_diag.py（含假名修復、bubble 路由、平塗）。可改 boxfill(全平塗就近取色) / lama(整頁或逐區)。
-    val method: String = "auto",
-    val wholeImage: Boolean = true,   // lama：true＝整頁一次（快）/ false＝逐區（小泡銳利、慢）
-    val tileSize: Int = 512,          // Koharu lama-manga.onnx 固定 512（改了對不上模型）
+    // 〔設定〕去字方法（真機 A/B 拍板＝兩門別；LaMa 已退役、逐格已移除）：
+    //   boxfill＝「快速去字」：取字區就近的背景色平塗（瞬間、平/單色泡泡最乾淨；但壓畫面/多彩會塗錯色塊＝粗糙）。不跑去字模型。
+    //   auto_aot（預設）＝「AI 去字」：乾淨白泡平塗、忙碌區(壓畫面的字)用 AOT-GAN 重建背景，整頁一次（tileSize，見下）。需 [ModelSet.aotInpainterNcnn]（NCNN）或 [aotInpainter]（ORT 備援）。
+    //   aot＝全區都跑 AOT-GAN（含乾淨泡泡、無平塗路由）；同樣需 AOT 模型。
+    //   auto_aot 與 aot 都走 NCNN AOT（整頁固定 tile、Vulkan-capable=GPU/NPU-ready）；去字被翻譯的網路等待蓋住(§8)，故 tile 大小幾乎不加牆鐘。
+    //   （lama/auto＝LaMa 去字，已退役：留 method 相容但需另外提供 lama 模型，否則 Yakuyomi.create loud-error。）
+    // ※ 不開 concurrency／獨立 session：去字是純 CPU、核數固定，平行切核不增總算力（實測並發≈序列）。
+    // 對齊桌面 parity/auto_diag.py（含假名修復、bubble 路由、平塗）。
+    val method: String = "auto_aot",
+    val wholeImage: Boolean = true,   // lama/aot：true＝整頁一次（快）/ false＝逐區（小泡銳利、慢）
+    val tileSize: Int = 768,          // 整頁 AOT 去字解析度。AOT 全卷積·任意尺寸；768＝畫質/記憶體/藏在翻譯下的甜蜜點（真機 A/B 拍板：512 忙碌區糊、1024 記憶體 2× 且貼翻譯天花板）。LaMa(退役)才鎖 512。
     val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（lama 逐區裁窗）
     // 去字遮罩膨脹（半徑 = maskDilate/2）。★關鍵：漫畫在臉/頭髮上的字會描一圈白邊；遮罩太薄只蓋黑筆畫、
     // 白邊留在外面 → boxfill 取到白邊抹成白塊、lama 把白邊當 context 延伸成白塊（兩者都像沒去字）。

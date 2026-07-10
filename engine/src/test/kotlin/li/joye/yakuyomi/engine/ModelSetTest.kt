@@ -20,6 +20,24 @@ class ModelSetTest {
         assertEquals("/m/lama", m.inpainter)
     }
 
+    @Test fun resolvesModelsV2Ncnn() {
+        // models-v2：NCNN 偵測(.param+.bin) + int8 OCR(.onnx) + NCNN AOT 去字(.param+.bin)、無 ORT 偵測/LaMa。
+        val m = ModelSet.resolve(
+            listOf(
+                "detector_noblk.ncnn.param" to "/m/det.param",
+                "detector_noblk.ncnn.bin" to "/m/det.bin",
+                "ocr_int8.onnx" to "/m/ocr",
+                "mit_aot_fixed512.ncnn.param" to "/m/aot.param",
+                "mit_aot_fixed512.ncnn.bin" to "/m/aot.bin",
+            ),
+        )!! // 不可為 null：純 NCNN 去字也要算「去字模型已備齊」
+        assertEquals("/m/det.param", m.detectorNcnn)
+        assertEquals("/m/ocr", m.ocr)
+        assertEquals("/m/aot.param", m.aotInpainterNcnn)
+        assertNull(m.detector)   // 無 ORT 偵測
+        assertNull(m.inpainter)  // 無 LaMa
+    }
+
     @Test fun caseInsensitive() {
         val m = ModelSet.resolve(listOf("DETECT.onnx" to "d", "OCR.onnx" to "o", "LaMa.onnx" to "l"))!!
         assertEquals("d", m.detector)

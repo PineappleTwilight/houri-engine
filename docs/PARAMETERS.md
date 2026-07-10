@@ -32,25 +32,24 @@ The provider is a preset picker: manga-image-translator's LLM set (OpenAI, DeepS
 ## Text removal
 
 ### Method
-Dropdown, default **Auto-whole**. Three modes, all of which flat-fill speech bubbles cleanly. They differ only in how text drawn over artwork is erased:
+Dropdown, default **AI removal**. Two modes, both of which flat-fill speech bubbles cleanly. They differ only in how text drawn over artwork is erased:
 
-- **BoxFill** — flat-fills everything. Fastest (about half a second a page). Text over artwork becomes a flat colour block, so it only looks good on pages that are almost all clean white bubbles.
-- **Auto-whole** — flat-fills bubbles, then runs one whole-image LaMa pass to reconstruct the artwork behind on-art text. Balanced; the default.
-- **Auto-tile** — flat-fills bubbles, then runs LaMa once per on-art region at full resolution. Sharpest, but roughly ten times slower than Auto-whole.
+- **Fast removal (BoxFill)** — flat-fills everything, sampling the nearest surrounding colour. Fastest (about half a second a page), but rough: text over artwork becomes a flat colour block, so it only looks good on pages that are almost all clean white bubbles.
+- **AI removal (AOT-GAN)** — flat-fills bubbles, then runs one whole-image AOT-GAN pass to reconstruct the artwork behind on-art text. High quality; the default.
 
-Why there is no "LaMa-only" mode: running a clean white bubble through LaMa is pure downside (a faint halo plus the cost), so bubbles are always flat-filled.
+Why bubbles are always flat-filled: running a clean white bubble through the inpainter is pure downside (a faint halo plus the cost), so only text drawn over artwork is reconstructed.
 
 ### Auto bubble threshold (autoStdThreshold)
-Default 6. Range 0–30 (practical 2–20). In the auto modes, a region is treated as a clean bubble (flat-filled) when its background brightness varies less than this and is light enough; otherwise it goes to LaMa.
+Default 6. Range 0–30 (practical 2–20). In AI removal, a region is treated as a clean bubble (flat-filled) when its background brightness varies less than this and is light enough; otherwise it goes to the AOT-GAN inpainter.
 
-Lower (toward 2): almost everything routes to LaMa, including clean bubbles, so removal slows down for no gain. Higher (toward 20): almost nothing routes to LaMa, so text over artwork gets flat-filled into a colour block.
+Lower (toward 2): almost everything routes to the AOT-GAN inpainter, including clean bubbles, so removal slows down for no gain. Higher (toward 20): almost nothing routes to the inpainter, so text over artwork gets flat-filled into a colour block.
 
 The default is low because the engine measures this variance on tight glyph quads, where it reads a few points lower than a desktop check would. Clean bubbles sit around 2–3; text over walls and buildings around 6–10; faces and hair 20 and up.
 
 ### Auto white threshold (autoWhiteThreshold)
 Default 190. Range 0–255. The brightness a region's background must reach to count as a speech bubble (used together with the bubble threshold above).
 
-Lower: dark backgrounds can be mistaken for bubbles and get flat-filled when they should be reconstructed. Higher (toward 255): only pure white counts, so off-white bubbles get sent to LaMa and slow things down.
+Lower: dark backgrounds can be mistaken for bubbles and get flat-filled when they should be reconstructed. Higher (toward 255): only pure white counts, so off-white bubbles get sent to the AOT-GAN inpainter and slow things down.
 
 ### Mask padding (bboxPad)
 Default 16, in pixels. Range 0–64. How far the removal area extends past the detected text box, to cover furigana and strokes that sit right on the edge.
@@ -95,10 +94,10 @@ Default 0.85. Range 0.3–1.5. An overall multiplier applied after the layout pi
 Both of these list only values up to your CPU's core count. Auto adapts to the device, and is the right choice unless you are benchmarking.
 
 ### OCR concurrency
-Dropdown, default auto (= core count). How many text lines OCR recognizes at once, each on a single thread. OCR strips are small and don't saturate the per-inference threads, so filling the cores with separate lines is faster — measured 8.9 s down to 4.8 s on an 8-core phone. Above the core count there's nothing left to fill, so the list stops there.
+Dropdown, default auto (= core count). How many text lines OCR recognizes at once, each on a single thread. OCR strips are small and don't saturate the per-inference threads, so filling the cores with separate lines is faster — a clear win when a page has many lines. With the int8 OCR model the whole OCR pass now runs in roughly 0.25–1.8 s a page. Above the core count there's nothing left to fill, so the list stops there.
 
 ### Inference threads (intraThreads)
-Dropdown, default auto. Threads per inference for detection and text removal (LaMa). Auto estimates the number of big cores (core count minus two, since most phones pair big and little cores). On the test device, 6 was fastest: it fills the six big cores and leaves out the two slow efficiency cores, which drag the pass down if included (8 threads measured slower than 6). Detection barely changes with thread count; LaMa removal gained about 17%.
+Dropdown, default auto. Threads per inference for detection and text removal (AOT-GAN). Auto estimates the number of big cores (core count minus two, since most phones pair big and little cores). On the test device, 6 was fastest: it fills the six big cores and leaves out the two slow efficiency cores, which drag the pass down if included (8 threads measured slower than 6). Detection barely changes with thread count; AOT-GAN removal gained about 17%.
 
 ---
 

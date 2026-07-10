@@ -9,34 +9,34 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 | | 裝置端（`engine/`，Kotlin） | 桌面（`parity/`，Python） |
 |---|---|---|
 | 角色 | 產品，跑在手機上 | 驗證工具，跑在筆電上 |
-| 技術 | Kotlin、ONNX Runtime、Android Canvas | Python、numpy/cv2、onnxruntime、PIL |
+| 技術 | Kotlin、NCNN + ONNX Runtime、Android Canvas | Python、numpy/cv2、onnxruntime、PIL |
 | 出貨 | 是（library） | 否（開發用） |
 | 用途 | 翻頁 | 拿 Kotlin port 對照參考實作 |
 
-引擎是要交付的東西。桌面 parity 之所以存在，是因為引擎把 [manga-image-translator](https://github.com/zyddnys/manga-image-translator)（m-i-t，Python/torch）用 Kotlin/ONNX 重寫，這種 port 沒辦法逐行 diff。桌面在 Python 跑同樣的階段，讓我們先確認「同輸入、近輸出」，再信任 Kotlin 版。見 [`parity/README_zh.md`](../parity/README_zh.md)。
+引擎是要交付的東西。桌面 parity 之所以存在，是因為引擎把 [manga-image-translator](https://github.com/zyddnys/manga-image-translator)（m-i-t，Python/torch）用 Kotlin（NCNN + ONNX Runtime）重寫，這種 port 沒辦法逐行 diff。桌面在 Python 跑同樣的階段，讓我們先確認「同輸入、近輸出」，再信任 Kotlin 版。見 [`parity/README_zh.md`](../parity/README_zh.md)。
 
 ## 單頁資料流
 
 ```
 頁 bitmap
-  Detector (ONNX)    文字行（旋轉四邊形）+ 逐像素筆畫遮罩
-  Ocr (ONNX)         每行日文（48px CTC，貪婪解碼）
+  Detector (NCNN)    文字行（旋轉四邊形）+ 逐像素筆畫遮罩
+  Ocr (ONNX int8)    每行日文（48px CTC，貪婪解碼）
   Grouping (Kotlin)  行 -> 氣泡區塊（連邊，再 MST 分裂；閱讀序；傾斜角）
   Translator (LLM)   目標語言，每頁一個請求，無滾動上文
   TextFilter         判定哪些區塊有可用的譯文
-  Inpainter (ONNX)   抹掉原文（平塗，或 LaMa）
+  Inpainter (NCNN)   抹掉原文（平塗，或 AOT-GAN）
   Renderer (Canvas)  把譯文畫回去（直/橫排，沿區塊角度旋轉）
 翻好的頁 bitmap
 ```
 
 每階段一句話：
 
-- **Detector** — comic-text-detector。letterbox 前處理、ONNX，產出框（NMS + unclip）跟一張 `seg` 筆畫遮罩。去字用這張遮罩，抹的是筆畫不是方塊。
-- **Ocr** — 48px CTC。把每行裁出來（透視校正、直書行轉正），辨識、對字典貪婪解碼，丟掉低於 `minProb` 的行。文字行並發跑（見下）。
+- **Detector** — comic-text-detector。letterbox 前處理、NCNN（固定 1024），產出框（NMS + unclip）跟一張 `seg` 筆畫遮罩。去字用這張遮罩，抹的是筆畫不是方塊。
+- **Ocr** — 48px CTC，動態量化的 int8 ONNX 模型（ARM 上比 fp32 快約 3.6×、165→44MB）。把每行裁出來（透視校正、直書行轉正），辨識、對字典貪婪解碼，丟掉低於 `minProb` 的行。文字行並發跑（見下）。
 - **Grouping** — 把行併成氣泡大小的區塊，分兩階段：寬鬆的連邊，再用 MST 分裂把只靠傳遞才連起來的鄰居切開。這個分裂就是讓密集氣泡不黏成一塊的關鍵。同時算每個區塊的閱讀序跟傾斜角。
 - **Translator** — m-i-t 的 `chatgpt.py` prompt 與協定，走 OpenAI 相容呼叫，每頁一個請求、無跨頁上文。某區塊翻譯失敗就保留它的原文。語言對可設：目標走 `toLangName`、來源由 OCR 模型加 prompt 標籤決定。預設日翻繁中，不寫死。服務商是預設選單、全 OpenAI 相容（Gemini 走它的 compat 端點），各家的模型清單即時撈取——見 [PROVIDERS.md](PROVIDERS_zh.md)。
 - **TextFilter** — m-i-t 的譯後過濾。一個區塊算「可用」的條件：譯文非空白、非純數字、不命中過濾 regex、且不等於原文。
-- **Inpainter** — 三個模式：`boxfill`（用局部背景色平塗遮罩區）、`auto` 配 `wholeImage` 開（整頁一次 LaMa）或關（逐區 LaMa）。auto 把乾淨泡泡平塗、只把壓在畫面上的字送 LaMa。預設 auto + `wholeImage` 開。
+- **Inpainter** — 兩個門別：`boxfill`（**快速去字**：用就近背景色平塗遮罩區，快但粗糙）跟 AOT-GAN（**AI 去字**，預設：NCNN 整頁一次、768px，重建背景、品質較高）。舊的逐區（逐格）路徑已移除；LaMa 已退役。
 - **Renderer** — 文字框排版，不做氣泡 flood-fill：字級自適應、行頭禁則、直或橫排、文字顏色取去字後背景亮度、畫布沿區塊傾斜角旋轉。
 
 `Pipeline.kt` 管 orchestration，以及「絕不用比原圖更糟的東西覆蓋」這條不變式。
@@ -54,19 +54,20 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 引擎對齊的是行為，不是原始碼。三層，由緊到鬆：
 
 1. **照抄。** 跨語言不變的資料：prompt 與協定、各階段門檻與預設、config schema、模型選擇、處理順序。直接用 m-i-t 的調校，不重推一遍。
-2. **對齊行為、自由實作。** 做「什麼」跟 m-i-t，「怎麼寫」隨 Kotlin/ONNX 慣例。偵測後處理、座標反算、遮罩生成、分群兩階段、閱讀序、並發翻譯。判準是「同輸入、近輸出」。
-3. **知情偏離，在碼裡註記。** 平台逼的或刻意的取捨：ONNX 取代 torch、不用 CUDA、不做滾動上文、去字模式階梯。
+2. **對齊行為、自由實作。** 做「什麼」跟 m-i-t，「怎麼寫」隨 Kotlin/NCNN/ONNX 慣例。偵測後處理、座標反算、遮罩生成、分群兩階段、閱讀序、並發翻譯。判準是「同輸入、近輸出」。
+3. **知情偏離，在碼裡註記。** 平台逼的或刻意的取捨：NCNN 跟 ONNX 取代 torch、不用 CUDA、不做滾動上文、兩個去字門別。
 
-被迫改寫的（其餘照搬）：torch 換 ORT `session.run`；cv2/PIL 換 Bitmap/Canvas/手刻；numpy 換 Kotlin；async httpx/CLI/YAML 換 OkHttp、coroutines、小型 config 載入；manga-ocr 的自回歸 decode；任何 CUDA/GPU 假設。
+被迫改寫的（其餘照搬）：torch 換 NCNN 或 ORT `session.run`；cv2/PIL 換 Bitmap/Canvas/手刻；numpy 換 Kotlin；async httpx/CLI/YAML 換 OkHttp、coroutines、小型 config 載入；manga-ocr 的自回歸 decode；任何 CUDA/GPU 假設。
 
 ## 裝置端的現實
 
 真機跑出來的：
 
-- **XNNPACK 會把 OCR 模型算錯**，吐出空字。`OcrConfig.useXnnpack` 維持關（純 CPU）。偵測器跟去字用 XNNPACK 沒問題。
+- **XNNPACK 會把 OCR 模型算錯**，吐出空字。`OcrConfig.useXnnpack` 維持關（純 CPU）。現在只有 OCR 是 ONNX Runtime 模型；偵測器跟去字都跑 NCNN。
 - **模型載 native 記憶體。** `createSession(path)` 把權重讀進 native；用 `readBytes()` 讀進 JVM heap 會撞到每 app 的 heap 上限（約 512MB，跟裝置 RAM 無關）而 OOM。BYOM 先把選的檔複製到 `filesDir` 再傳路徑。
 - **前處理要跟 Python 匯出完全一致** — resize、normalize、NCHW 順序。這是最大的隱形分歧來源，也是 parity 工具大半的存在理由。
-- **推論執行緒。** 偵測跟 LaMa 用對齊裝置大核數的緒數（測試機 Snapdragon 8 Gen 3 是 6），把慢的小核加進去會讓一次推論更慢而不是更快。
+- **推論執行緒。** 偵測跟 AOT-GAN 去字用對齊裝置大核數的緒數（測試機 Snapdragon 8 Gen 3 是 6），把慢的小核加進去會讓一次推論更慢而不是更快。
+- **NCNN GPU/NPU-ready，但目前純 CPU。** 偵測器跟去字跑 NCNN、輸入是固定 shape，這些層 Vulkan 可跑，所以 GPU 後端日後可以開。NPU（Hexagon）後端需要 int8 QDQ，被 OCR 模型的動態寬度堵住。CPU 目前已經夠快（Snapdragon 8 Gen 3 上約 5 秒／頁），所以兩個都先關著。
 
 ## Repo 結構
 

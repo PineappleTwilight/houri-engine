@@ -17,8 +17,12 @@ internal object ImageOps {
     /** 前處理結果：tensor ＋ 等比縮放比例（原圖座標 ×ratio→letterbox 空間；反算 ÷ratio）。 */
     class DetectorInput(val tensor: OnnxTensor, val ratio: Float)
 
+    /** NCNN 用的前處理結果：裸 NCHW FloatArray（不含 OnnxTensor）＋ 縮放比例。與 [toDetectorInput] 共用同一 [detectorChw]。 */
+    class DetectorInputArray(val chw: FloatArray, val ratio: Float)
+
     /**
-     * comic-text-detector 前處理。
+     * comic-text-detector 前處理核心（letterbox + /255 + NCHW），回裸 chw + ratio。
+     * ORT 與 NCNN 共用此函式 → 保證兩後端前處理逐位元一致（§10 頭號隱形 bug）。
      * ported from manga_translator/detection/ctd.py:preprocess_img
      *           + ctd_utils/utils/imgproc_utils.py:letterbox @ d5a3eee
      *   - 等比縮放 r = min(size/h, size/w)，padding 全加在右/下（上游 dw/2,dh/2 被註解 → 不置中）
@@ -28,7 +32,7 @@ internal object ImageOps {
      * ★ §10「前處理對齊」：createScaledBitmap(bilinear) 近似 cv2.INTER_LINEAR；
      *   padding 在右/下，故座標反算只需 ÷ratio、無偏移。
      */
-    fun toDetectorInput(env: OrtEnvironment, page: Bitmap, size: Int): DetectorInput {
+    fun detectorChw(page: Bitmap, size: Int): DetectorInputArray {
         val r = min(size.toFloat() / page.height, size.toFloat() / page.width)
         val nw = (page.width * r).roundToInt().coerceAtLeast(1)
         val nh = (page.height * r).roundToInt().coerceAtLeast(1)
@@ -51,7 +55,14 @@ internal object ImageOps {
         }
         if (scaled !== page) scaled.recycle()
         canvas.recycle()
+        return DetectorInputArray(chw, r)
+    }
 
+    /** ORT 版：把 [detectorChw] 的 chw 包成 OnnxTensor。 */
+    fun toDetectorInput(env: OrtEnvironment, page: Bitmap, size: Int): DetectorInput {
+        val a = detectorChw(page, size)
+        val chw = a.chw
+        val r = a.ratio
         val tensor = OnnxTensor.createTensor(
             env,
             FloatBuffer.wrap(chw),

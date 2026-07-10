@@ -2,7 +2,7 @@
 
 [English](README.md) ｜ 中文
 
-裝置端漫畫翻譯 library（Android，Kotlin + ONNX Runtime）。給它一張頁 bitmap，回一張翻好的頁 bitmap。偵測、OCR、去字在裝置上跑；翻譯呼叫雲端 LLM（OpenAI 相容）。
+裝置端漫畫翻譯 library（Android，Kotlin、NCNN + ONNX Runtime）。給它一張頁 bitmap，回一張翻好的頁 bitmap。偵測、OCR、去字在裝置上跑（偵測與去字走 NCNN、OCR 走 ONNX Runtime）；翻譯呼叫雲端 LLM（OpenAI 相容）。
 
 這個 module 跟 reader 無關，只做一件事：`translatePage(bitmap) -> PageResult`。覆蓋檔案、標記、續傳、跨頁批次是呼叫端的事（見[結果處理](#結果處理)）。reader app（[Yakuyomi](https://github.com/joyeli/Yakuyomi) mihon fork）用 Gradle composite build 引入。
 
@@ -11,14 +11,15 @@ Group：`li.joye.yakuyomi:engine`。Min SDK 26。
 ## 快速開始
 
 ```kotlin
-// 1. 指向本機三個模型檔（見模型）。
+// 1. 指向本機模型檔（見模型）。偵測與去字走 NCNN（.param + .bin 成對），
+//    OCR 走 ONNX Runtime（.onnx）。最省事是讓引擎從資料夾清單裡挑：
+val models = ModelSet.resolve(localModelFiles) ?: return // null = 沒到齊
+// 或明確指定各檔（NCNN 角色給 .param 路徑，對應的 .bin 要放在旁邊）：
 val models = ModelSet(
-    detector  = "/path/comictextdetector.pt.onnx",
-    ocr       = "/path/ocr_48px_ctc.onnx",
-    inpainter = "/path/lama-manga.onnx",
+    detectorNcnn     = "/path/detector_noblk.ncnn.param",
+    ocr              = "/path/ocr_int8.onnx",
+    aotInpainterNcnn = "/path/mit_aot_fixed512.ncnn.param",
 )
-// 或讓引擎從資料夾清單裡挑：
-val models = ModelSet.resolve(localOnnxFiles) ?: return // null = 沒到齊
 
 // 2. 載 OCR 字典（在引擎 assets 裡）跟你的 API key。
 val alphabet: List<String> = assets.open("models/alphabet-all-v5.txt").bufferedReader().readLines()
@@ -38,17 +39,17 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 
 ## 模型（BYOM）
 
-引擎不帶模型權重。host 提供三個 ONNX 檔加 OCR 字典：
+引擎不帶模型權重。host 提供模型檔加 OCR 字典。偵測與去字走 NCNN（各是 `.param` + `.bin` 一對，兩個都要）；OCR 走 ONNX Runtime：
 
-| 角色 | 檔名（常見） | 做什麼 | 來源 |
-|---|---|---|---|
-| detector | `comictextdetector.pt.onnx` | 文字框 + 筆畫遮罩 | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
-| ocr | `ocr_48px_ctc.onnx` | 48px CTC 日文 OCR | manga-image-translator |
-| inpainter | `lama-manga.onnx` | LaMa 去字 | [Koharu](https://github.com/mayocream/koharu) |
+| 角色 | 檔名（常見） | 後端 | 做什麼 | 來源 |
+|---|---|---|---|---|
+| detector | `detector_noblk.ncnn.param`（+ `.bin`） | NCNN | 文字框 + 筆畫遮罩 | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| ocr | `ocr_int8.onnx` | ONNX Runtime | 48px CTC 日文 OCR，int8 動態量化 | manga-image-translator |
+| inpainter | `mit_aot_fixed512.ncnn.param`（+ `.bin`） | NCNN | AOT-GAN 去字 | [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-`ModelSet.resolve(files)` 把一份扁平的 `(檔名, 本機路徑)` 清單按名字對到三個角色（`detect`/`comictext` 對 detector、`ocr` 對 ocr、`lama`/`inpaint` 對 inpainter），少一個就回 `null`。拿這個當「能翻了嗎？」的檢查。
+`ModelSet.resolve(files)` 把一份扁平的 `(檔名, 本機路徑)` 清單按名字加副檔名對到各角色（`.param` NCNN：`detect`/`comictext` 對 detector、`aot` 對 inpainter；`.onnx` ORT：`ocr` 對 ocr，外加選配的 `detect`/`comictext` 與 `lama`/`aot` 備援），少了 OCR、偵測、或去字任一顆就回 `null`。拿這個當「能翻了嗎？」的檢查。
 
-路徑必須是本機檔，不能是 SAF/content URI：ORT 走 `createSession(path)` 進 native 記憶體。別用 `readBytes()` 把權重讀進 JVM heap；heap 上限約 512MB（跟裝置 RAM 無關）會 OOM。來源是 SAF 的話，先複製到 `filesDir` 再傳路徑。
+路徑必須是本機檔，不能是 SAF/content URI：後端直接從路徑載進 native 記憶體。別用 `readBytes()` 把權重讀進 JVM heap；heap 上限約 512MB（跟裝置 RAM 無關）會 OOM。來源是 SAF 的話，先複製到 `filesDir` 再傳路徑。
 
 ## 設定
 
@@ -57,7 +58,7 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 ```kotlin
 val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // 丟低信心 OCR
-    inpainter  = InpainterConfig(method = "auto"),        // "boxfill" | "auto"（+ wholeImage）
+    inpainter  = InpainterConfig(method = "auto_aot"),    // "boxfill"（快速）| "auto_aot"（AI）
     render     = RenderConfig(orientation = TextOrientation.AUTO),
     translator = TranslatorConfig(model = "deepseek-chat", batchSize = 8),
 )
@@ -66,9 +67,9 @@ Yakuyomi.create(models, alphabet, apiKey, config)
 
 完整清單、值域、各參數的效果在 [`docs/PARAMETERS_zh.md`](../docs/PARAMETERS_zh.md)。幾個值得知道的預設：
 
-- `OcrConfig.useXnnpack = false`。必須關：XNNPACK 在真機上會把 48px CTC 算錯、OCR 吐空。偵測器跟去字用 XNNPACK 沒問題。
+- `OcrConfig.useXnnpack = false`。必須關：XNNPACK 在真機上會把 48px CTC 算錯、OCR 吐空。OCR 是唯一的 ONNX Runtime 模型；偵測器跟去字都跑 NCNN。
 - `OcrConfig.concurrent = true`、`concurrency = 8`。OCR 把文字行並發辨識；8 核手機上 OCR 時間大約砍半，輸出不變。
-- `InpainterConfig.method = "auto"`、`wholeImage = true`。把乾淨泡泡平塗、對壓在畫面上的字跑一次整頁 LaMa。`"boxfill"` 全平塗（最快，畫面上的字變色塊）；`"auto"` 配 `wholeImage = false` 跑逐區 LaMa（最慢、最銳）。
+- `InpainterConfig.method = "auto_aot"`、`wholeImage = true`。去字分兩門別：`"boxfill"`（快速去字）把每個字區用就近的背景色平塗——瞬間、平/單色泡泡最乾淨，但壓在畫面上的字會塗成色塊；`"auto_aot"`（AI 去字，預設）把乾淨泡泡平塗、對忙碌區（壓畫面的字）用整頁一次的 AOT-GAN 重建背景（`tileSize = 768`）。
 - `RenderConfig.orientation = AUTO`。跟著每區塊偵測到的方向，再沿區塊傾斜角旋轉。
 - `TranslatorConfig.provider = "deepseek"`，配 `apiBase` 跟 `model`。任何 OpenAI 相容端點。`LlmProviders.ALL` 內建 manga-image-translator 的 LLM 那組外加 OpenRouter 的預設（全 OpenAI 相容；Gemini 走它的 compat 端點），`LlmModels.list()` 撈服務商的即時模型清單。詳見 [`docs/PROVIDERS_zh.md`](../docs/PROVIDERS_zh.md)。
 
@@ -101,7 +102,7 @@ translator = TranslatorConfig(
 
 ## 生命週期與執行緒
 
-- `TranslationEngine : AutoCloseable`。`close()` 釋放 detector/ocr/inpainter 的 ONNX session（native 記憶體）。一律 `use { }` 或 `close()`。
+- `TranslationEngine : AutoCloseable`。`close()` 釋放 detector、OCR、inpainter 的 native session（OCR 的 ONNX Runtime session 加偵測器與去字的 NCNN net）。一律 `use { }` 或 `close()`。
 - `translatePage` 是 `suspend`，一個實例一次一頁。它內部用 coroutines（並發 OCR、去字跟翻譯重疊），但別在單一實例上並發呼叫。
 - 引擎不回收輸入 bitmap。`Translated.page` 是新的 bitmap。
 
@@ -125,7 +126,7 @@ translator = TranslatorConfig(
 工廠是建議路徑。要逐階段除錯（例如偵測 overlay）可以自己建各階段、自己組 `Pipeline`，但生命週期得自己管：
 
 ```kotlin
-val detector = Detector(models.detector, config.detector)
+val detector = Detector(models.detectorNcnn, config.detector)
 val detection = detector.detect(page)   // 行 + textMask，畫你的 overlay
 // …
 detector.close()                         // 自己建的自己關
