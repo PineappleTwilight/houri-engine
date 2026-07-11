@@ -12,7 +12,7 @@
 | OCR | ONNX（int8） | `ocr_int8.onnx` | ~44 MB | GPL-3.0 | 由 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) 權重在本專案匯出 |
 | 去字 | NCNN | `mit_aot_fixed512.ncnn.param` + `.bin` | ~11 MB | GPL-3.0 | AOT-GAN，出自 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-**v2 後端。** 偵測與去字從 ONNX Runtime 換成 NCNN（固定 shape、Vulkan + ARM-NEON；真機偵測快 ~2.9×）；OCR 仍走 ONNX Runtime，但改成 int8 動態量化（QUInt8——ARM 快 ~3.6×、對 fp32 有 96.7% CTC parity、165 MB → 44 MB）。裝置端權重總量從 ~470 MB 降到 ~92 MB。NCNN 圖是固定 shape、Vulkan/NPU-capable——GPU/NPU-ready 但尚未啟用；純 CPU 已夠快（SD 8 Gen 3 上約 5 秒/頁）。v1 的 LaMa 去字已退役移除，改由 AOT-GAN（manga-image-translator 的 inpaint）取代。
+**v2 後端。** 偵測與去字從 ONNX Runtime 換成 NCNN（固定 shape、Vulkan + ARM-NEON；真機偵測快 ~2.9×）；OCR 仍走 ONNX Runtime，但改成 int8 動態量化（QUInt8——ARM 快 ~3.6×、對 fp32 有 96.7% CTC parity、165 MB → 44 MB）。裝置端權重總量從 ~470 MB 降到 ~92 MB。三顆都跑 CPU——GPU/NPU 試過、對這些模型不管用（NCNN Vulkan 把 AOT-GAN 算成垃圾、LiteRT 編不出來），純 CPU 已夠快（SD 8 Gen 3 上約 5 秒/頁）。v1 的 LaMa 去字已退役移除，改由 AOT-GAN（manga-image-translator 的 inpaint）取代。
 
 精確 bytes 與雜湊釘在 [`models.json`](../models.json)：
 

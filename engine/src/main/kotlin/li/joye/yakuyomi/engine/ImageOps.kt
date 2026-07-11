@@ -1,28 +1,20 @@
 package li.joye.yakuyomi.engine
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import java.nio.FloatBuffer
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
  * 前處理 helper（CLAUDE.md §5 ImageOps：第三層，重寫）。
- * internal：[DetectorInput] 會碰 `OnnxTensor`，不該跨出 library 邊界。
  */
 internal object ImageOps {
 
-    /** 前處理結果：tensor ＋ 等比縮放比例（原圖座標 ×ratio→letterbox 空間；反算 ÷ratio）。 */
-    class DetectorInput(val tensor: OnnxTensor, val ratio: Float)
-
-    /** NCNN 用的前處理結果：裸 NCHW FloatArray（不含 OnnxTensor）＋ 縮放比例。與 [toDetectorInput] 共用同一 [detectorChw]。 */
+    /** NCNN 偵測前處理結果：裸 NCHW FloatArray ＋ 縮放比例（原圖座標 ×ratio→letterbox 空間；反算 ÷ratio）。 */
     class DetectorInputArray(val chw: FloatArray, val ratio: Float)
 
     /**
      * comic-text-detector 前處理核心（letterbox + /255 + NCHW），回裸 chw + ratio。
-     * ORT 與 NCNN 共用此函式 → 保證兩後端前處理逐位元一致（§10 頭號隱形 bug）。
      * ported from manga_translator/detection/ctd.py:preprocess_img
      *           + ctd_utils/utils/imgproc_utils.py:letterbox @ d5a3eee
      *   - 等比縮放 r = min(size/h, size/w)，padding 全加在右/下（上游 dw/2,dh/2 被註解 → 不置中）
@@ -56,18 +48,5 @@ internal object ImageOps {
         if (scaled !== page) scaled.recycle()
         canvas.recycle()
         return DetectorInputArray(chw, r)
-    }
-
-    /** ORT 版：把 [detectorChw] 的 chw 包成 OnnxTensor。 */
-    fun toDetectorInput(env: OrtEnvironment, page: Bitmap, size: Int): DetectorInput {
-        val a = detectorChw(page, size)
-        val chw = a.chw
-        val r = a.ratio
-        val tensor = OnnxTensor.createTensor(
-            env,
-            FloatBuffer.wrap(chw),
-            longArrayOf(1, 3, size.toLong(), size.toLong()),
-        )
-        return DetectorInput(tensor, r)
     }
 }

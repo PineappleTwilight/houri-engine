@@ -4,35 +4,15 @@
 #include <android/log.h>
 #include <cstring>
 #include "net.h"
-#include "gpu.h"
 
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "yakuyomi_ncnn", __VA_ARGS__)
 
-static bool g_gpu_inited = false;
-
-// 建立/查 GPU：回 GPU 數（0=無、-1=建立失敗）。Vulkan 需要時才呼叫。
-static int ensure_gpu() {
-    if (!g_gpu_inited) {
-        if (ncnn::create_gpu_instance() != 0) return -1;
-        g_gpu_inited = true;
-    }
-    return ncnn::get_gpu_count();
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_li_joye_yakuyomi_engine_NcnnBackend_gpuCount(JNIEnv*, jobject) {
-    return ensure_gpu();
-}
-
-// 載入 pnnx 轉出的 .param/.bin，回 native handle（ncnn::Net*）；0=失敗。要 Vulkan 但無 GPU → 退 CPU。
+// 載入 pnnx 轉出的 .param/.bin，回 native handle（ncnn::Net*，純 CPU）；0=失敗。
+// （GPU/Vulkan 已移除：NCNN Vulkan 實測算不對 AOT-GAN，見 memory ncnn-vulkan-fp16。）
 extern "C" JNIEXPORT jlong JNICALL
 Java_li_joye_yakuyomi_engine_NcnnBackend_createNet(
-        JNIEnv* env, jobject, jstring paramPath, jstring binPath, jboolean useVulkan) {
-    bool vk = (bool) useVulkan;
-    if (vk && ensure_gpu() <= 0) vk = false;
-
+        JNIEnv* env, jobject, jstring paramPath, jstring binPath) {
     ncnn::Net* net = new ncnn::Net();
-    net->opt.use_vulkan_compute = vk;
 
     const char* pp = env->GetStringUTFChars(paramPath, nullptr);
     const char* bp = env->GetStringUTFChars(binPath, nullptr);

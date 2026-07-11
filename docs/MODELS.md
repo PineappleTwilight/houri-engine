@@ -12,7 +12,7 @@ The engine ships no model weights. It needs three models — a detector, an OCR 
 | OCR | ONNX (int8) | `ocr_int8.onnx` | ~44 MB | GPL-3.0 | exported here from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) weights |
 | Text removal | NCNN | `mit_aot_fixed512.ncnn.param` + `.bin` | ~11 MB | GPL-3.0 | AOT-GAN from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-**v2 backends.** Detection and text removal moved from ONNX Runtime to NCNN (fixed-shape, Vulkan + ARM-NEON; ~2.9× faster detection on device); OCR stays on ONNX Runtime but is now int8 dynamic-quantized (QUInt8 — ~3.6× faster on ARM, 96.7% CTC parity vs fp32, 165 MB → 44 MB). Total on-device weights dropped from ~470 MB to ~92 MB. The NCNN graphs are fixed-shape and Vulkan/NPU-capable — GPU/NPU-ready but not yet enabled; plain CPU is already fast enough (~5 s/page on an SD 8 Gen 3). v1's LaMa inpaint is retired and removed; AOT-GAN (manga-image-translator's inpaint) replaces it.
+**v2 backends.** Detection and text removal moved from ONNX Runtime to NCNN (fixed-shape, Vulkan + ARM-NEON; ~2.9× faster detection on device); OCR stays on ONNX Runtime but is now int8 dynamic-quantized (QUInt8 — ~3.6× faster on ARM, 96.7% CTC parity vs fp32, 165 MB → 44 MB). Total on-device weights dropped from ~470 MB to ~92 MB. All three run on the CPU — GPU/NPU was tried and does not work for these models (NCNN's Vulkan path miscomputes the AOT-GAN; LiteRT can't compile them), and plain CPU is fast enough (~5 s/page on an SD 8 Gen 3). v1's LaMa inpaint is retired and removed; AOT-GAN (manga-image-translator's inpaint) replaces it.
 
 Exact bytes and checksums are pinned in [`models.json`](../models.json):
 

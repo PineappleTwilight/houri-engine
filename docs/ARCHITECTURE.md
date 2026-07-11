@@ -67,7 +67,7 @@ Learned by running on real hardware:
 - **Load models off-heap.** `createSession(path)` reads weights into native memory. Reading them into the JVM heap with `readBytes()` hits the per-app heap cap (around 512 MB regardless of device RAM) and OOMs. BYOM copies the picked file to `filesDir` first, then passes the path.
 - **Preprocessing must match the Python export exactly** — resize, normalize, NCHW order. This is the main source of silent divergence, and most of why the parity harness exists.
 - **Inference threads.** Detection and AOT-GAN inpainting use a thread count tuned to the device's big cores (six on the Snapdragon 8 Gen 3 test device); adding the slow efficiency cores makes a pass slower, not faster.
-- **NCNN is GPU/NPU-ready, but CPU-only for now.** The detector and inpainter run on NCNN with fixed input shapes, so their layers are Vulkan-capable and a GPU backend can be switched on later. An NPU (Hexagon) backend would need int8 QDQ, which the OCR model's dynamic width blocks. CPU is already fast enough (about 5 s/page on the Snapdragon 8 Gen 3), so both stay off.
+- **GPU/NPU was tried and does not work for these models — everything runs on the CPU.** NCNN's Vulkan path *miscomputes* the AOT-GAN inpaint model (garbage output at both fp16 and fp32, worsening with tile size — a shader-level bug for this op mix on Adreno), and the detector loses to CPU on Vulkan anyway; LiteRT cannot even compile these models to the GPU; an NPU (Hexagon) backend would need int8 QDQ, which the OCR model's dynamic width blocks. So all three models run on the CPU with NCNN's mobile kernels (NEON/Winograd) — which is fast enough (about 5 s/page on the Snapdragon 8 Gen 3).
 
 ## Repo layout
 

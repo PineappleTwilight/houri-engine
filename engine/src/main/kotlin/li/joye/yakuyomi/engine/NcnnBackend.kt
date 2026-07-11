@@ -15,11 +15,8 @@ internal object NcnnBackend {
         false
     }
 
-    /** GPU 數（0=無、-1=Vulkan 建立失敗）。目前 CPU 已勝 GPU，僅備查。 */
-    external fun gpuCount(): Int
-
-    /** 載入 .param/.bin，回 native handle；0=失敗。要 Vulkan 但無 GPU 會自動退 CPU。 */
-    external fun createNet(paramPath: String, binPath: String, useVulkan: Boolean): Long
+    /** 載入 .param/.bin，回 native handle（純 CPU；NEON/Winograd）；0=失敗。 */
+    external fun createNet(paramPath: String, binPath: String): Long
 
     external fun releaseNet(handle: Long)
 

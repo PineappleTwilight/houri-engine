@@ -67,7 +67,7 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 - **模型載 native 記憶體。** `createSession(path)` 把權重讀進 native；用 `readBytes()` 讀進 JVM heap 會撞到每 app 的 heap 上限（約 512MB，跟裝置 RAM 無關）而 OOM。BYOM 先把選的檔複製到 `filesDir` 再傳路徑。
 - **前處理要跟 Python 匯出完全一致** — resize、normalize、NCHW 順序。這是最大的隱形分歧來源，也是 parity 工具大半的存在理由。
 - **推論執行緒。** 偵測跟 AOT-GAN 去字用對齊裝置大核數的緒數（測試機 Snapdragon 8 Gen 3 是 6），把慢的小核加進去會讓一次推論更慢而不是更快。
-- **NCNN GPU/NPU-ready，但目前純 CPU。** 偵測器跟去字跑 NCNN、輸入是固定 shape，這些層 Vulkan 可跑，所以 GPU 後端日後可以開。NPU（Hexagon）後端需要 int8 QDQ，被 OCR 模型的動態寬度堵住。CPU 目前已經夠快（Snapdragon 8 Gen 3 上約 5 秒／頁），所以兩個都先關著。
+- **GPU/NPU 試過、對這些模型不管用——全部跑 CPU。** NCNN 的 Vulkan 把 AOT-GAN 去字模型**算錯**（fp16/fp32 都輸出垃圾、tile 越大越糟——Adreno 上這組 op 的 shader 級 bug），偵測器在 Vulkan 上也輸給 CPU；LiteRT 連把這些模型編到 GPU 都失敗；NPU（Hexagon）後端需要 int8 QDQ、被 OCR 模型的動態寬度堵住。所以三顆模型都跑 CPU 上的 NCNN 手機核心（NEON/Winograd）——而這已經夠快（Snapdragon 8 Gen 3 上約 5 秒／頁）。
 
 ## Repo 結構
 
