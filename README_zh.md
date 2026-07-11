@@ -47,6 +47,10 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（偵測與去�
 - **可設定，能公開。** 服務商、模型、API base、金鑰、語言對都是設定（自備金鑰）。模型從你選的資料夾載入，不打包進 APK（自備模型）。約 20 個引擎參數可調，見 [docs/PARAMETERS_zh.md](docs/PARAMETERS_zh.md)。
 - **絕不讓書庫變更糟。** 只有翻譯成功才覆蓋該頁。整頁沒文字、整頁翻譯失敗、或網路斷線，原圖原封不動。單一區塊翻譯失敗時保留它的日文，而不是清空。
 
+![跨頁併發流水線](docs/img/crosspage_showcase.png)
+
+兩層併發。*頁內*，去字（CPU）跟翻譯（網路）重疊——一頁只付兩者中較長的那個。*跨頁*，`translatePage` 可以對同一個 warm 引擎併發呼叫，所以頁能流水線：第 N 頁的翻譯跟第 N+1 頁的裝置端 detect/OCR 重疊。真機 benchmark——搭配 box-fill 去字、淺深度下約 **2× 循序速度**。
+
 ## 能做什麼
 
 - **偵測** — comic-text-detector 跑在 NCNN 上（手機優化的 NEON/Winograd kernel，真機比 ORT-XNNPACK 快 ~2.9×）。回傳文字行四邊形，加一張逐像素筆畫遮罩，用來把去字限制在筆畫上。

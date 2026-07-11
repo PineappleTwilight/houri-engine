@@ -47,6 +47,10 @@ Text over artwork is the hard case. A box-fill (what most overlay translators do
 - **Configurable, and ready to be public.** Provider, model, API base, key, and language pair are all settings (bring your own key). Models are loaded from a folder you pick, not bundled (bring your own model). About 20 engine parameters are exposed; see [docs/PARAMETERS.md](docs/PARAMETERS.md).
 - **Never make the library worse.** A page is overwritten only when translation succeeds. If a page has no text, or every line fails, or the network drops, the original is kept untouched. Blocks whose translation fails keep their Japanese text instead of being blanked.
 
+![Cross-page pipeline](docs/img/crosspage_showcase.png)
+
+Two layers of concurrency. *Within a page*, text removal (CPU) overlaps the translation (network) — a page pays only the longer of the two. *Across pages*, `translatePage` is safe to call concurrently on one warm engine, so pages pipeline: page N's translate overlaps page N+1's on-device detect/OCR. Benchmarked on device — about **2× the sequential rate** at a shallow depth with box-fill removal.
+
 ## What it can do
 
 - **Detection** — comic-text-detector on NCNN (mobile-tuned NEON/Winograd kernels, ~2.9× faster than ORT-XNNPACK on device). Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.

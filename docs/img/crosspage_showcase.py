@@ -83,5 +83,5 @@ for c, zh, en in leg:
     d.text((xe, ly + 3), en, font=f(17), fill=SUB)
     lx = xe + d.textlength(en, font=f(17)) + 52
 
-img.save("/tmp/claude-1000/-mnt-d-Gits-Yakuyomi/07c86c13-8f51-4422-8648-28988cf441b3/scratchpad/crosspage_showcase.png")
+img.save("/mnt/d/Gits/Yakuyomi/docs/img/crosspage_showcase.png")
 print("saved", img.size)
