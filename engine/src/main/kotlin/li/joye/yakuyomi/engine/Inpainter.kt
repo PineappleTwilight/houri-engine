@@ -50,20 +50,24 @@ class Inpainter(
         val h = page.height
         val result = page.copy(Bitmap.Config.ARGB_8888, true)
 
+        // auto/auto_aot 逐區路由（乾淨泡平塗、忙碌區才跑模型）已移除：一律純 AOT 整頁、全區重建
+        //（AI 去字不再有些地方是 boxfill）。舊存或 fork 傳來的 auto/auto_aot 一律視為 aot。
+        val method = if (cfg.method == "auto" || cfg.method == "auto_aot") "aot" else cfg.method
+
         // 遮罩配方法：boxfill / lama逐區＝全解析度 → seg 細筆畫（精準、壓畫面的字只動筆畫不成方塊）；
         // lama整頁＝整張縮 512、細筆畫會被縮到次像素而殘留 → 改用整塊文字框遮罩（整塊在乾淨泡泡上反而擦得更乾淨）。
-        val useSeg = !(cfg.method == "lama" && cfg.wholeImage)
+        val useSeg = !(method == "lama" && cfg.wholeImage)
         val maskPx = if (useSeg) buildSegMask(regions, textMask, w, h) else buildQuadMask(regions, w, h)
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
 
-        // 標記「壓在畫面上」(lama/aot 重建)的區 → Renderer 給黑字粗白邊（auto 在下方逐區設、boxfill 全白泡不設）
-        if (cfg.method == "lama" || cfg.method == "aot") regions.forEach { it.onArt = true }
+        // 標記「壓在畫面上」(lama/aot 重建)的區 → Renderer 給黑字粗白邊（aot 全區重建、boxfill 全白泡不設）
+        if (method == "lama" || method == "aot") regions.forEach { it.onArt = true }
 
-        if (cfg.method == "aot") {
-            // AOT-GAN 去字（m-i-t 漫畫權重）：全卷積 → 可原生解析度逐格（不像 LaMa 鎖 512 必降採樣）。
-            //   wholeImage=false → 逐格原生（銳、~2s，最佳畫質，桌機 parity 實證勝過 LaMa）；
-            //   wholeImage=true  → 整頁縮 512 一次（~0.4s，最快，但整頁降採樣→字糊，同 LaMa 整頁）。
+        if (method == "aot") {
+            // AOT-GAN 去字（m-i-t 漫畫權重）：全卷積 → 任意尺寸（不像 LaMa 鎖 512 必降採樣）。全區都重建、無平塗路由。
+            //   wholeImage=true（預設）→ 整頁一次縮到 tileSize(768) 跑 NCNN AOT（快、藏在翻譯下）；
+            //   wholeImage=false      → 逐格原生（銳、~2s，最佳畫質，桌機 parity 實證勝過 LaMa）。
             if (cfg.wholeImage) {
                 runWindowAot(page, maskBmp, intArrayOf(0, 0, w, h), native = false)?.let { compositePixels(result, maskPx, it) }
             } else {
@@ -75,59 +79,20 @@ class Inpainter(
             return@coroutineScope result
         }
 
-        if (cfg.method == "boxfill") {
+        if (method == "boxfill") {
             // 逐區「平塗背景色」（取代就近取色 boxFill）：修大遮罩中心 FILL_REACH 搆不到 → 殘留原文暗痕（紅圈雜訊）。
-            // 白泡乾淨無殘留；忙碌區是平色塊（boxfill 本就最速質劣，要品質用 auto/lama）。對齊 auto 白泡的平塗。
+            // 白泡乾淨無殘留；忙碌區是平色塊（boxfill 本就最速質劣，要品質用 aot）。
             val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
             val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
             for (r in regions) {
                 val s = bgStats(px, tightPx, r, w, h)
-                r.dbgStd = s.std; r.dbgWhite = s.meanLum // 同 auto：留實測值給 sandbox 去背比較標框（boxfill 不分流、但仍顯示 bg 量測供對照）
+                r.dbgStd = s.std; r.dbgWhite = s.meanLum // 留實測值給 sandbox 去背比較標框（boxfill 不分流、但仍顯示 bg 量測供對照）
                 flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
             }
             maskBmp.recycle()
             return@coroutineScope result
         }
-        if (cfg.method == "auto" || cfg.method == "auto_aot") {
-            // auto：每區用「未膨脹 textMask」量背景——白(均值≥autoWhiteThreshold)且均勻(std<autoStdThreshold)＝對話框
-            //   → 平塗；否則忙碌區跑模型。auto=LaMa 忙碌引擎、auto_aot=AOT 忙碌引擎（session 即對應模型，見 Yakuyomi.create）。
-            //   → 平塗背景色（保證無殘留；避開 boxfill 在大遮罩中心因 FILL_REACH 搆不到而留的「中間殘字」）；
-            //   否則(臉/頭髮/壓畫面) → lama 逐區重建紋理。對齊桌面 parity/auto_diag.py。
-            val px = IntArray(w * h)
-            result.getPixels(px, 0, w, 0, 0, w, h)
-            val tightPx = IntArray(w * h)
-            textMask.getPixels(tightPx, 0, w, 0, 0, w, h) // 未膨脹＝量得到筆畫間的白（膨脹遮罩會把背景蓋掉、量不準）
-            val busy = ArrayList<TextRegion>()
-            for (r in regions) {
-                val s = bgStats(px, tightPx, r, w, h)
-                r.dbgStd = s.std; r.dbgWhite = s.meanLum   // 除錯：留引擎實測值給 sandbox 去背比較標在框上（調門檻用）
-                if (s.std < cfg.autoStdThreshold && s.meanLum >= cfg.autoWhiteThreshold) {
-                    flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h) // 白泡：平塗背景色
-                } else {
-                    busy.add(r); r.onArt = true // 忙碌：lama 逐區 + 標記給白邊
-                }
-            }
-            // 忙碌區去字：用 busy-only 遮罩（泡泡已平塗、不可再被 lama 動）；wholeImage 決定整頁/逐格
-            if (busy.isNotEmpty()) {
-                val busyMaskPx = buildSegMask(busy, textMask, w, h)
-                val busyMaskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                busyMaskBmp.setPixels(busyMaskPx, 0, w, 0, 0, w, h)
-                val useAot = cfg.method == "auto_aot" // 忙碌區去字引擎：auto_aot→AOT（原生逐格/縮512整頁）、auto→LaMa
-                if (cfg.wholeImage) {
-                    val win = intArrayOf(0, 0, w, h) // 整頁：忙碌區一次（lama/aot 皆縮 512，快、糊）
-                    (if (useAot) runWindowAot(page, busyMaskBmp, win, native = false) else runWindow(page, busyMaskBmp, win))
-                        ?.let { compositePixels(result, busyMaskPx, it) }
-                } else {
-                    for (win in busy.mapNotNull { windowOf(it, w, h) }) { // 逐格：每忙碌區一次（lama縮512 / aot原生，銳）
-                        (if (useAot) runWindowAot(page, busyMaskBmp, win, native = true) else runWindow(page, busyMaskBmp, win))
-                            ?.let { compositePixels(result, busyMaskPx, it) }
-                    }
-                }
-                busyMaskBmp.recycle()
-            }
-            maskBmp.recycle()
-            return@coroutineScope result
-        }
+        // （auto/auto_aot 逐區路由分支已移除——見頂部 method 別名；auto* 已在上面 aot 分支跑純整頁去字。）
         if (cfg.wholeImage) {
             // lama 整頁：整張縮 512 跑一次（~6s/頁；快、但大/彩色泡泡會糊）
             runWindow(page, maskBmp, intArrayOf(0, 0, w, h))?.let { compositePixels(result, maskPx, it) }

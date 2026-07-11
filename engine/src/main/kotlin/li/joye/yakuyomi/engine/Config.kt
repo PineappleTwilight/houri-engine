@@ -77,15 +77,14 @@ data class TranslatorConfig(
 )
 
 data class InpainterConfig(
-    // 〔設定〕去字方法（真機 A/B 拍板＝兩門別；LaMa 已退役、逐格已移除）：
+    // 〔設定〕去字方法（真機 A/B 拍板＝兩門別；LaMa/逐格/auto 逐區路由皆已退役）：
     //   boxfill＝「快速去字」：取字區就近的背景色平塗（瞬間、平/單色泡泡最乾淨；但壓畫面/多彩會塗錯色塊＝粗糙）。不跑去字模型。
-    //   auto_aot（預設）＝「AI 去字」：乾淨白泡平塗、忙碌區(壓畫面的字)用 AOT-GAN 重建背景，整頁一次（tileSize，見下）。需 [ModelSet.aotInpainterNcnn]（NCNN）或 [aotInpainter]（ORT 備援）。
-    //   aot＝全區都跑 AOT-GAN（含乾淨泡泡、無平塗路由）；同樣需 AOT 模型。
-    //   auto_aot 與 aot 都走 NCNN AOT（整頁固定 tile、Vulkan-capable=GPU/NPU-ready）；去字被翻譯的網路等待蓋住(§8)，故 tile 大小幾乎不加牆鐘。
-    //   （lama/auto＝LaMa 去字，已退役：留 method 相容但需另外提供 lama 模型，否則 Yakuyomi.create loud-error。）
+    //   aot（預設）＝「AI 去字」：全區都跑 AOT-GAN 重建背景（含乾淨泡泡、無平塗路由），整頁一次（tileSize，見下）。需 [ModelSet.aotInpainterNcnn]（NCNN）或 [aotInpainter]（ORT 備援）。
+    //     走 NCNN AOT（整頁固定 tile、Vulkan-capable=GPU/NPU-ready）；去字被翻譯的網路等待蓋住(§8)，故 tile 大小幾乎不加牆鐘。
+    //   （auto/auto_aot＝舊的逐區路由「乾淨泡平塗、忙碌區才跑模型」＝已移除：AI 去字會有些地方是 boxfill＝不一致，Inpainter 一律把 auto* 當 aot。）
+    //   （lama＝LaMa 去字，已退役：留 method 相容但需另外提供 lama 模型，否則 Yakuyomi.create loud-error。）
     // ※ 不開 concurrency／獨立 session：去字是純 CPU、核數固定，平行切核不增總算力（實測並發≈序列）。
-    // 對齊桌面 parity/auto_diag.py（含假名修復、bubble 路由、平塗）。
-    val method: String = "auto_aot",
+    val method: String = "aot",
     val wholeImage: Boolean = true,   // lama/aot：true＝整頁一次（快）/ false＝逐區（小泡銳利、慢）
     val tileSize: Int = 768,          // 整頁 AOT 去字解析度。AOT 全卷積·任意尺寸；768＝畫質/記憶體/藏在翻譯下的甜蜜點（真機 A/B 拍板：512 忙碌區糊、1024 記憶體 2× 且貼翻譯天花板）。LaMa(退役)才鎖 512。
     val windowRatio: Float = 1.7f,    // Koharu BALLOON_WINDOW_RATIO（lama 逐區裁窗）
