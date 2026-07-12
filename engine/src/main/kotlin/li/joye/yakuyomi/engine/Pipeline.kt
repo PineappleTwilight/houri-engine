@@ -116,17 +116,28 @@ class Pipeline(
         var translateMs = 0L
         var promptTok = 0
         var completionTok = 0
+        // per-call 診斷 metadata（區域變數、不讀 LlmTranslator 的共享單值欄位 → 跨頁併發各頁拿自己的、不 race）。
+        var llmError: String? = null
+        var llmRaw: String? = null
         if (translator != null) {
             val tTr = System.currentTimeMillis()
             val cht = try {
-                translator.translate(textRegions.map { it.sourceText })
+                val llm = translator as? LlmTranslator
+                if (llm != null) {
+                    // 走 translateDetailed → per-call 拿 translations + usage + error + raw（跨頁併發安全）。
+                    val r = llm.translateDetailed(textRegions.map { it.sourceText })
+                    r.usage?.let { promptTok = it.promptTokens; completionTok = it.completionTokens }
+                    llmError = r.error
+                    llmRaw = r.raw
+                    r.translations
+                } else {
+                    translator.translate(textRegions.map { it.sourceText })
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "翻譯失敗", t)
                 inpaintJob.cancelAndJoin() // 翻譯掛 → 丟棄去字、留原圖（§11；native run 不可中斷，cancel 實為等它跑完再丟）
                 return@coroutineScope PageResult.Failed("translate: ${t.message}")
             }
-            // 擷取本頁 token 用量（translate() 回傳後立即讀，逐頁循序＝不會 race；無 LLM/代理不回＝0）。
-            (translator as? LlmTranslator)?.lastUsage?.let { promptTok = it.promptTokens; completionTok = it.completionTokens }
             textRegions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
             translateMs = System.currentTimeMillis() - tTr
         } else {
@@ -137,20 +148,19 @@ class Pipeline(
         val kept = if (translator != null) TextFilter.apply(textRegions, cfg.translator.filterText) else textRegions
         if (kept.isEmpty()) {
             val aligned = textRegions.count { it.translatedText.isNotBlank() && it.translatedText != it.sourceText }
-            val tr = translator as? LlmTranslator
             val dbg = textRegions.take(2).joinToString(" ‖ ") { "${it.sourceText.take(8)}→${it.translatedText.take(8)}" }
-            Log.w(TAG, "全數過濾 對齊$aligned/${textRegions.size} err=${tr?.lastError} 回應=${tr?.lastRaw}")
+            Log.w(TAG, "全數過濾 對齊$aligned/${textRegions.size} err=$llmError 回應=$llmRaw")
             inpaintJob.cancelAndJoin()
             // §11 盲點修正：分辨「網路/格式軟失敗」vs「真的全不可譯」。
             // LlmTranslator 對網路/HTTP 例外是「catch + 回傳原文」（不丟例外）→ 全頁 translated==source → 落到這裡全數過濾。
-            // 若一律回 Skipped(標記略過、算已處理)，網路失敗的頁會被當「已翻」、整章不變紅（正是此盲點）。改用 lastError 分流：
-            //  - lastError != null（例外〔網路/HTTP〕或部分解析）→ Failed：不標記、之後重試、整章變紅（呼叫端 drain 標 ERROR）。
-            //  - lastError == null（LLM 正常全解析、但內容全被過濾，如整頁狀聲詞被原樣回 translated==source）→ Skipped：略過、不無限重試。
-            return@coroutineScope if (tr?.lastError != null) {
-                PageResult.Failed("全數過濾(LLM 失敗 ${tr.lastError})｜回應=${tr.lastRaw?.take(80)}")
+            // 若一律回 Skipped(標記略過、算已處理)，網路失敗的頁會被當「已翻」、整章不變紅（正是此盲點）。改用 error 分流（per-call、不 race）：
+            //  - error != null（例外〔網路/HTTP〕或部分解析）→ Failed：不標記、之後重試、整章變紅（呼叫端 drain 標 ERROR）。
+            //  - error == null（LLM 正常全解析、但內容全被過濾，如整頁狀聲詞被原樣回 translated==source）→ Skipped：略過、不無限重試。
+            return@coroutineScope if (llmError != null) {
+                PageResult.Failed("全數過濾(LLM 失敗 $llmError)｜回應=${llmRaw?.take(80)}")
             } else {
                 PageResult.Skipped(
-                    "全數過濾 對齊$aligned/${textRegions.size}｜回應=${tr?.lastRaw}｜$dbg",
+                    "全數過濾 對齊$aligned/${textRegions.size}｜回應=$llmRaw｜$dbg",
                     PageStats(
                         lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0,
                         promptTokens = promptTok, completionTokens = completionTok,

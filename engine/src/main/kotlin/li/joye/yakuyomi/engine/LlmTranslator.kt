@@ -34,39 +34,64 @@ class LlmTranslator(
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
-    /** 最近一次失敗原因（診斷用；成功為 null）。 */
+    /**
+     * 翻譯一頁的完整結果（含診斷 metadata）。**per-call** 回傳（非共享欄位）→ 跨頁併發時各頁拿自己的
+     * usage/error/raw、互不覆蓋（見 [translateDetailed]）。
+     */
+    data class TranslateResult(
+        val translations: List<String>,
+        val usage: Usage? = null,
+        /** 失敗原因（成功為 null）：例外〔網路/HTTP〕或部分解析（解析行數 < query 數）。 */
+        val error: String? = null,
+        /** 原始回應前段（診斷用）。 */
+        val raw: String? = null,
+    )
+
+    // —— 以下三個單值欄位只供**單執行緒**呼叫端（如 sandbox 診斷）用。★跨頁併發下會被別頁覆蓋 → race，
+    //    併發路徑（[Pipeline]）**不讀這些**、改用 [translateDetailed] 的 per-call 回傳。 ——
+    /** 最近一次失敗原因（診斷用；成功為 null）。★併發下會 race，見上。 */
     var lastError: String? = null
         private set
 
-    /** 最近一次原始回應前段（診斷用）。 */
+    /** 最近一次原始回應前段（診斷用）。★併發下會 race，見上。 */
     var lastRaw: String? = null
         private set
 
-    /**
-     * 最近一次 [translate] 請求回報的 token 用量（OpenAI 相容 `usage`；代理/自架未回＝null）。
-     * 每次 [translate] 開頭重置、成功 request 後填入 → 呼叫端（Pipeline）在 translate() 回傳後立即讀，計入 [PageStats]。
-     * 逐頁翻譯在章內循序（跨頁併發未做）⇒ 此單值不會 race。
-     */
+    /** 最近一次請求回報的 token 用量（OpenAI 相容 `usage`；代理/自架未回＝null）。★併發下會 race，見上。 */
     var lastUsage: Usage? = null
         private set
 
-    override suspend fun translate(queries: List<String>): List<String> {
-        if (queries.isEmpty()) return emptyList()
-        lastUsage = null
+    /**
+     * 翻譯一頁的所有 query → **per-call** [TranslateResult]（translations + usage + error + raw）。
+     * 全程走區域變數、**不寫任何實例欄位** → 多頁併發呼叫互不干擾（跨頁流水線安全）。[Pipeline] 走這條。
+     */
+    suspend fun translateDetailed(queries: List<String>): TranslateResult {
+        if (queries.isEmpty()) return TranslateResult(emptyList())
         return try {
-            val raw = request(buildMessages(queries))
-            lastRaw = raw.take(220)
+            val (raw, usage) = request(buildMessages(queries))
             val parsed = parse(raw)
-            lastError = if (parsed.size < queries.size) "解析${parsed.size}/${queries.size}" else null
-            queries.mapIndexed { i, q ->
+            val error = if (parsed.size < queries.size) "解析${parsed.size}/${queries.size}" else null
+            val translations = queries.mapIndexed { i, q ->
                 val tr = parsed[i + 1]?.takeIf { it.isNotBlank() }
                 if (tr != null) (postProcess?.invoke(tr) ?: tr) else q
             }
+            TranslateResult(translations, usage, error, raw.take(220))
         } catch (t: Throwable) {
-            lastError = "${t.javaClass.simpleName}: ${t.message}"
             Log.e(TAG, "翻譯失敗，整批保留原文：${t.message}", t)
-            queries
+            TranslateResult(queries, null, "${t.javaClass.simpleName}: ${t.message}", null)
         }
+    }
+
+    /**
+     * [Translator] 介面實作：委派 [translateDetailed]，並把 metadata 回填單值診斷欄位（**單執行緒**呼叫端用）。
+     * 併發路徑請直接呼叫 [translateDetailed] 拿 per-call 結果，別讀 [lastError]/[lastRaw]/[lastUsage]（會 race）。
+     */
+    override suspend fun translate(queries: List<String>): List<String> {
+        val r = translateDetailed(queries)
+        lastUsage = r.usage
+        lastRaw = r.raw
+        lastError = r.error
+        return r.translations
     }
 
     private fun buildMessages(queries: List<String>): JSONArray {
@@ -91,7 +116,8 @@ class LlmTranslator(
     private fun msg(role: String, content: String) =
         JSONObject().put("role", role).put("content", content)
 
-    private suspend fun request(messages: JSONArray): String = withContext(Dispatchers.IO) {
+    /** 回傳 (回應內容, token 用量)——per-call、不寫實例欄位（跨頁併發安全）。usage 缺欄/代理不回＝null。 */
+    private suspend fun request(messages: JSONArray): Pair<String, Usage?> = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("model", cfg.model)
             .put("messages", messages)
@@ -108,12 +134,13 @@ class LlmTranslator(
             val text = resp.body.string() // okhttp5：body 非空
             if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
             val obj = JSONObject(text)
-            // 擷取 token 用量（非串流＝整包 usage 都在 body；缺欄/代理不回＝視為 0、由呼叫端當未知）。
-            obj.optJSONObject("usage")?.let { u ->
-                lastUsage = Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
+            // 擷取 token 用量（非串流＝整包 usage 都在 body；缺欄/代理不回＝null、由呼叫端當未知）。
+            val usage = obj.optJSONObject("usage")?.let { u ->
+                Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
             }
-            obj.getJSONArray("choices").getJSONObject(0)
+            val content = obj.getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").getString("content")
+            content to usage
         }
     }
 
