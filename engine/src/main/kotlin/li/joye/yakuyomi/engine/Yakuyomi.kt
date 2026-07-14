@@ -39,11 +39,15 @@ object Yakuyomi {
     ): TranslationEngine {
         // 偵測 + 去字皆純 NCNN（產品 arm64、NCNN 必在；ORT 備援與 LaMa 已退役移除）。
         check(NcnnBackend.available) { "NCNN 原生庫未載入（arm64 應可用）" }
+        EngineTrace.log("create.detector")
         val detector = Detector(models.detectorNcnn ?: error("需 NCNN 偵測模型（.param）"), config.detector)
+        EngineTrace.log("create.ocr")
         val ocr = Ocr(models.ocr, alphabet, config.ocr)
         // 去字兩門別（boxfill/aot）皆用同一顆 NCNN AOT 模型（boxfill 只平塗不跑它、但仍要載得起來）。
+        EngineTrace.log("create.inpainter")
         val inpainter = Inpainter(models.aotInpainterNcnn ?: error("需 NCNN AOT 去字模型（.param）"), config.inpainter)
         val translator = apiKey?.takeIf { it.isNotBlank() }?.let { LlmTranslator(it, config.translator) }
+        EngineTrace.log("create.done")
         return Pipeline(detector, ocr, translator, inpainter, config, typeface)
     }
 }

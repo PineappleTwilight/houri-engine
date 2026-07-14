@@ -15,7 +15,7 @@ internal object NcnnBackend {
         false
     }
 
-    /** 載入 .param/.bin，回 native handle（純 CPU；NEON/Winograd）；0=失敗。 */
+    /** 載入 .param/.bin，回 native handle（純 CPU；NEON/Winograd）；0=失敗。★ 不改此 external 名（JNI 符號 = Java_..._createNet，改名會 UnsatisfiedLinkError）。 */
     external fun createNet(paramPath: String, binPath: String): Long
 
     external fun releaseNet(handle: Long)
@@ -39,10 +39,24 @@ internal object NcnnBackend {
     private external fun inpaintAotNative(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int
 
     /** 偵測：chw=NCHW[1,3,s,s] → det 填 [2*s*s]（ch0=det, ch1=blk 邊界）、seg 填 [s*s]。回 0=OK。序列化（見 [ncnnLock]）。 */
-    fun detect(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int =
-        synchronized(ncnnLock) { detectNative(handle, chw, s, det, seg) }
+    fun detect(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int {
+        EngineTrace.log("ncnn.detect.enter s=$s") // 進來（尚未搶鎖）：卡在這＝在等 ncnnLock
+        return synchronized(ncnnLock) {
+            EngineTrace.log("ncnn.detect.call s=$s") // 緊接原生呼叫前：卡在這無 .exit＝死在原生 detect 內
+            val rc = detectNative(handle, chw, s, det, seg)
+            EngineTrace.log("ncnn.detect.exit rc=$rc")
+            rc
+        }
+    }
 
     /** 去字 AOT：img=NCHW[3,s,s]（[-1,1] holes-zeroed）+ mask=[s*s] → out 填 [3*s*s]（[-1,1]）。回 0=OK。序列化（見 [ncnnLock]）。 */
-    fun inpaintAot(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int =
-        synchronized(ncnnLock) { inpaintAotNative(handle, img, mask, s, out) }
+    fun inpaintAot(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int {
+        EngineTrace.log("ncnn.inpaint.enter s=$s")
+        return synchronized(ncnnLock) {
+            EngineTrace.log("ncnn.inpaint.call s=$s")
+            val rc = inpaintAotNative(handle, img, mask, s, out)
+            EngineTrace.log("ncnn.inpaint.exit rc=$rc")
+            rc
+        }
+    }
 }

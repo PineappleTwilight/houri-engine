@@ -74,6 +74,7 @@ class Pipeline(
 
     override suspend fun translatePage(page: Bitmap): PageResult = coroutineScope {
         val tWall = System.currentTimeMillis()
+        EngineTrace.log("pipe.page.enter ${page.width}x${page.height}")
         // 偵測
         val tDet = System.currentTimeMillis()
         val detection = try {
@@ -82,6 +83,7 @@ class Pipeline(
             Log.e(TAG, "偵測失敗", t); return@coroutineScope PageResult.Failed("detect: ${t.message}")
         }
         val lines = detection.lines
+        EngineTrace.log("pipe.detect.done lines=${lines.size}")
         val detectMs = System.currentTimeMillis() - tDet
         if (lines.isEmpty()) {
             return@coroutineScope PageResult.Skipped("偵測不到文字", PageStats(0, 0, 0, detectMs, 0, 0, 0, 0))
@@ -89,11 +91,13 @@ class Pipeline(
 
         // OCR + 分群
         val tOcr = System.currentTimeMillis()
+        EngineTrace.log("pipe.ocr.enter lines=${lines.size}")
         try {
             ocr.recognize(page, lines)
         } catch (t: Throwable) {
             Log.e(TAG, "OCR 失敗", t); return@coroutineScope PageResult.Failed("ocr: ${t.message}")
         }
+        EngineTrace.log("pipe.ocr.exit")
         val regions = Grouping.group(lines)
         val ocrMs = System.currentTimeMillis() - tOcr
         // 去字集＝有 OCR 原文的區（空白＝疑似誤偵測，不去字、保畫面）。此集翻譯前就確定 ⇒ 去字可與翻譯並發。
@@ -108,7 +112,9 @@ class Pipeline(
         var inpaintMs = 0L
         val inpaintJob = async {
             val t0 = System.currentTimeMillis()
+            EngineTrace.log("pipe.inpaint.enter regions=${textRegions.size}")
             val r = inpainter.inpaint(page, textRegions, detection.textMask)
+            EngineTrace.log("pipe.inpaint.exit")
             inpaintMs = System.currentTimeMillis() - t0
             r
         }
@@ -121,6 +127,7 @@ class Pipeline(
         var llmRaw: String? = null
         if (translator != null) {
             val tTr = System.currentTimeMillis()
+            EngineTrace.log("pipe.translate.enter n=${textRegions.size}")
             val cht = try {
                 val llm = translator as? LlmTranslator
                 if (llm != null) {
@@ -140,6 +147,7 @@ class Pipeline(
             }
             textRegions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
             translateMs = System.currentTimeMillis() - tTr
+            EngineTrace.log("pipe.translate.exit err=$llmError")
         } else {
             textRegions.forEach { it.translatedText = it.sourceText } // 無 key debug：排版原文
         }
@@ -173,6 +181,7 @@ class Pipeline(
         textRegions.forEach { if (it !in keptSet) it.translatedText = it.sourceText }
 
         // 等去字完成（多半已與翻譯重疊跑完）
+        EngineTrace.log("pipe.inpaint.await")
         val cleaned = try {
             inpaintJob.await()
         } catch (t: Throwable) {
@@ -181,8 +190,10 @@ class Pipeline(
 
         // 排版（全 textRegions：kept 貼譯文、失敗區貼原文）
         val tRn = System.currentTimeMillis()
+        EngineTrace.log("pipe.render.enter")
         val finalPage = Renderer.render(cleaned, textRegions, cfg.render, typeface)
         val renderMs = System.currentTimeMillis() - tRn
+        EngineTrace.log("pipe.page.done")
 
         PageResult.Translated(
             finalPage,
@@ -199,9 +210,13 @@ class Pipeline(
      * 建構後、放行跨頁併發前呼叫一次（見介面說明）。三者依序（單緒），best-effort（各自 catch）。
      */
     override fun warmUp() {
+        EngineTrace.log("warmup.detector.enter")
         detector.warmUp()
+        EngineTrace.log("warmup.ocr.enter")
         ocr.warmUp()
+        EngineTrace.log("warmup.inpainter.enter")
         inpainter.warmUp()
+        EngineTrace.log("warmup.done")
     }
 
     /** 釋放 detector/ocr/inpainter 的原生 ONNX session（見類別說明的生命週期注意事項）。 */
