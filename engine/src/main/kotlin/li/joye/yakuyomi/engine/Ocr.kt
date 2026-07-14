@@ -19,6 +19,7 @@ import java.nio.FloatBuffer
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** OCR 單行診斷結果（[Ocr.debugOne]）：裁切圖塊 + 一行資訊。 */
@@ -195,9 +196,56 @@ class Ocr(
 
         // 直書：cv2.ROTATE_90_COUNTERCLOCKWISE → 高度變 48
         val rot = Matrix().apply { postRotate(-90f) }
-        val rotated = Bitmap.createBitmap(region, 0, 0, w, h, rot, true)
+        // filter=false（無損 transpose）：精確 90° 旋轉不需內插；filter=true 會在 warp 的 bilinear 之上再疊一層
+        // bilinear 模糊、把小假名糊掉 → OCR 漏字。旋轉本身無縮放，關掉 filter 不失真且更快（見 stripToTensor 銳化）。
+        val rotated = Bitmap.createBitmap(region, 0, 0, w, h, rot, false)
         region.recycle()
         return rotated
+    }
+
+    /**
+     * Unsharp mask（原地銳化 [px]＝strip 的 ARGB 像素、[w]×[h]）：抵銷 warp 把 ~30px 寬直行上採樣到 48px 時的模糊。
+     * 那層模糊會把小假名（に/い/ど/ん）糊成一團 → CTC 收合掉 → 整句漏字（真機把「なれない者など」讀成「者」）。
+     *
+     * 做法＝per-channel separable Gaussian(σ≈1.2、5-tap) 求模糊，再 `orig + AMOUNT*(orig-blur)`、clamp 0..255。
+     * parity 實測（此前處理 + 銳化 amount=1.6）：整章可讀字數 255→431、過信心門檻(minProb 0.5)行數 60→90（/101）；
+     * 對本就讀對(p≈1.0)的乾淨行無副作用。移植自 `parity` 驗證腳本 verify_myunsharp.py:my_unsharp（逐位對齊）。
+     * 銳化因子與內插法皆由 parity benchmark 定（bilinear+unsharp 取 bicubic+unsharp 約 93% 效益、Android 無 bicubic 故選此）。
+     */
+    private fun unsharp(px: IntArray, w: Int, h: Int) {
+        val n = w * h
+        if (n == 0) return
+        val amount = 1.6f
+        val k0 = 0.3434f
+        val k1 = 0.2428f
+        val k2 = 0.0855f // Gaussian σ≈1.2 正規化 5-tap（中心/±1/±2）
+        for (shift in intArrayOf(16, 8, 0)) { // R、G、B 各自銳化（文字多為灰階、但彩色 SFX 也照顧）
+            val ch = FloatArray(n)
+            for (i in 0 until n) ch[i] = ((px[i] shr shift) and 0xFF).toFloat()
+            val tmp = FloatArray(n)
+            for (y in 0 until h) { // 水平模糊（邊界 clamp 複製）
+                val row = y * w
+                for (x in 0 until w) {
+                    tmp[row + x] = k2 * ch[row + max(0, x - 2)] + k1 * ch[row + max(0, x - 1)] +
+                        k0 * ch[row + x] + k1 * ch[row + min(w - 1, x + 1)] + k2 * ch[row + min(w - 1, x + 2)]
+                }
+            }
+            for (y in 0 until h) { // 垂直模糊 + 銳化寫回 px（僅動本 channel 的 8 bit、保留其餘）
+                val row = y * w
+                val rm2 = max(0, y - 2) * w
+                val rm1 = max(0, y - 1) * w
+                val rp1 = min(h - 1, y + 1) * w
+                val rp2 = min(h - 1, y + 2) * w
+                for (x in 0 until w) {
+                    val blur = k2 * tmp[rm2 + x] + k1 * tmp[rm1 + x] + k0 * tmp[row + x] +
+                        k1 * tmp[rp1 + x] + k2 * tmp[rp2 + x]
+                    val orig = ch[row + x]
+                    val v = (orig + amount * (orig - blur)).coerceIn(0f, 255f).toInt()
+                    val i = row + x
+                    px[i] = (px[i] and (0xFF shl shift).inv()) or (v shl shift)
+                }
+            }
+        }
     }
 
     private fun stripToTensor(strip: Bitmap): OnnxTensor {
@@ -206,6 +254,7 @@ class Ocr(
         val w = sw + PAD_MARGIN // 右側白邊：避免 CTC 截掉尾字（坂→坂本、ねえね→ねえねえ）
         val px = IntArray(sw * h)
         strip.getPixels(px, 0, sw, 0, 0, sw, h)
+        unsharp(px, sw, h) // 銳化：抵銷縮放模糊、救回被糊掉漏讀的小假名（見 [unsharp]）
         val area = h * w
         val chw = FloatArray(3 * area) { 1f } // 白底（(255-127.5)/127.5=1.0），右邊維持白
         for (y in 0 until h) {
