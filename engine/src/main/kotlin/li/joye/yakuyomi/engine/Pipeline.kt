@@ -194,6 +194,16 @@ class Pipeline(
         )
     }
 
+    /**
+     * 單緒暖機：對 detector / OCR / 去字三個原生 session 各空跑一次推論，完成首次 lazy 初始化。
+     * 建構後、放行跨頁併發前呼叫一次（見介面說明）。三者依序（單緒），best-effort（各自 catch）。
+     */
+    override fun warmUp() {
+        detector.warmUp()
+        ocr.warmUp()
+        inpainter.warmUp()
+    }
+
     /** 釋放 detector/ocr/inpainter 的原生 ONNX session（見類別說明的生命週期注意事項）。 */
     override fun close() {
         runCatching { detector.close() }

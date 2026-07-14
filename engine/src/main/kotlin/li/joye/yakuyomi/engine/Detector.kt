@@ -46,6 +46,21 @@ class Detector(
     }
 
     /**
+     * 暖機：對空白小圖跑一次偵測，讓 NCNN 偵測 session 的首次 lazy 初始化在單緒完成。
+     * 併發翻多頁前先呼叫一次（見 fork TranslationEngineService），避免多頁同時打進未初始化的 session → 原生 crash。
+     */
+    fun warmUp() {
+        val blank = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        try {
+            detect(blank).textMask.recycle()
+        } catch (t: Throwable) {
+            Log.w(TAG, "偵測暖機失敗：${t.message}")
+        } finally {
+            blank.recycle()
+        }
+    }
+
+    /**
      * seg 還原成原圖尺寸的二值文字遮罩。前處理 letterbox＝圖貼左上、pad 右下（ImageOps.detectorChw），
      * 故有效區＝seg[0:nh, 0:nw]（nw=round(origW*ratio)、nh=round(origH*ratio)）→ 縮回原圖 → 門檻。
      * 對齊 parity/seg_validate.py（裁 pad → cv2.resize 雙線性 → >segThreshold）。

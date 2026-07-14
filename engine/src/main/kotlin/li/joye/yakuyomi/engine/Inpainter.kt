@@ -62,6 +62,26 @@ class Inpainter(
         result
     }
 
+    /**
+     * 暖機：aot 方法對空白小圖跑一次 NCNN AOT session（首次 lazy 初始化在單緒完成）。
+     * boxfill 只平塗、不跑該 session → 無需暖（也不會冷撞）。併發翻多頁前先呼叫一次。
+     */
+    fun warmUp() {
+        if (cfg.method == "boxfill") return
+        val w = 64
+        val h = 64
+        val page = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        try {
+            runWholeAot(page, mask, w, h)
+        } catch (t: Throwable) {
+            Log.w(TAG, "去字暖機失敗：${t.message}")
+        } finally {
+            page.recycle()
+            mask.recycle()
+        }
+    }
+
     /** 去字遮罩 Bitmap（白＝要去字）。給重繪素材/視覺化用；與 inpaint 同一份 seg 細遮罩。 */
     fun buildMask(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Bitmap {
         val w = page.width; val h = page.height

@@ -77,6 +77,23 @@ class Ocr(
         }
     }
 
+    /**
+     * 暖機：對空白 strip 跑一次 OCR session，讓 ORT session 首次 run 的 lazy 初始化（arena/EP 配置）在單緒完成。
+     * 併發翻多頁前先呼叫一次；strip 內容不重要（只為觸發一次 run）。
+     */
+    fun warmUp() {
+        val strip = Bitmap.createBitmap(160, cfg.textHeight, Bitmap.Config.ARGB_8888)
+        try {
+            stripToTensor(strip).use { input ->
+                session.run(mapOf(session.inputNames.first() to input)).use { }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "OCR 暖機失敗：${t.message}")
+        } finally {
+            strip.recycle()
+        }
+    }
+
     /** 單行 OCR：裁切→前處理→CTC→填 text。thread-safe：只寫自己的 line、session.run 可並發、其餘皆 local/唯讀。 */
     private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String) {
         val (ordered, isV) = sortPnts(line.quad)
