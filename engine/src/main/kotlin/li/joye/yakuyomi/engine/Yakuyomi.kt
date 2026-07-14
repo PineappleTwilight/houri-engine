@@ -1,5 +1,6 @@
 package li.joye.yakuyomi.engine
 
+import android.graphics.Bitmap
 import android.graphics.Typeface
 
 /**
@@ -50,4 +51,55 @@ object Yakuyomi {
         EngineTrace.log("create.done")
         return Pipeline(detector, ocr, translator, inpainter, config, typeface)
     }
+
+    /**
+     * 診斷（sandbox 用）：對一頁跑偵測 → 每行分別以 bilinear / bicubic 裁切做 OCR，回逐行讀取對照 + 各自 recognize 耗時。
+     * 真機 A/B 驗證「bicubic 前處理救回被縮放糊掉的小假名（句尾否定→意思相反）」的品質提升與效能代價。
+     * 兩者共用同一 ORT session（只差裁切內插法）；計時前先暖跑兩條路徑（session lazy init + JIT），數字才可靠。
+     */
+    suspend fun ocrAbTest(
+        models: ModelSet,
+        alphabet: List<String>,
+        page: Bitmap,
+        config: EngineConfig = EngineConfig(),
+    ): OcrAbResult {
+        check(NcnnBackend.available) { "NCNN 原生庫未載入" }
+        val detector = Detector(models.detectorNcnn ?: error("需 NCNN 偵測模型（.param）"), config.detector)
+        val ocr = Ocr(models.ocr, alphabet, config.ocr)
+        try {
+            val tDet = System.nanoTime()
+            val det = detector.detect(page)
+            val detectMs = (System.nanoTime() - tDet) / 1e6
+            val clone = { det.lines.map { TextLine(it.quad, it.score) } } // recognize 就地寫 text → 每次跑用新副本
+            // 暖跑兩條路徑（不計時）：session 首次 run 的 lazy init + bicubic 迴圈 JIT
+            ocr.warmUp()
+            ocr.recognize(page, clone(), bicubic = false)
+            ocr.recognize(page, clone(), bicubic = true)
+            // 正式計時
+            val linesBil = clone()
+            val t0 = System.nanoTime()
+            ocr.recognize(page, linesBil, bicubic = false)
+            val bilinearMs = (System.nanoTime() - t0) / 1e6
+            val linesBic = clone()
+            val t1 = System.nanoTime()
+            ocr.recognize(page, linesBic, bicubic = true)
+            val bicubicMs = (System.nanoTime() - t1) / 1e6
+            val rows = linesBil.indices.map { OcrAbRow(linesBil[it].text, linesBic[it].text) }
+            return OcrAbResult(rows, bilinearMs, bicubicMs, detectMs)
+        } finally {
+            runCatching { detector.close() }
+            runCatching { ocr.close() }
+        }
+    }
 }
+
+/** [Yakuyomi.ocrAbTest] 結果：逐行 bilinear vs bicubic OCR 讀取 [rows] + 各內插法 recognize 總耗時（ms）+ 偵測耗時。 */
+class OcrAbResult(
+    val rows: List<OcrAbRow>,
+    val bilinearMs: Double,
+    val bicubicMs: Double,
+    val detectMs: Double,
+)
+
+/** 單行對照：同一行框，[bilinear] 與 [bicubic] 裁切各自 OCR 讀出的文字（空＝低於信心門檻被丟）。 */
+class OcrAbRow(val bilinear: String, val bicubic: String)

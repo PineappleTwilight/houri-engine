@@ -17,6 +17,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.nio.FloatBuffer
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -66,15 +68,19 @@ class Ocr(
      * [OcrConfig.concurrent]＝true：多行並發（小圖塊吃不滿 intra-op→改單緒、並發填核，見 init）；false：逐行序列（現狀）。
      * 批次 padding 已否決（寬度差→padding 浪費）；此處是「並發」（零 padding），與批次不同。
      */
-    suspend fun recognize(page: Bitmap, lines: List<TextLine>): Unit = coroutineScope {
+    suspend fun recognize(
+        page: Bitmap,
+        lines: List<TextLine>,
+        bicubic: Boolean = cfg.useBicubic, // 裁切縮放內插法：true=手刻 bicubic（救小假名漏讀）、false=Canvas bilinear（現行）
+    ): Unit = coroutineScope {
         val inputName = session.inputNames.first()
         if (cfg.concurrent && lines.size > 1) {
             val sem = Semaphore(cfg.concurrency.coerceAtLeast(1))
             lines.map { line ->
-                async(Dispatchers.Default) { sem.withPermit { recognizeOne(page, line, inputName) } }
+                async(Dispatchers.Default) { sem.withPermit { recognizeOne(page, line, inputName, bicubic) } }
             }.awaitAll()
         } else {
-            for (line in lines) recognizeOne(page, line, inputName)
+            for (line in lines) recognizeOne(page, line, inputName, bicubic)
         }
     }
 
@@ -96,10 +102,10 @@ class Ocr(
     }
 
     /** 單行 OCR：裁切→前處理→CTC→填 text。thread-safe：只寫自己的 line、session.run 可並發、其餘皆 local/唯讀。 */
-    private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String) {
+    private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String, bicubic: Boolean) {
         val (ordered, isV) = sortPnts(line.quad)
         line.direction = if (isV) "v" else "h"
-        val strip = transformedRegion(page, ordered, isV, cfg.textHeight) ?: return
+        val strip = transformedRegion(page, ordered, isV, cfg.textHeight, bicubic) ?: return
         if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
             strip.recycle()  // 彩色/非氣泡 SFX 類文字 → 跳過
             return
@@ -158,8 +164,8 @@ class Ocr(
         }
     }
 
-    /** 對齊 generic.py:Quadrilateral.get_transformed_region。 */
-    private fun transformedRegion(page: Bitmap, pts: List<Pt>, isV: Boolean, th: Int): Bitmap? {
+    /** 對齊 generic.py:Quadrilateral.get_transformed_region。[bicubic]=true 時 warp 用手刻 bicubic 取樣（見 [bicubicWarp]）。 */
+    private fun transformedRegion(page: Bitmap, pts: List<Pt>, isV: Boolean, th: Int, bicubic: Boolean): Bitmap? {
         // structure 邊中點
         val p1x = (pts[0].x + pts[1].x) / 2f; val p1y = (pts[0].y + pts[1].y) / 2f
         val p2x = (pts[2].x + pts[3].x) / 2f; val p2y = (pts[2].y + pts[3].y) / 2f
@@ -190,8 +196,14 @@ class Ocr(
         val m = Matrix()
         if (!m.setPolyToPoly(src, 0, dst, 0, 4)) return null
 
-        val region = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        Canvas(region).drawBitmap(page, m, Paint(Paint.FILTER_BITMAP_FLAG))
+        // bicubic：手刻 perspective bicubic 取樣（Android Canvas 只有 bilinear）；bilinear 把 ~30px 直行上採樣到 48px
+        // 時糊掉小假名 → OCR 漏字（連句尾否定漏→意思相反）。parity 實測 bicubic 517字/100行 vs bilinear 486/96。
+        val region = if (bicubic) {
+            bicubicWarp(page, m, w, h, pts) ?: return null
+        } else {
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                .also { Canvas(it).drawBitmap(page, m, Paint(Paint.FILTER_BITMAP_FLAG)) }
+        }
         if (!isV) return region
 
         // 直書：cv2.ROTATE_90_COUNTERCLOCKWISE → 高度變 48
@@ -201,6 +213,79 @@ class Ocr(
         val rotated = Bitmap.createBitmap(region, 0, 0, w, h, rot, false)
         region.recycle()
         return rotated
+    }
+
+    // ── 手刻 perspective bicubic warp（a=-0.75 cubic convolution）：逐位對齊 parity 驗證腳本 verify_handcubic(a=-0.75)
+    //    → 517 字 / 100 行過信心門檻（vs 現行 bilinear 486/96），救回被 bilinear 縮放糊掉的小假名（含句尾否定→意思相反）。
+    //    Android Canvas 無 bicubic 故手刻。效能：strip 小（平均 ~13K px）、每頁額外 ~12M 乘加 ≈ +1~4% OCR 時間（parity 估）。
+    private fun bicubicWarp(page: Bitmap, forward: Matrix, w: Int, h: Int, pts: List<Pt>): Bitmap? {
+        val inv = Matrix()
+        if (!forward.invert(inv)) return null
+        val iv = FloatArray(9)
+        inv.getValues(iv) // 3x3：sx=(iv0*dx+iv1*dy+iv2)/(iv6*dx+iv7*dy+iv8)、sy 同理（Android Matrix 透視同 cv2）
+        // 只 crop quad 來源包圍盒（±2 容 4-tap）→ 一次 getPixels、省記憶體
+        val pw = page.width
+        val ph = page.height
+        val x0 = (floor(pts.minOf { it.x }) - 2f).toInt().coerceIn(0, pw - 1)
+        val y0 = (floor(pts.minOf { it.y }) - 2f).toInt().coerceIn(0, ph - 1)
+        val x1 = (ceil(pts.maxOf { it.x }) + 2f).toInt().coerceIn(0, pw - 1)
+        val y1 = (ceil(pts.maxOf { it.y }) + 2f).toInt().coerceIn(0, ph - 1)
+        val cw = x1 - x0 + 1
+        val ch = y1 - y0 + 1
+        if (cw < 2 || ch < 2) return null
+        val src = IntArray(cw * ch)
+        page.getPixels(src, 0, cw, x0, y0, cw, ch)
+        val out = IntArray(w * h)
+        for (dy in 0 until h) {
+            for (dx in 0 until w) {
+                val den = iv[6] * dx + iv[7] * dy + iv[8]
+                val sx = (iv[0] * dx + iv[1] * dy + iv[2]) / den - x0
+                val sy = (iv[3] * dx + iv[4] * dy + iv[5]) / den - y0
+                out[dy * w + dx] = bicubicSample(src, cw, ch, sx, sy)
+            }
+        }
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    /** 對 [px]（cw×ch，ARGB）在 (sx,sy) 做 4×4 bicubic 取樣（a=-0.75、邊界 clamp、per-channel）。 */
+    private fun bicubicSample(px: IntArray, cw: Int, ch: Int, sx: Float, sy: Float): Int {
+        val a = -0.75f
+        val fx = floor(sx).toInt()
+        val fy = floor(sy).toInt()
+        var r = 0f
+        var g = 0f
+        var b = 0f
+        for (my in -1..2) {
+            val wy = cubicW(sy - (fy + my), a)
+            val rowBase = (fy + my).coerceIn(0, ch - 1) * cw
+            var rr = 0f
+            var gg = 0f
+            var bb = 0f
+            for (mx in -1..2) {
+                val wx = cubicW(sx - (fx + mx), a)
+                val p = px[rowBase + (fx + mx).coerceIn(0, cw - 1)]
+                rr += wx * ((p shr 16) and 0xFF)
+                gg += wx * ((p shr 8) and 0xFF)
+                bb += wx * (p and 0xFF)
+            }
+            r += wy * rr
+            g += wy * gg
+            b += wy * bb
+        }
+        return (0xFF shl 24) or
+            (r.roundToInt().coerceIn(0, 255) shl 16) or
+            (g.roundToInt().coerceIn(0, 255) shl 8) or
+            b.roundToInt().coerceIn(0, 255)
+    }
+
+    /** cubic convolution kernel（Horner 展開）：|t|≤1 與 1<|t|<2 兩段，其餘 0。 */
+    private fun cubicW(t: Float, a: Float): Float {
+        val x = abs(t)
+        return when {
+            x <= 1f -> ((a + 2f) * x - (a + 3f)) * x * x + 1f
+            x < 2f -> ((a * x - 5f * a) * x + 8f * a) * x - 4f * a
+            else -> 0f
+        }
     }
 
     /**
@@ -352,7 +437,7 @@ class Ocr(
     /** 診斷：對單行回傳裁切圖塊 + 資訊（圖塊尺寸/輸出 shape/原始文字/prob 或例外），不丟低信心。 */
     fun debugOne(page: Bitmap, line: TextLine): OcrDebug {
         val (ordered, isV) = sortPnts(line.quad)
-        val strip = transformedRegion(page, ordered, isV, cfg.textHeight)
+        val strip = transformedRegion(page, ordered, isV, cfg.textHeight, cfg.useBicubic)
             ?: return OcrDebug(null, "strip=null（setPolyToPoly 失敗）")
         val px = IntArray(strip.width * strip.height)
         strip.getPixels(px, 0, strip.width, 0, 0, strip.width, strip.height)

@@ -42,6 +42,10 @@ data class OcrConfig(
     // 純 CPU、ORT 共享 thread pool ⇒ 收益需實測（sandbox 去背比較 OCR 列 A/B）。與「批次 padding」不同：零 padding 浪費。
     val concurrent: Boolean = true,   // 預設開：真機 8.9s→4.8s(快46%)、零品質風險(每行邏輯不變)、8 核全填滿
     val concurrency: Int = 8,         // 同時在飛的行數上限（＝核數，全核並發；conc=核數為甜蜜點，再高無核可用）
+    // 裁切縮放內插法：true=手刻 perspective bicubic（救小假名漏讀→句尾否定不再翻反）、false=Canvas bilinear（舊）。
+    // parity 517字/100行 vs bilinear 486/96；真機 A/B 驗過：+6% OCR 時間、把「才能がある/言わないから/言いなさい」
+    // 等句尾/關鍵詞讀回（消滅最陰險的「意思相反」），偶爾多讀個雜訊字（LLM 可容錯）。淨正面 → 預設開。
+    val useBicubic: Boolean = true,
 )
 
 // 預設 few-shot（日→繁中）：示範 <|i|> 逐行格式。改語言對時連同 toLangName/fromLangName 一起換成對應譯文。

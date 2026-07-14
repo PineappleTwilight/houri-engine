@@ -77,6 +77,7 @@ class MainActivity : AppCompatActivity() {
         binding.inpaintCompareButton.setOnClickListener { runInpaintCompare() }
         binding.repoDemoButton.setOnClickListener { runRepoDemo() }
         binding.crossPageButton.setOnClickListener { runCrossPageBench() }
+        binding.ocrAbButton.setOnClickListener { runOcrAb() }
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
@@ -137,6 +138,7 @@ class MainActivity : AppCompatActivity() {
         binding.inpaintCompareButton.isEnabled = selected.size == 1
         binding.repoDemoButton.isEnabled = selected.size == 1
         binding.crossPageButton.isEnabled = selected.size == 1
+        binding.ocrAbButton.isEnabled = selected.isNotEmpty()
     }
 
     private fun loadAssetThumbnail(path: String, target: Int): Bitmap {
@@ -261,6 +263,60 @@ class MainActivity : AppCompatActivity() {
             i += cols
         }
         return mergeVertical(rows)
+    }
+
+    /**
+     * OCR 裁切內插 A/B（bilinear vs bicubic）：對選取測試圖跑 [Yakuyomi.ocrAbTest]，log 效能（各內插法
+     * recognize 耗時）+ 品質（逐行 OCR 讀取對照、只列兩者不同的行）。真機驗證 bicubic 是否把被縮放糊掉的
+     * 小假名（句尾否定→意思相反）讀回來、及其效能代價。選 demo06（第 013 頁）最能看差異。
+     */
+    private fun runOcrAb() {
+        binding.ocrAbButton.isEnabled = false
+        val sel = selected.toList()
+        val imgs = sel.map { TEST_IMAGES[it] }
+        lifecycleScope.launch(Dispatchers.Default) {
+            clearOutputs()
+            runTree = currentTree()
+            try {
+                val tree = runTree
+                if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
+                if (imgs.isEmpty()) { log("✗ 請先點縮圖選至少一張測試圖"); return@launch }
+                val ocrF = findOnnx(tree, "ocr")
+                val detNcnn = ensureNcnnPair(tree, "detect")
+                val aotNcnn = ensureNcnnPair(tree, "aot")
+                if (ocrF == null) { log("✗ 缺 OCR 模型（ocr .onnx）"); return@launch }
+                if (detNcnn == null) { log("✗ 缺 NCNN 偵測模型（detector*.ncnn.param）"); return@launch }
+                if (aotNcnn == null) { log("✗ 缺 NCNN 去字模型（*aot*.ncnn.param）"); return@launch }
+                val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
+                val models = ModelSet(ocr = ensureLocal(ocrF), detectorNcnn = detNcnn, aotInpainterNcnn = aotNcnn)
+                log("▶ OCR 內插比較（bilinear vs bicubic）｜${imgs.size} 張")
+                imgs.forEachIndexed { i, asset ->
+                    val tag = "圖${sel[i] + 1}"
+                    val page = loadAssetBitmap(asset)
+                    val r = Yakuyomi.ocrAbTest(models, alphabet, page)
+                    val delta = if (r.bilinearMs > 0) (r.bicubicMs - r.bilinearMs) / r.bilinearMs * 100 else 0.0
+                    log(
+                        "[$tag] 偵測 ${"%.0f".format(r.detectMs)}ms｜OCR bilinear ${"%.0f".format(r.bilinearMs)}ms → " +
+                            "bicubic ${"%.0f".format(r.bicubicMs)}ms（${"%+.0f".format(delta)}%）｜${r.rows.size} 行",
+                    )
+                    var diff = 0
+                    r.rows.forEachIndexed { j, row ->
+                        if (row.bilinear != row.bicubic) {
+                            diff++
+                            log("  L$j bilin：${row.bilinear.ifBlank { "∅" }}")
+                            log("      bicub：${row.bicubic.ifBlank { "∅" }}")
+                        }
+                    }
+                    log("[$tag] 兩者不同 $diff / ${r.rows.size} 行（相同的略）")
+                }
+                log("★ OCR 內插比較完成")
+            } catch (t: Throwable) {
+                Log.e(TAG, "OCR A/B 失敗", t)
+                log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                runOnUiThread { binding.ocrAbButton.isEnabled = selected.isNotEmpty() }
+            }
+        }
     }
 
     private fun runInpaintCompare() {
@@ -972,6 +1028,10 @@ class MainActivity : AppCompatActivity() {
             "test/demo03.png", // 3
             "test/demo04.png", // 4
             "test/demo05.png", // 5
+            // 6 = OCR 回歸測試素材（Chapter 34.1 p013）：句尾否定/反問被 bilinear 縮放糊掉→漏讀→意思相反
+            //     （はないのかね→「居然有」、貴族でもなく→「就算是貴族」）＋多行密集小字。
+            //     用途：改 OCR 前處理（如 bicubic warp）前後跑診斷對照、驗證「意思相反」是否救回。
+            "test/demo06.jpg", // 6
         )
         private const val ALPHABET = "models/alphabet-all-v5.txt"
         private const val FONT = "fonts/NotoSansMonoCJK.ttc"
