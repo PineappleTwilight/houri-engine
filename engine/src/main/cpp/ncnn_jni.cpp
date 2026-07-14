@@ -35,7 +35,7 @@ Java_li_joye_yakuyomi_engine_NcnnBackend_releaseNet(JNIEnv*, jobject, jlong hand
 
 // 偵測：in0[3,s,s] → out0(det[2,s,s]) + out1(seg[1,s,s])。填 detOut[2*s*s]+segOut[s*s]。0=OK。
 extern "C" JNIEXPORT jint JNICALL
-Java_li_joye_yakuyomi_engine_NcnnBackend_detect(
+Java_li_joye_yakuyomi_engine_NcnnBackend_detectNative(
         JNIEnv* env, jobject, jlong handle,
         jfloatArray chw, jint s, jfloatArray detOut, jfloatArray segOut) {
     if (!handle) return -1;
@@ -68,7 +68,7 @@ Java_li_joye_yakuyomi_engine_NcnnBackend_detect(
 
 // 去字 AOT：in0=img[3,s,s]（[-1,1] holes-zeroed）+ in1=mask[1,s,s] → out0[3,s,s]（[-1,1]）。填 outArr[3*s*s]。
 extern "C" JNIEXPORT jint JNICALL
-Java_li_joye_yakuyomi_engine_NcnnBackend_inpaintAot(
+Java_li_joye_yakuyomi_engine_NcnnBackend_inpaintAotNative(
         JNIEnv* env, jobject, jlong handle,
         jfloatArray img, jfloatArray mask, jint s, jfloatArray outArr) {
     if (!handle) return -1;

@@ -20,9 +20,29 @@ internal object NcnnBackend {
 
     external fun releaseNet(handle: Long)
 
-    /** 偵測：chw=NCHW[1,3,s,s] → det 填 [2*s*s]（ch0=det, ch1=blk 邊界）、seg 填 [s*s]。回 0=OK。 */
-    external fun detect(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int
+    /**
+     * ★ 全域鎖：**序列化所有 ncnn 原生推論**（detect + 去字）。
+     *
+     * ncnn 內部用 **OpenMP**（libomp 靜態連進 libyakuyomi_ncnn.so）做卷積平行化。多個 app 執行緒**同時**進入
+     * ncnn forward（跨頁併發把 detect/去字 派到多個 Dispatchers.Default 緒）→ 各自開 OpenMP parallel region →
+     * OpenMP 全域 runtime 不容許多個並發 master → **`__kmp_abort_process` 直接 abort 行程（SIGABRT）**。
+     * 真機 tombstone 實證（thread=DefaultDispatch, #01 __kmp_abort_process），2026-07-14。
+     *
+     * detect 與 去字共用同一把鎖（同一個 ncnn OpenMP runtime，任兩個並發的 parallel region 都會撞）。
+     * OCR 走 ORT（另一個 .so、自有執行緒模型）不受此鎖，翻譯走網路 → 併發保留。detect/去字 皆 CPU-bound，
+     * 序列化幾乎不損吞吐（本就塞在翻譯的網路等待窗內、CPU 也無法真的同時跑兩份）。
+     */
+    private val ncnnLock = Any()
 
-    /** 去字 AOT：img=NCHW[3,s,s]（[-1,1] holes-zeroed）+ mask=[s*s] → out 填 [3*s*s]（[-1,1]）。回 0=OK。 */
-    external fun inpaintAot(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int
+    private external fun detectNative(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int
+
+    private external fun inpaintAotNative(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int
+
+    /** 偵測：chw=NCHW[1,3,s,s] → det 填 [2*s*s]（ch0=det, ch1=blk 邊界）、seg 填 [s*s]。回 0=OK。序列化（見 [ncnnLock]）。 */
+    fun detect(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int =
+        synchronized(ncnnLock) { detectNative(handle, chw, s, det, seg) }
+
+    /** 去字 AOT：img=NCHW[3,s,s]（[-1,1] holes-zeroed）+ mask=[s*s] → out 填 [3*s*s]（[-1,1]）。回 0=OK。序列化（見 [ncnnLock]）。 */
+    fun inpaintAot(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int =
+        synchronized(ncnnLock) { inpaintAotNative(handle, img, mask, s, out) }
 }
