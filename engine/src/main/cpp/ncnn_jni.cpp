@@ -91,8 +91,8 @@ Java_li_joye_yakuyomi_engine_NcnnBackend_detectDbnetNative(
     ex.extract("out1", mask);
     LOGW("dbnet in=%dx%d out0=%dx%dx%d out1=%dx%dx%d", inW, inH, db.w, db.h, db.c, mask.w, mask.h, mask.c);
 
-    // ★ 防越界診斷：Kotlin db 緩衝＝2*inW*inH、mask＝(inW/2)*(inH/2)。超出回負碼帶尺寸（Kotlin 解 db.w/mask.w → 變 exception 不 crash）。
-    if ((size_t) db.c * db.w * db.h > 2 * area || (size_t) mask.w * mask.h > (size_t) (inW / 2) * (inH / 2)) {
+    // ★ 防越界：db 緩衝＝2*inW*inH、mask 緩衝＝inW*inH（全解析上限，因 mask 半/全解析平台不定）。超出回負碼（變 exception 不 crash）。
+    if ((size_t) db.c * db.w * db.h > 2 * area || (size_t) mask.w * mask.h > area) {
         return -(db.w * 1000 + mask.w);
     }
     // 空輸出（forward 出問題或 blob 名不符）也回報。
@@ -110,7 +110,7 @@ Java_li_joye_yakuyomi_engine_NcnnBackend_detectDbnetNative(
     memcpy(om, mask.channel(0), sizeof(float) * mask.w * mask.h);
     env->ReleaseFloatArrayElements(maskOut, om, 0);
 
-    return mask.h; // >0：Kotlin 驗 == s/2
+    return mask.w * 10000 + mask.h; // 回實際 mask 尺寸（半/全解析平台不定，Kotlin 解 mw=rc/10000 mh=rc%10000）
 }
 
 // 去字 AOT：in0=img[3,s,s]（[-1,1] holes-zeroed）+ in1=mask[1,s,s] → out0[3,s,s]（[-1,1]）。填 outArr[3*s*s]。

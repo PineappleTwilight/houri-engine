@@ -60,17 +60,18 @@ class Detector(
         val inH = pre.h
         val area = inW * inH
         val db = FloatArray(2 * area)
-        val mw = inW / 2
-        val mh = inH / 2
-        val mask = FloatArray(mw * mh) // mask 半解析度（矩形）
+        // ★ mask 尺寸半/全解析平台不定（x86 半解析 inW/2×inH/2、arm64 實測全解析 inW×inH）→ 緩衝配全解析上限、實際尺寸由 rc 回。
+        val mask = FloatArray(area)
         val rc = NcnnBackend.detectDbnet(ncnnHandle, pre.chw, inW, inH, db, mask)
         check(rc > 0) {
-            if (rc < 0 && -rc != 1) {
-                "DBNet 尺寸越界：實際 db.w=${-rc / 1000} mask.w=${-rc % 1000}（Kotlin 緩衝假設 db=2×${inW}×$inH mask=${mw}×$mh）＝解析度假設錯"
+            if (rc < 0) {
+                "DBNet 尺寸越界：實際 db.w=${(-rc) / 1000} mask.w=${(-rc) % 1000}（緩衝 db=2×${inW}×$inH、mask≤${inW}×$inH）"
             } else {
-                "NCNN DBNet forward 空輸出/失敗 rc=$rc（out0/out1 空 → blob 名或 forward 出錯，看 logcat 的 dbnet 行）"
+                "NCNN DBNet forward 空輸出/失敗 rc=$rc"
             }
         }
+        val mw = rc / 10000 // JNI 回 mask.w*10000+mask.h（實際 mask 尺寸，不假設半/全解析）
+        val mh = rc % 10000
         // db ch0 = raw logits → sigmoid → prob（ctd 的 out0 已 sigmoid、DBNet 沒有）；網格＝矩形 inW×inH
         val prob = FloatArray(area)
         for (i in 0 until area) prob[i] = 1f / (1f + exp(-db[i]))
@@ -78,9 +79,9 @@ class Detector(
             prob, inW, inH, pre.ratio, page.width, page.height,
             cfg.dbBinThreshold, cfg.dbBoxThreshold, cfg.dbUnclipRatio,
         )
-        // mask 半解析度（已 sigmoid）→ 原圖尺寸筆畫遮罩。mask 空間 ratio = pre.ratio / 2。
-        val textMask = segToMask(mask, mw, mh, pre.ratio / 2f, page.width, page.height)
-        Log.i(TAG, "DBNet 偵測到 ${lines.size} 個文字行（in ${inW}x$inH）")
+        // mask（已 sigmoid）→ 原圖尺寸筆畫遮罩。mask 空間 ratio = pre.ratio × mw/inW（半解析=ratio/2、全解析=ratio，動態）。
+        val textMask = segToMask(mask, mw, mh, pre.ratio * mw.toFloat() / inW, page.width, page.height)
+        Log.i(TAG, "DBNet 偵測到 ${lines.size} 行（in ${inW}x$inH mask ${mw}x$mh）")
         return Detection(lines, textMask)
     }
 
