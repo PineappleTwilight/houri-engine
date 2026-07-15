@@ -11,7 +11,7 @@ package li.joye.yakuyomi.engine
 data class ModelSet(
     /** 48px CTC OCR（int8 量化 `.onnx`）；OCR 留 ORT（NCNN 有寬度牆，見 memory litert-gpu-blocked）。 */
     val ocr: String,
-    /** comic-text-detector 的 NCNN 版（`.param`，同名 `.bin` 需在旁）。偵測純 NCNN（手機 CPU 比 ORT-XNNPACK 快 ~2.9×）。 */
+    /** DBNet（m-i-t default 偵測器）的 NCNN 版（`.param`，同名 `.bin` 需在旁）。偵測純 NCNN（手機 CPU 比 ORT-XNNPACK 快 ~2.9×）。 */
     val detectorNcnn: String? = null,
     /** AOT-GAN 去字的 NCNN 版（`.param`，同名 `.bin` 需在旁）。去字純 NCNN（整頁固定 tile 768）。 */
     val aotInpainterNcnn: String? = null,
@@ -19,7 +19,7 @@ data class ModelSet(
     companion object {
         /**
          * 從 (檔名, 本機路徑) 清單比對出模型；缺 ocr / NCNN 偵測 / NCNN 去字任一 → 回 null（未備齊，呼叫端略過翻譯）。
-         * 比對不分大小寫、依副檔名分流：ocr＝`.onnx` 含 `ocr`；偵測＝`.param` 含 `detect`/`comictext`；去字＝`.param` 含 `aot`。
+         * 比對不分大小寫、依副檔名分流：ocr＝`.onnx` 含 `ocr`；偵測＝`.param` 含 `dbnet`；去字＝`.param` 含 `aot`。
          */
         fun resolve(files: List<Pair<String, String>>): ModelSet? {
             fun find(ext: String, vararg keys: String): String? = files.firstOrNull { (name, _) ->
@@ -27,7 +27,7 @@ data class ModelSet(
                 n.endsWith(ext) && keys.any { n.contains(it) }
             }?.second
             val ocr = find(".onnx", "ocr") ?: return null
-            val detNcnn = find(".param", "detect", "comictext") ?: return null
+            val detNcnn = find(".param", "dbnet") ?: return null
             val aotNcnn = find(".param", "aot") ?: return null
             return ModelSet(ocr = ocr, detectorNcnn = detNcnn, aotInpainterNcnn = aotNcnn)
         }

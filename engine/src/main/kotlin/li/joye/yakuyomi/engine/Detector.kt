@@ -7,10 +7,11 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * comic-text-detector 文字行偵測器（純 NCNN；ORT 備援已退役移除，產品 arm64 NCNN 必在）。
+ * DBNet 文字行偵測器（m-i-t default detector，ResNet34+DB head；純 NCNN，產品 arm64 NCNN 必在）。
+ * 讀對率贏退役的 comic-text-detector 1.6–2.5×（真機定案，見 memory dbnet-detector-ncnn）。
  *
- * ported from manga_translator/detection/ctd.py (+ ctd_utils/, utils/db_utils.py) @ d5a3eee
- *   det[:,0] 二值化 → 連通元件 → minAreaRect → unclip 膨脹 → 旋轉四邊形。
+ * ported from manga_translator/detection/default_utils/ @ d5a3eee
+ *   db logits → sigmoid → 二值化 → 連通元件 → minAreaRect → unclip 膨脹 → 旋轉四邊形。
  * 參數由 [DetectorConfig] 提供（§5 第一層）。
  */
 class Detector(
@@ -31,30 +32,11 @@ class Detector(
         Log.i(TAG, "NCNN detector loaded $modelPath")
     }
 
-    fun detect(page: Bitmap): Detection {
-        if (cfg.useDbnet) return detectDbnetPath(page)
-        val size = cfg.inputSize
-        val area = size * size
-        val pre = ImageOps.detectorChw(page, size)
-        val det = FloatArray(2 * area) // ch0=det, ch1=blk 邊界（此處只用 ch0）
-        val seg = FloatArray(area)     // seg＝逐像素文字筆畫機率（去字用）
-        val rc = NcnnBackend.detect(ncnnHandle, pre.chw, size, det, seg)
-        check(rc == 0) { "NCNN 偵測推論失敗 rc=$rc" }
-        val lines = linesFromProbMap(
-            det.copyOfRange(0, area), size, size, pre.ratio, page.width, page.height,
-            cfg.textThreshold, cfg.boxThreshold, cfg.unclipRatio,
-        )
-        // seg → letterbox 還原 → 原圖尺寸細筆畫二值遮罩（去字用）
-        val textMask = segToMask(seg, size, size, pre.ratio, page.width, page.height)
-        Log.i(TAG, "偵測到 ${lines.size} 個文字行")
-        return Detection(lines, textMask)
-    }
-
     /**
-     * DBNet（m-i-t default 偵測器）路徑。out0=db（2ch，ch0=raw logits→Kotlin 補 sigmoid）、out1=mask（1ch，半解析度、已 sigmoid）。
-     * 後處理沿用 [linesFromProbMap]（連通元件+minAreaRect+unclip；ctd 的 score=component-mean prob 正好＝DB box_score_fast），只換門檻參數。
+     * out0=db（2ch，ch0=raw logits→Kotlin 補 sigmoid）、out1=mask（1ch，半/全解析度平台不定、已 sigmoid）。
+     * 後處理＝[linesFromProbMap]（連通元件+minAreaRect+unclip；score=component-mean prob＝DB box_score_fast）。
      */
-    private fun detectDbnetPath(page: Bitmap): Detection {
+    fun detect(page: Bitmap): Detection {
         val pre = ImageOps.detectorChwDbnet(page, cfg.dbnetInputSize, cfg.detectUnsharp)
         val inW = pre.w
         val inH = pre.h
@@ -101,7 +83,7 @@ class Detector(
     }
 
     /**
-     * seg 還原成原圖尺寸的二值文字遮罩。前處理 letterbox＝圖貼左上、pad 右下（ImageOps.detectorChw），
+     * seg 還原成原圖尺寸的二值文字遮罩。前處理＝圖貼左上、pad 右下（ImageOps.detectorChwDbnet），
      * 故有效區＝seg[0:nh, 0:nw]（nw=round(origW*ratio)、nh=round(origH*ratio)）→ 縮回原圖 → 門檻。
      * 對齊 parity/seg_validate.py（裁 pad → cv2.resize 雙線性 → >segThreshold）。
      */

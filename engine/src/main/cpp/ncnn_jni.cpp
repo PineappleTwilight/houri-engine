@@ -33,41 +33,8 @@ Java_li_joye_yakuyomi_engine_NcnnBackend_releaseNet(JNIEnv*, jobject, jlong hand
     if (handle) delete (ncnn::Net*) handle;
 }
 
-// 偵測：in0[3,s,s] → out0(det[2,s,s]) + out1(seg[1,s,s])。填 detOut[2*s*s]+segOut[s*s]。0=OK。
-extern "C" JNIEXPORT jint JNICALL
-Java_li_joye_yakuyomi_engine_NcnnBackend_detectNative(
-        JNIEnv* env, jobject, jlong handle,
-        jfloatArray chw, jint s, jfloatArray detOut, jfloatArray segOut) {
-    if (!handle) return -1;
-    ncnn::Net* net = (ncnn::Net*) handle;
-
-    jfloat* in = env->GetFloatArrayElements(chw, nullptr);
-    ncnn::Mat inMat(s, s, 3);
-    for (int c = 0; c < 3; c++) {
-        memcpy(inMat.channel(c), in + (size_t) c * s * s, sizeof(float) * s * s);
-    }
-    env->ReleaseFloatArrayElements(chw, in, JNI_ABORT);
-
-    ncnn::Mat det, seg;
-    ncnn::Extractor ex = net->create_extractor();
-    ex.input("in0", inMat);
-    ex.extract("out0", det);
-    ex.extract("out1", seg);
-
-    jfloat* od = env->GetFloatArrayElements(detOut, nullptr);
-    for (int c = 0; c < 2; c++) {
-        memcpy(od + (size_t) c * s * s, det.channel(c), sizeof(float) * s * s);
-    }
-    env->ReleaseFloatArrayElements(detOut, od, 0);
-
-    jfloat* os = env->GetFloatArrayElements(segOut, nullptr);
-    memcpy(os, seg.channel(0), sizeof(float) * s * s);
-    env->ReleaseFloatArrayElements(segOut, os, 0);
-    return 0;
-}
-
 // DBNet 偵測（m-i-t default 偵測器）：in0[3,s,s] → out0=db[2,s,s]（raw logits，全解析度）+ out1=mask[1,s/2,s/2]（已 sigmoid，半解析度）。
-// ★ 與 detectNative 的差異：out1 是**半解析度**（撞死 detectNative 寫死的 s*s memcpy），故動態讀 mat 的 .w/.h/.c 決定複製量。
+// ★ out1 半/全解析度平台不定（x86 半、arm64 全）→ 動態讀 mat 的 .w/.h/.c 決定複製量，絕不寫死 s*s（否則越界）。
 // 填 dbOut[2*s*s]（逐 channel db.w*db.h）+ maskOut[(s/2)*(s/2)]。回傳 mask.h（>0=OK，Kotlin 據此驗半解析度假設）。
 extern "C" JNIEXPORT jint JNICALL
 Java_li_joye_yakuyomi_engine_NcnnBackend_detectDbnetNative(

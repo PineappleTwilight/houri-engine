@@ -6,7 +6,7 @@ import kotlin.math.min
 
 /**
  * 純 Kotlin 幾何 primitive（CLAUDE.md §6：cv2 → 手刻）。
- * 取代 ctd_utils 後處理用到的 cv2.minAreaRect + pyclipper unclip。
+ * 取代 DB 後處理用到的 cv2.minAreaRect + pyclipper unclip。
  */
 
 data class Pt(val x: Float, val y: Float)

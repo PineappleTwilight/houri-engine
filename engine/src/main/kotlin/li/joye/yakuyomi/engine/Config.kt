@@ -4,7 +4,7 @@ package li.joye.yakuyomi.engine
  * 引擎參數（CLAUDE.md §5 Config：第一層 schema + 預設值）。
  *
  * 參考使用者的 m-i-t config_deepseek.json，但**預設值對齊本專案實際使用的模型**：
- *   偵測 = comic-text-detector（非 m-i-t 的 default 偵測器）
+ *   偵測 = DBNet（m-i-t default 偵測器，ResNet34+DB head）
  *   OCR  = 48px CTC（非 48px 自回歸）
  *   去字 = AOT-GAN（m-i-t inpainting.ckpt，NCNN·整頁 768；LaMa 已退役）
  * 因此部分數值與該 config 的 default/48px 不同，差異處以註解標出。
@@ -21,20 +21,15 @@ data class EngineConfig(
 )
 
 data class DetectorConfig(
-    val inputSize: Int = 1024,        // comic-text-detector 標準（config.detection_size=1536 是 default 偵測器）
-    val textThreshold: Float = 0.3f,  // SegDetectorRepresenter thresh
-    val boxThreshold: Float = 0.6f,   // 〔設定〕ctd.py 外部過濾（config.box_threshold=0.7 是 default 偵測器）
-    val unclipRatio: Float = 1.5f,    // 〔設定〕ctd unclip（config.unclip_ratio=2.3 是 default 偵測器）
     val minSide: Float = 3f,
     // seg 文字筆畫遮罩二值門檻（去字用）。★ 0.3 會濾掉漢字旁注音「假名」的弱訊號 → 去字留一排假名殘留。
     // 降到 0.12＝偵測器其實看得到假名、只是 prob 弱（桌面 parity/auto_diag.py dev_furi3 實證）。只影響去字遮罩、不動偵測框/OCR。
     val segThreshold: Float = 0.12f,
-    // ── DBNet（m-i-t default 偵測器）分支：ResNet34+DB head，桌面驗證偵測品質贏 ctd（讀對率 1.6–2.5×）──
-    //   out0=db（2ch，ch0=raw logits，Kotlin 要補 sigmoid）、out1=mask（1ch，半解析度、已 sigmoid）。DB 後處理見 dbLinesFromProbMap。
-    val useDbnet: Boolean = false,        // true＝走 DBNet 分支取代 ctd（模型走同一 detectorNcnn 欄位，靠此 flag 選前後處理）
-    val dbnetInputSize: Int = 1024,       // DBNet 甜蜜點（真機 3頁×size×OCR 定案：@1024 字對率最高 + warm ~0.9s；@960 字糙、@1280+ 慢又字誤、@768 漏。桌面「@1024 過度分割」被真機 resize_aspect 推翻＝@960/@1024 input canvas 同 768×1024 但 @1024 圖有效區大→OCR strip 清晰）
-    val detectUnsharp: Boolean = false,   // 可選：偵測輸入銳利化（@960 對底格小/淡對話偶爾漏，補回但 marginal+OOD；真機 demo06 A/B 定預設）
-    val dbBinThreshold: Float = 0.5f,     // DB binarize：sigmoid(db ch0) > 此（m-i-t text_threshold=0.5，非 ctd 的 0.3）
+    // ── DBNet（m-i-t default 偵測器，本專案唯一偵測器）：ResNet34+DB head，讀對率贏退役的 ctd 1.6–2.5×（真機定案）──
+    //   out0=db（2ch，ch0=raw logits，Kotlin 補 sigmoid）、out1=mask（1ch，半/全解析度平台不定、已 sigmoid）。DB 後處理見 Detector.linesFromProbMap。
+    val dbnetInputSize: Int = 1024,       // DBNet 甜蜜點（真機 3頁×size×OCR 定案：@1024 字對率最高 + warm ~0.9s；@960 字糙、@1280+ 慢又字誤、@768 漏。resize_aspect → input canvas 768×1024、矩形繞開正方形 832-992 crash 帶）
+    val detectUnsharp: Boolean = false,   // 可選：偵測輸入銳利化（marginal + OOD；真機 demo06 A/B 定預設關）
+    val dbBinThreshold: Float = 0.5f,     // DB binarize：sigmoid(db ch0) > 此（m-i-t text_threshold=0.5）
     val dbBoxThreshold: Float = 0.7f,     // DB score 過濾：component-mean prob < 此丟（m-i-t box_threshold=0.7）
     val dbUnclipRatio: Float = 2.3f,      // DB unclip 膨脹（m-i-t unclip_ratio=2.3）
 )

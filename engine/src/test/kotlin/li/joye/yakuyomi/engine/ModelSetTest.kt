@@ -10,8 +10,8 @@ class ModelSetTest {
     @Test fun resolvesNcnn() {
         val m = ModelSet.resolve(
             listOf(
-                "detector_noblk.ncnn.param" to "/m/det.param",
-                "detector_noblk.ncnn.bin" to "/m/det.bin",
+                "dbnet_detect.ncnn.param" to "/m/det.param",
+                "dbnet_detect.ncnn.bin" to "/m/det.bin",
                 "ocr_int8.onnx" to "/m/ocr",
                 "mit_aot_fixed512.ncnn.param" to "/m/aot.param",
                 "mit_aot_fixed512.ncnn.bin" to "/m/aot.bin",
@@ -23,7 +23,7 @@ class ModelSetTest {
     }
 
     @Test fun caseInsensitive() {
-        val m = ModelSet.resolve(listOf("DETECT.param" to "d", "OCR.onnx" to "o", "AOT.param" to "a"))!!
+        val m = ModelSet.resolve(listOf("DBNET.param" to "d", "OCR.onnx" to "o", "AOT.param" to "a"))!!
         assertEquals("d", m.detectorNcnn)
         assertEquals("o", m.ocr)
         assertEquals("a", m.aotInpainterNcnn)
@@ -31,8 +31,8 @@ class ModelSetTest {
 
     @Test fun nullWhenAnyMissing() {
         assertNull(ModelSet.resolve(listOf("ocr.onnx" to "o", "aot.param" to "a")))    // 缺偵測
-        assertNull(ModelSet.resolve(listOf("detect.param" to "d", "aot.param" to "a"))) // 缺 ocr
-        assertNull(ModelSet.resolve(listOf("detect.param" to "d", "ocr.onnx" to "o")))  // 缺去字
+        assertNull(ModelSet.resolve(listOf("dbnet.param" to "d", "aot.param" to "a"))) // 缺 ocr
+        assertNull(ModelSet.resolve(listOf("dbnet.param" to "d", "ocr.onnx" to "o")))  // 缺去字
         assertNull(ModelSet.resolve(emptyList()))
     }
 }

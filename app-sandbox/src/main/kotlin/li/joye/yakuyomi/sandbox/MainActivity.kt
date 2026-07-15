@@ -190,7 +190,7 @@ class MainActivity : AppCompatActivity() {
                 if (imgs.isEmpty()) { log("✗ 請先點縮圖選至少一張測試圖"); return@launch }
                 // 定案：偵測 + 去字純 NCNN（.param/.bin），OCR = int8 量化 ONNX。
                 val ocrF = findOnnx(tree, "ocr")
-                val detNcnn = ensureNcnnPair(tree, "detect")
+                val detNcnn = ensureNcnnPair(tree, "dbnet")
                 val aotNcnn = ensureNcnnPair(tree, "aot")
                 if (ocrF == null) { log("✗ 缺 OCR 模型（ocr .onnx）"); return@launch }
                 if (detNcnn == null) { log("✗ 缺 NCNN 偵測模型（detector*.ncnn.param）"); return@launch }
@@ -284,7 +284,7 @@ class MainActivity : AppCompatActivity() {
                 if (tree == null) { log("✗ 請先按「選擇模型資料夾」"); return@launch }
                 if (imgs.isEmpty()) { log("✗ 請先點縮圖選至少一張測試圖"); return@launch }
                 val ocrF = findOnnx(tree, "ocr")
-                val detNcnn = ensureNcnnPair(tree, "detect")
+                val detNcnn = ensureNcnnPair(tree, "dbnet")
                 val aotNcnn = ensureNcnnPair(tree, "aot")
                 if (ocrF == null) { log("✗ 缺 OCR 模型（ocr .onnx）"); return@launch }
                 if (detNcnn == null) { log("✗ 缺 NCNN 偵測模型（detector*.ncnn.param）"); return@launch }
@@ -358,7 +358,7 @@ class MainActivity : AppCompatActivity() {
                             try {
                                 Detector(
                                     dbnetPath,
-                                    li.joye.yakuyomi.engine.DetectorConfig(useDbnet = true, dbnetInputSize = size, detectUnsharp = sharpen),
+                                    li.joye.yakuyomi.engine.DetectorConfig(dbnetInputSize = size, detectUnsharp = sharpen),
                                 ).use { det ->
                                     det.detect(pages[0].second) // warm（丟）
                                     for ((name, page) in pages) {
@@ -1032,7 +1032,7 @@ class MainActivity : AppCompatActivity() {
                 val tree = runTree ?: run { log("✗ 請先按「選擇模型資料夾」"); return@launch }
                 if (imgPath == null) { log("✗ 跨頁測試需選單張測試圖"); return@launch }
                 val ocrF = findOnnx(tree, "ocr") ?: run { log("✗ 缺 OCR"); return@launch }
-                val detNcnn = ensureNcnnPair(tree, "detect")
+                val detNcnn = ensureNcnnPair(tree, "dbnet")
                 val aotNcnn = ensureNcnnPair(tree, "aot")
                 if (detNcnn == null || aotNcnn == null) { log("✗ 缺 NCNN 偵測/去字 .param"); return@launch }
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
@@ -1077,7 +1077,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 偵測模型路徑：NCNN `.param`（純 NCNN）；缺回 null。給直接建 Detector 的 dev 工具用。 */
-    private fun resolveDetectorPath(tree: DocumentFile): String? = ensureNcnnPair(tree, "detect")
+    private fun resolveDetectorPath(tree: DocumentFile): String? = ensureNcnnPair(tree, "dbnet")
 
     /** 去字模型路徑：NCNN AOT `.param`（純 NCNN）；缺回 null。給直接建 Inpainter 的 dev 工具用。 */
     private fun resolveInpaintPath(tree: DocumentFile): String? = ensureNcnnPair(tree, "aot")

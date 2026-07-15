@@ -34,22 +34,9 @@ internal object NcnnBackend {
      */
     private val ncnnLock = Any()
 
-    private external fun detectNative(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int
-
     private external fun detectDbnetNative(handle: Long, chw: FloatArray, inW: Int, inH: Int, db: FloatArray, mask: FloatArray): Int
 
     private external fun inpaintAotNative(handle: Long, img: FloatArray, mask: FloatArray, s: Int, out: FloatArray): Int
-
-    /** 偵測：chw=NCHW[1,3,s,s] → det 填 [2*s*s]（ch0=det, ch1=blk 邊界）、seg 填 [s*s]。回 0=OK。序列化（見 [ncnnLock]）。 */
-    fun detect(handle: Long, chw: FloatArray, s: Int, det: FloatArray, seg: FloatArray): Int {
-        EngineTrace.log("ncnn.detect.enter s=$s") // 進來（尚未搶鎖）：卡在這＝在等 ncnnLock
-        return synchronized(ncnnLock) {
-            EngineTrace.log("ncnn.detect.call s=$s") // 緊接原生呼叫前：卡在這無 .exit＝死在原生 detect 內
-            val rc = detectNative(handle, chw, s, det, seg)
-            EngineTrace.log("ncnn.detect.exit rc=$rc")
-            rc
-        }
-    }
 
     /** DBNet 偵測（矩形 resize_aspect 輸入，繞開正方形 832-992 crash 帶）：chw=[3,inH,inW] → db 填 [2*inW*inH]（raw logits 2ch 全解析）、mask 填 [(inW/2)*(inH/2)]（已 sigmoid 半解析）。回 mask.h（>0=OK）。序列化（見 [ncnnLock]）。 */
     fun detectDbnet(handle: Long, chw: FloatArray, inW: Int, inH: Int, db: FloatArray, mask: FloatArray): Int {
