@@ -1,26 +1,27 @@
 {
-  "version": "models-v2",
-  "note": "Auto-download manifest. The engine fetches this (ModelDownloader.fetchManifest), downloads each url into the app's models dir, and verifies sha256. v2 switches the on-device backends: NCNN detector + int8 OCR + NCNN AOT-GAN inpaint (replaces v1's ORT detector + fp32 OCR + LaMa) — ~2.9x faster detection, ~3.6x faster OCR, ~5.5x smaller total, GPU/NPU-ready (fixed-shape NCNN, not yet enabled). NCNN roles ship as .param + .bin pairs (both required). Weights are GPL-3.0 (base LaMa retired); see docs/MODELS.md. Urls point at this repo's GitHub release assets.",
+  "version": "models-v3",
+  "note": "Auto-download manifest. The engine fetches this (ModelDownloader.fetchManifest), downloads each url into the app's models dir, and verifies sha256. v3 switches the detector to DBNet (m-i-t default, ResNet34 + DB head) replacing comic-text-detector — 1.6-2.5x higher on-device recall on dense/handwritten text. OCR (ocr_int8) and inpaint (mit_aot) are unchanged from v2 (urls still point at the models-v2 release). NCNN roles ship as .param + .bin pairs (both required). Weights are GPL-3.0; see docs/MODELS.md. Urls point at this repo's GitHub release assets.",
   "models": [
     {
       "role": "detector",
       "backend": "ncnn",
-      "name": "detector_noblk.ncnn.param",
-      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/detector_noblk.ncnn.param",
-      "size": 18707,
-      "sha256": "851c33def760a7c3fb7cb932512b47a7b00798906fb37d00132b0ee4c6f72794",
+      "name": "dbnet_detect.ncnn.param",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v3/dbnet_detect.ncnn.param",
+      "size": 13392,
+      "sha256": "9e6db2f8c6b0662ab00eb2100b3373d3c984a235eaac0e61c0b2a484ee1ff7b5",
       "license": "GPL-3.0",
-      "source": "https://github.com/dmMaze/comic-text-detector"
+      "source": "https://github.com/zyddnys/manga-image-translator",
+      "note": "DBNet (m-i-t default detector). resize_aspect to 1024 (pad to 256 multiples); rectangular input avoids ncnn's 832-992 square crash band. fp16 storage (146MB); int8 quant drops all boxes so not used."
     },
     {
       "role": "detector",
       "backend": "ncnn",
-      "name": "detector_noblk.ncnn.bin",
-      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v2/detector_noblk.ncnn.bin",
-      "size": 41116904,
-      "sha256": "e9c9c64f84a8f5457bc1caf5a5acf917ec1bd24df641ccf22058c5afbfb2b7dd",
+      "name": "dbnet_detect.ncnn.bin",
+      "url": "https://github.com/joyeli/yakuyomi-engine/releases/download/models-v3/dbnet_detect.ncnn.bin",
+      "size": 153010556,
+      "sha256": "f57bdbede7764a534c56e88be0269602259a7fcd47e54e8b7d954fd0fcc55c3d",
       "license": "GPL-3.0",
-      "source": "https://github.com/dmMaze/comic-text-detector"
+      "source": "https://github.com/zyddnys/manga-image-translator"
     },
     {
       "role": "ocr",
