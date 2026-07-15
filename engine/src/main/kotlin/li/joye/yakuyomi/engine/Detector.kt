@@ -2,6 +2,7 @@ package li.joye.yakuyomi.engine
 
 import android.graphics.Bitmap
 import android.util.Log
+import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -31,6 +32,7 @@ class Detector(
     }
 
     fun detect(page: Bitmap): Detection {
+        if (cfg.useDbnet) return detectDbnetPath(page)
         val size = cfg.inputSize
         val area = size * size
         val pre = ImageOps.detectorChw(page, size)
@@ -38,10 +40,47 @@ class Detector(
         val seg = FloatArray(area)     // seg＝逐像素文字筆畫機率（去字用）
         val rc = NcnnBackend.detect(ncnnHandle, pre.chw, size, det, seg)
         check(rc == 0) { "NCNN 偵測推論失敗 rc=$rc" }
-        val lines = linesFromProbMap(det.copyOfRange(0, area), size, pre.ratio, page.width, page.height)
+        val lines = linesFromProbMap(
+            det.copyOfRange(0, area), size, size, pre.ratio, page.width, page.height,
+            cfg.textThreshold, cfg.boxThreshold, cfg.unclipRatio,
+        )
         // seg → letterbox 還原 → 原圖尺寸細筆畫二值遮罩（去字用）
-        val textMask = segToMask(seg, size, pre.ratio, page.width, page.height)
+        val textMask = segToMask(seg, size, size, pre.ratio, page.width, page.height)
         Log.i(TAG, "偵測到 ${lines.size} 個文字行")
+        return Detection(lines, textMask)
+    }
+
+    /**
+     * DBNet（m-i-t default 偵測器）路徑。out0=db（2ch，ch0=raw logits→Kotlin 補 sigmoid）、out1=mask（1ch，半解析度、已 sigmoid）。
+     * 後處理沿用 [linesFromProbMap]（連通元件+minAreaRect+unclip；ctd 的 score=component-mean prob 正好＝DB box_score_fast），只換門檻參數。
+     */
+    private fun detectDbnetPath(page: Bitmap): Detection {
+        val pre = ImageOps.detectorChwDbnet(page, cfg.dbnetInputSize, cfg.detectUnsharp)
+        val inW = pre.w
+        val inH = pre.h
+        val area = inW * inH
+        val db = FloatArray(2 * area)
+        val mw = inW / 2
+        val mh = inH / 2
+        val mask = FloatArray(mw * mh) // mask 半解析度（矩形）
+        val rc = NcnnBackend.detectDbnet(ncnnHandle, pre.chw, inW, inH, db, mask)
+        check(rc > 0) {
+            if (rc < 0 && -rc != 1) {
+                "DBNet 尺寸越界：實際 db.w=${-rc / 1000} mask.w=${-rc % 1000}（Kotlin 緩衝假設 db=2×${inW}×$inH mask=${mw}×$mh）＝解析度假設錯"
+            } else {
+                "NCNN DBNet forward 空輸出/失敗 rc=$rc（out0/out1 空 → blob 名或 forward 出錯，看 logcat 的 dbnet 行）"
+            }
+        }
+        // db ch0 = raw logits → sigmoid → prob（ctd 的 out0 已 sigmoid、DBNet 沒有）；網格＝矩形 inW×inH
+        val prob = FloatArray(area)
+        for (i in 0 until area) prob[i] = 1f / (1f + exp(-db[i]))
+        val lines = linesFromProbMap(
+            prob, inW, inH, pre.ratio, page.width, page.height,
+            cfg.dbBinThreshold, cfg.dbBoxThreshold, cfg.dbUnclipRatio,
+        )
+        // mask 半解析度（已 sigmoid）→ 原圖尺寸筆畫遮罩。mask 空間 ratio = pre.ratio / 2。
+        val textMask = segToMask(mask, mw, mh, pre.ratio / 2f, page.width, page.height)
+        Log.i(TAG, "DBNet 偵測到 ${lines.size} 個文字行（in ${inW}x$inH）")
         return Detection(lines, textMask)
     }
 
@@ -67,17 +106,18 @@ class Detector(
      */
     private fun segToMask(
         s: FloatArray,
-        size: Int,
+        srcW: Int,
+        srcH: Int,
         ratio: Float,
         origW: Int,
         origH: Int,
     ): Bitmap {
-        val nw = (origW * ratio).roundToInt().coerceIn(1, size)
-        val nh = (origH * ratio).roundToInt().coerceIn(1, size)
+        val nw = (origW * ratio).roundToInt().coerceIn(1, srcW)
+        val nh = (origH * ratio).roundToInt().coerceIn(1, srcH)
         // 有效區轉灰階小圖
         val gray = IntArray(nw * nh)
         for (y in 0 until nh) {
-            val srow = y * size
+            val srow = y * srcW
             val drow = y * nw
             for (x in 0 until nw) {
                 val v = (s[srow + x] * 255f).toInt().coerceIn(0, 255)
@@ -101,12 +141,16 @@ class Detector(
 
     private fun linesFromProbMap(
         prob: FloatArray,
-        size: Int,
+        gridW: Int,
+        gridH: Int,
         ratio: Float,
         origW: Int,
         origH: Int,
+        binThresh: Float,
+        scoreThresh: Float,
+        unclip: Float,
     ): List<TextLine> {
-        val thresh = cfg.textThreshold
+        val thresh = binThresh
         val visited = BooleanArray(prob.size)
         val stack = IntArray(prob.size)
         val out = ArrayList<TextLine>()
@@ -124,8 +168,8 @@ class Detector(
 
             while (sp > 0) {
                 val idx = stack[--sp]
-                val x = idx % size
-                val y = idx / size
+                val x = idx % gridW
+                val y = idx / gridW
                 sum += prob[idx]
                 cnt++
                 var isBoundary = false
@@ -137,8 +181,8 @@ class Detector(
                         if (dx != 0 || dy != 0) {
                             val nx = x + dx
                             val ny = y + dy
-                            if (nx in 0 until size && ny in 0 until size) {
-                                val nidx = ny * size + nx
+                            if (nx in 0 until gridW && ny in 0 until gridH) {
+                                val nidx = ny * gridW + nx
                                 if (prob[nidx] > thresh) {
                                     if (!visited[nidx]) {
                                         visited[nidx] = true
@@ -159,11 +203,11 @@ class Detector(
             }
 
             val score = if (cnt > 0) sum / cnt else 0f
-            if (score < cfg.boxThreshold) continue
+            if (score < scoreThresh) continue
             val rect = Geometry.minAreaRect(boundary) ?: continue
             if (min(rect.w, rect.h) < cfg.minSide) continue
 
-            val quad = rect.unclip(cfg.unclipRatio).corners().map {
+            val quad = rect.unclip(unclip).corners().map {
                 Pt(
                     (it.x / ratio).coerceIn(0f, origW.toFloat()),
                     (it.y / ratio).coerceIn(0f, origH.toFloat()),

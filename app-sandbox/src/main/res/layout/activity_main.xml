@@ -90,6 +90,13 @@
             android:layout_marginTop="8dp"
             android:text="OCR 內插比較（bilinear vs bicubic·效能+品質）" />
 
+        <Button
+            android:id="@+id/dbnetSizeButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="DBNet 三size對照（960 / 960+銳化 / 1024·框+秒數）" />
+
         <Switch
             android:id="@+id/genLogSwitch"
             android:layout_width="wrap_content"

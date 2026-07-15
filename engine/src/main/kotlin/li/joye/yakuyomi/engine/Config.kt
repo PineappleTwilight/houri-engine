@@ -29,6 +29,14 @@ data class DetectorConfig(
     // seg 文字筆畫遮罩二值門檻（去字用）。★ 0.3 會濾掉漢字旁注音「假名」的弱訊號 → 去字留一排假名殘留。
     // 降到 0.12＝偵測器其實看得到假名、只是 prob 弱（桌面 parity/auto_diag.py dev_furi3 實證）。只影響去字遮罩、不動偵測框/OCR。
     val segThreshold: Float = 0.12f,
+    // ── DBNet（m-i-t default 偵測器）分支：ResNet34+DB head，桌面驗證偵測品質贏 ctd（讀對率 1.6–2.5×）──
+    //   out0=db（2ch，ch0=raw logits，Kotlin 要補 sigmoid）、out1=mask（1ch，半解析度、已 sigmoid）。DB 後處理見 dbLinesFromProbMap。
+    val useDbnet: Boolean = false,        // true＝走 DBNet 分支取代 ctd（模型走同一 detectorNcnn 欄位，靠此 flag 選前後處理）
+    val dbnetInputSize: Int = 1024,       // DBNet 甜蜜點（真機 3頁×size×OCR 定案：@1024 字對率最高 + warm ~0.9s；@960 字糙、@1280+ 慢又字誤、@768 漏。桌面「@1024 過度分割」被真機 resize_aspect 推翻＝@960/@1024 input canvas 同 768×1024 但 @1024 圖有效區大→OCR strip 清晰）
+    val detectUnsharp: Boolean = false,   // 可選：偵測輸入銳利化（@960 對底格小/淡對話偶爾漏，補回但 marginal+OOD；真機 demo06 A/B 定預設）
+    val dbBinThreshold: Float = 0.5f,     // DB binarize：sigmoid(db ch0) > 此（m-i-t text_threshold=0.5，非 ctd 的 0.3）
+    val dbBoxThreshold: Float = 0.7f,     // DB score 過濾：component-mean prob < 此丟（m-i-t box_threshold=0.7）
+    val dbUnclipRatio: Float = 2.3f,      // DB unclip 膨脹（m-i-t unclip_ratio=2.3）
 )
 
 data class OcrConfig(

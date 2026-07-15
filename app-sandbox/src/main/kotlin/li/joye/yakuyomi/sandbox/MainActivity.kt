@@ -78,6 +78,7 @@ class MainActivity : AppCompatActivity() {
         binding.repoDemoButton.setOnClickListener { runRepoDemo() }
         binding.crossPageButton.setOnClickListener { runCrossPageBench() }
         binding.ocrAbButton.setOnClickListener { runOcrAb() }
+        binding.dbnetSizeButton.setOnClickListener { runDbnetSizeCompare() }
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
@@ -139,6 +140,7 @@ class MainActivity : AppCompatActivity() {
         binding.repoDemoButton.isEnabled = selected.size == 1
         binding.crossPageButton.isEnabled = selected.size == 1
         binding.ocrAbButton.isEnabled = selected.isNotEmpty()
+        binding.dbnetSizeButton.isEnabled = true // demo06 硬寫、不吃縮圖選取，恆可按
     }
 
     private fun loadAssetThumbnail(path: String, target: Int): Bitmap {
@@ -315,6 +317,90 @@ class MainActivity : AppCompatActivity() {
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 runOnUiThread { binding.ocrAbButton.isEnabled = selected.isNotEmpty() }
+            }
+        }
+    }
+
+    /**
+     * DBNet 三 size 對照（demo06）：同一頁跑 DBNet @960 / @960+銳化 / @1024，各畫偵測框 + 計時，橫向併排肉眼比。
+     * 驗桌面結論在真機重現：@960＝甜蜜點（涵蓋追上 @1024、OCR 讀對更多）、@1024 過度分割、銳化 marginal（真機 A/B）。
+     * 需模型資料夾含 dbnet*.ncnn.param/.bin（DBNet 走 DetectorConfig.useDbnet 分支）。
+     */
+    private fun runDbnetSizeCompare() {
+        binding.dbnetSizeButton.isEnabled = false
+        lifecycleScope.launch(Dispatchers.Default) {
+            clearOutputs()
+            logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
+            runSaveImg = binding.genImgSwitch.isChecked
+            // ★ crash 診斷：引擎 trace 即時寫進 OneDrive log 檔（native crash 前 flush → 看死在哪步、哪個 ncnn 呼叫沒回）。
+            li.joye.yakuyomi.engine.EngineTrace.sink = { msg ->
+                logBuf.append("[trace] ").append(msg).append('\n')
+                writeLog()
+            }
+            try {
+                val tree = runTree ?: run { log("✗ 請先按「選擇模型資料夾」"); return@launch }
+                val dbnetPath = ensureNcnnPair(tree, "dbnet")
+                    ?: run { log("✗ 缺 DBNet 模型（需 dbnet*.ncnn.param/.bin 放模型資料夾）"); writeLog(); return@launch }
+                // 完整詳細測（demo06）：size 768-1536 × 銳利與否，框圖(肉眼看碎/貼合) + OCR 純文字(比讀對品質) + 秒數
+                val ocrF = findOnnx(tree, "ocr")
+                    ?: run { log("✗ 缺 OCR 模型（ocr .onnx）"); writeLog(); return@launch }
+                val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
+                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
+                // 多圖（稀疏 011 / 密集 013 / 中等 014）× size 768-1536 × 銳利否/是；每組每圖出框數/讀出/OCR文字/秒
+                val imgs = listOf("test/ch34_011.jpg", "test/demo06.jpg", "test/ch34_014.jpg")
+                val pages = imgs.map { it.substringAfterLast('/').substringBeforeLast('.') to loadAssetBitmap(it) }
+                val sizes = listOf(768, 960, 1024, 1280, 1536)
+                log("▶ DBNet 完整測：${sizes.size} size × 銳利否/是 × ${pages.size} 圖（011/013/014），框+OCR文字+秒"); writeLog()
+                try {
+                    for (size in sizes) {
+                        for (sharpen in listOf(false, true)) {
+                            val tag = "@$size${if (sharpen) "+S" else ""}"
+                            try {
+                                Detector(
+                                    dbnetPath,
+                                    li.joye.yakuyomi.engine.DetectorConfig(useDbnet = true, dbnetInputSize = size, detectUnsharp = sharpen),
+                                ).use { det ->
+                                    det.detect(pages[0].second) // warm（丟）
+                                    for ((name, page) in pages) {
+                                        val t0 = System.currentTimeMillis()
+                                        val d = det.detect(page)
+                                        val detMs = System.currentTimeMillis() - t0
+                                        val to0 = System.currentTimeMillis()
+                                        ocr.recognize(page, d.lines)
+                                        val ocrMs = System.currentTimeMillis() - to0
+                                        val texts = d.lines.mapNotNull { it.text.takeIf { t -> t.isNotBlank() } }
+                                        log("$tag $name: ${d.lines.size}框 讀${texts.size}塊｜det ${"%.2f".format(detMs / 1000.0)}s ocr ${"%.2f".format(ocrMs / 1000.0)}s"); writeLog()
+                                        log("  ${texts.joinToString(" / ")}"); writeLog()
+                                        if (name == "demo06") {
+                                            addImage(
+                                                "$tag（${d.lines.size}框/${texts.size}讀）",
+                                                page.copy(Bitmap.Config.ARGB_8888, true).also {
+                                                    drawLines(it, d.lines); labelBmp(it, tag, "${d.lines.size}框${texts.size}讀", detMs)
+                                                },
+                                            )
+                                        }
+                                        d.textMask.recycle()
+                                    }
+                                }
+                            } catch (e: Throwable) {
+                                log("$tag ✗ ${e.message}"); writeLog()
+                            }
+                        }
+                    }
+                } finally {
+                    ocr.close()
+                    pages.forEach { it.second.recycle() }
+                }
+                log("★ 完成（多圖 OCR 文字比讀對普遍性 + demo06 框圖比碎/貼合 + 秒數）"); writeLog()
+            } catch (t: Throwable) {
+                Log.e(TAG, "DBNet size 對照失敗", t)
+                log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
+                log(Log.getStackTraceString(t)); writeLog()
+            } finally {
+                li.joye.yakuyomi.engine.EngineTrace.sink = null
+                withContext(Dispatchers.Main) {
+                    updateButtons(); binding.dbnetSizeButton.isEnabled = true
+                }
             }
         }
     }
@@ -1012,7 +1098,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-        private const val BUILD_TAG = "v2.0-ncnn" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
+        private const val BUILD_TAG = "v2.1-dbnet" // 改一次就 bump，手動安裝確認版本用（橫幅/Toast 只標這個）
         // NCNN 推論由引擎 NcnnBackend（libyakuyomi_ncnn）負責；sandbox 不再自帶 benchmark 用的 libncnn_jni。
 
         private const val PREF_TREE = "modelTree"
