@@ -10,11 +10,8 @@ import numpy as np
 import cv2
 import onnxruntime as ort
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "parity/out")
-MODELS = os.path.join(ROOT, "engine/src/main/assets/models")
+from paths import ROOT, OUT, MODELS, SANDBOX_PAGE as IMG, FAITHFUL_BOXES  # 集中路徑，見 paths.py
 LAMA = os.path.join(MODELS, "lama-manga.onnx")
-IMG = os.path.join(ROOT, "app-sandbox/src/main/assets/test/page.png")
 SIZE = 512
 WIN = 1.7
 
@@ -26,7 +23,7 @@ def main():
 
     # 遮罩：所有偵測框填充 + 膨脹
     mask = np.zeros((H, W), np.uint8)
-    for b in json.load(open(os.path.join(OUT, "faithful_boxes.json"), encoding="utf-8"))["boxes"]:
+    for b in json.load(open(FAITHFUL_BOXES, encoding="utf-8"))["boxes"]:
         cv2.fillPoly(mask, [np.array(b["quad"], np.int32)], 255)
     mask = cv2.dilate(mask, np.ones((7, 7), np.uint8), iterations=2)
 

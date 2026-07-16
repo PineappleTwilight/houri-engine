@@ -6,7 +6,12 @@ comic-text-detector parity harness (CLAUDE.md §7).
   綠 = 上游「完整」後處理（直接 import m-i-t 的 SegDetectorRepresenter：輪廓→minAreaRect→unclip）
   紅 = 本專案 M0c「簡化」後處理（二值化→連通元件→軸對齊 bbox），與 engine/Detector.kt 同演算法
 
-用法：python3 parity/ctd_reference.py [page.png]
+用法：python3 parity/ctd_reference.py [頁圖]（預設 paths.SANDBOX_PAGE = 測試頁 demo03.png）
+
+⚠ 這支要的 comictextdetector.pt.onnx 是**已退役**的偵測器（commit 163ee2b 起 DBNet 是唯一偵測器），
+  該模型不在任何 models release 裡 ⇒ 這支等於凍在歷史。它產出的 faithful_boxes.json 已經
+  **凍結成 parity/fixtures/faithful_boxes.json**（OCR parity 數字就是對那 30 框定義的），
+  所以重跑這支不是驗證 parity 的必要條件，別為了它去找退役模型。
 輸出：parity/out/{faithful,simplified,compare}.png 與 faithful_boxes.json（§7 基準）
 """
 import os, sys, json, importlib.util
@@ -14,7 +19,7 @@ import numpy as np
 import cv2
 import onnxruntime as ort
 
-from paths import ROOT, OUT, MODELS, MIT_CLONE  # 集中路徑，見 paths.py
+from paths import ROOT, OUT, MODELS, MIT_CLONE, SANDBOX_PAGE  # 集中路徑，見 paths.py
 MODEL = os.path.join(MODELS, "comictextdetector.pt.onnx")
 MIT_DB = os.path.join(MIT_CLONE, "manga_translator/detection/ctd_utils/utils/db_utils.py")
 INPUT_SIZE = 1024
@@ -23,7 +28,7 @@ BOX_THRESH = 0.6   # ctd.py 外部過濾
 MIN_SIDE = 3
 
 os.makedirs(OUT, exist_ok=True)
-img_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "app-sandbox/src/main/assets/test/page.png")
+img_path = sys.argv[1] if len(sys.argv) > 1 else SANDBOX_PAGE
 
 
 def import_seg_rep():

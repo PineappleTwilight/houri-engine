@@ -21,7 +21,8 @@ data class Usage(val promptTokens: Int, val completionTokens: Int)
  *   system(三步法) → few-shot(語言對範例，預設日→繁中、可改/可關，見 [TranslatorConfig]) → user(<|i|>原文)；回應依 <|i|> 解析。
  *   **語言對不寫死**：toLangName/fromLangName/sample* 全可設定（來源也可換 OCR 模型＝BYOM）。
  *   漏行保留原文（§11）。成功譯文過可選 [postProcess]（如語言正規化）。
- * 此類只管「一頁」；跨頁批次與並發（cfg.batchSize / batchConcurrent）由 [BatchTranslator] 控。
+ * 此類只管「一頁」；跨頁批次與並發是呼叫端的事（fork 的 PageTranslator 以 Semaphore(pipelineDepth) 負責）。
+ * cfg.batchSize / batchConcurrent 在引擎端**無消費者**、只是上游 config schema 的鏡射，見 [TranslatorConfig]。
  */
 class LlmTranslator(
     private val apiKey: String,

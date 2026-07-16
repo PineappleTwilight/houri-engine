@@ -31,8 +31,8 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 
 每階段一句話：
 
-- **Detector** — comic-text-detector。letterbox 前處理、NCNN（固定 1024），產出框（NMS + unclip）跟一張 `seg` 筆畫遮罩。去字用這張遮罩，抹的是筆畫不是方塊。
-- **Ocr** — 48px CTC，動態量化的 int8 ONNX 模型（ARM 上比 fp32 快約 3.6×、165→44MB）。把每行裁出來（透視校正、直書行轉正），辨識、對字典貪婪解碼，丟掉低於 `minProb` 的行。文字行並發跑（見下）。
+- **Detector** — DBNet（ResNet34 + DB head），m-i-t 的 default detector，跑 NCNN、fp16。前處理是 resize_aspect 到 1024、再 pad 到 256 的倍數（**矩形**輸入；這也繞開 ncnn 在正方形 832–992 尺寸上的 heap 損壞）。後處理：機率圖 sigmoid、二值化 0.5、連通元件、minAreaRect，box score ≥ 0.7 留下、unclip 2.3；第二個輸出是 `seg` 筆畫遮罩（門檻 0.12 + 膨脹）。去字用這張遮罩，抹的是筆畫不是方塊。真機讀對率比先前用的 comic-text-detector 高 1.6–2.5×，後者已整條移除。
+- **Ocr** — 48px CTC，動態量化的 int8 ONNX 模型（ARM 上比 fp32 快約 3.6×、165→44MB、對 fp32 有 96.7% CTC parity）。把每行裁出來（手刻 bicubic perspective warp、直書行轉正），辨識、對字典貪婪解碼，丟掉低於 `minProb` 的行。裁切前先把偵測到的四邊形以 `stripPad`（4px）往外擴：框太瘦會切掉最後一個字，CTC 隨即吐出空字串，整個區塊就被丟掉、不翻。外擴只影響 OCR 的裁切——偵測框本身不動，所以以筆畫為準的去字遮罩不受影響。文字行並發跑（見下）。
 - **Grouping** — 把行併成氣泡大小的區塊，分兩階段：寬鬆的連邊，再用 MST 分裂把只靠傳遞才連起來的鄰居切開。這個分裂就是讓密集氣泡不黏成一塊的關鍵。同時算每個區塊的閱讀序跟傾斜角。
 - **Translator** — m-i-t 的 `chatgpt.py` prompt 與協定，走 OpenAI 相容呼叫，每頁一個請求、無跨頁上文。某區塊翻譯失敗就保留它的原文。語言對可設：目標走 `toLangName`、來源由 OCR 模型加 prompt 標籤決定。預設日翻繁中，不寫死。服務商是預設選單、全 OpenAI 相容（Gemini 走它的 compat 端點），各家的模型清單即時撈取——見 [PROVIDERS.md](PROVIDERS_zh.md)。
 - **TextFilter** — m-i-t 的譯後過濾。一個區塊算「可用」的條件：譯文非空白、非純數字、不命中過濾 regex、且不等於原文。
@@ -47,7 +47,7 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 
 - **OCR** 把一頁的文字行並發跑，每行一條緒。圖塊小、吃不滿多緒推論，所以用不同的行把核填滿比較快。
 - **去字跟翻譯重疊。** 去字只要 OCR 過的區塊，這在翻譯回來前就確定了，所以去字在背景 coroutine 上跑、同時 LLM 請求在飛。一頁省下兩者裡較短的那個。這也是為什麼失敗的區塊保留「重貼的原文」而不是原封不動的原圖：把去字跟翻譯結果解耦，才能讓兩者重疊。
-- **跨頁** 批次是 reader app 的事：一章的頁各發一個請求、用 `Semaphore` 限流，下載 worker 在你讀到之前先翻好。
+- **跨頁** 批次是 reader app 的事、不是引擎的：fork 的 `PageTranslator` 把一章的頁丟進 `translatePage`、以 `Semaphore(pipelineDepth)` 限同時在飛的頁數，下載 worker 在你讀到之前先翻好。（`TranslatorConfig.batchSize` / `batchConcurrent` 只是 m-i-t config schema 的鏡射——引擎裡沒有任何東西讀它們。）
 
 ## 與 manga-image-translator 對齊
 
@@ -67,7 +67,7 @@ Yakuyomi 怎麼翻一頁、專案為什麼這樣切、裝置端引擎跟桌面�
 - **模型載 native 記憶體。** `createSession(path)` 把權重讀進 native；用 `readBytes()` 讀進 JVM heap 會撞到每 app 的 heap 上限（約 512MB，跟裝置 RAM 無關）而 OOM。BYOM 先把選的檔複製到 `filesDir` 再傳路徑。
 - **前處理要跟 Python 匯出完全一致** — resize、normalize、NCHW 順序。這是最大的隱形分歧來源，也是 parity 工具大半的存在理由。
 - **推論執行緒。** 偵測跟 AOT-GAN 去字用對齊裝置大核數的緒數（測試機 Snapdragon 8 Gen 3 是 6），把慢的小核加進去會讓一次推論更慢而不是更快。
-- **GPU/NPU 試過、對這些模型不管用——全部跑 CPU。** NCNN 的 Vulkan 把 AOT-GAN 去字模型**算錯**（fp16/fp32 都輸出垃圾、tile 越大越糟——Adreno 上這組 op 的 shader 級 bug），偵測器在 Vulkan 上也輸給 CPU；LiteRT 連把這些模型編到 GPU 都失敗；NPU（Hexagon）後端需要 int8 QDQ、被 OCR 模型的動態寬度堵住。所以三顆模型都跑 CPU 上的 NCNN 手機核心（NEON/Winograd）——而這已經夠快（Snapdragon 8 Gen 3 上約 5 秒／頁）。
+- **GPU/NPU 試過、對這些模型不管用——全部跑 CPU。** NCNN 的 Vulkan 把 AOT-GAN 去字模型**算錯**（fp16/fp32 都輸出垃圾、tile 越大越糟——Adreno 上這組 op 的 shader 級 bug），偵測器在 Vulkan 上也輸給 CPU；LiteRT 連把這些模型編到 GPU 都失敗；NPU（Hexagon）後端需要 int8 QDQ、被 OCR 模型的動態寬度堵住。偵測器的 int8 量化也試過：完全吐不出框、在 ARM 上也沒更快，所以維持 fp16。所以三顆模型都跑 CPU——偵測跟去字走 NCNN 的手機核心（NEON/Winograd）、OCR 走 ONNX Runtime 的 CPU——而這夠快（Snapdragon 8 Gen 3、6 張代表頁：偵測 + OCR 合計約 10.3 秒，161 個偵測框讀出 160）。
 
 ## Repo 結構
 

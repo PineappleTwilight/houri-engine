@@ -38,6 +38,31 @@ YAKU_TEST_DIR=~/manga-test YAKU_MIT_CLONE=~/src/mit python3 pipeline_parity.py r
 
 ---
 
+## Fixture（`parity/fixtures/`，入庫）
+
+**刻意放進 repo** 的驗證素材，讓我們公開宣稱的數字可以從空白 clone 重新量出來：
+
+- `faithful_boxes.json`——定義 `models.json` / `docs/MODELS.md` 那個 OCR **int8 vs fp32 CTC parity**
+  數字的 30 個文字行 quad。**凍結**：它由 `ctd_reference.py` 跑**已退役**的 comic-text-detector 產出，
+  該模型已不在任何 models release 裡 ⇒ 重產不出來；而且凍結才對——這個數字要量的是「**OCR 模型對**
+  在同一批 strip 上讀出的字是否一致」，不是偵測器的性質。來歷寫在檔案裡（`_provenance`）。
+- 測試頁——`app-sandbox/src/main/assets/test/demo03.png`（舊名 `page.png`；commit `ea3e166` 只是
+  **改名**、位元完全相同）。與上面那 30 框是一組。
+- 字表——`engine/src/main/assets/models/alphabet-all-v5.txt`（與上游逐位元相同），`paths.ALPHABET`
+  缺 ckpt 時自動退回這份 ⇒ 純解碼的腳本不必抓 ckpt zip。
+
+重現 parity 數字（需要兩顆 OCR 模型，見 `docs/BUILD_MODELS.md`）：
+
+```bash
+python3 parity/ocr_parity.py     # 印出「逐行 exact match = N/30 = xx.x%」
+```
+
+2026-07-16 實測：**29/30 = 96.7%**，與公開宣稱一致。唯一不同的那行是低信心行（p=0.66）、
+且 int8 讀得**比較對** ⇒ 96.7% 不等於 3.3% 品質損失。效能宣稱（如「ARM 快 3.6×」）是
+**真機數字、桌面驗不出來**。
+
+---
+
 ## 有什麼
 
 **端到端**
@@ -46,7 +71,9 @@ YAKU_TEST_DIR=~/manga-test YAKU_MIT_CLONE=~/src/mit python3 pipeline_parity.py r
 
 **逐階段 parity**（跑/檢視單一階段）
 - `ctd_reference.py [page]`——偵測：faithful（m-i-t 後處理）vs simplified，並排。
-- `ocr_parity.py`——對偵測框做 48px CTC 辨識。
+  凍在歷史：需要已退役的 comic-text-detector ONNX（見上面 Fixture）。
+- `ocr_parity.py`——對凍結的 30 框做 48px CTC 辨識；有 int8 模型在時順便印出公開宣稱的 CTC parity。
+  空白 clone 可跑（fixture + repo 內字表）。
 - `group_exp.py <name…>`——分組：我們的區域 vs m-i-t 的，畫成框。
 - `translate_parity.py`——OCR 出的日文 → DeepSeek → 繁中。
 - `merge_translate_parity.py`——先併行再翻。

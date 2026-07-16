@@ -1,0 +1,253 @@
+# 重建模型
+
+[English](BUILD_MODELS.md) ｜ 中文
+
+引擎載的三顆模型，都是我們自己對 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) 上游 ckpt 的轉檔——沒有上游現成的可散布檔可指，所以由我們自己轉、自己 host。[MODELS_zh.md](MODELS_zh.md) 講這三顆是什麼、怎麼取得；這頁講**怎麼從上游 ckpt 重建它們**，以及**怎麼判斷你重建出來的是對的**。
+
+這裡沒有任何需要你自己拼回去的配方——每條路徑就是一支腳本。以下是那些腳本要的環境、判斷產出的準則，以及「不驗證就會安靜出錯」的那些坑。
+
+## 「可重現」在這裡的意思
+
+比對任何雜湊之前先讀這段，因為三顆裡有一顆，最直覺的那個檢查是錯的。
+
+**[`models.json`](../models.json) 裡的 sha256 是「散布用的完整性檢查」，不是「重現性判準」。** 它存在的目的是讓 app 確認「下載到的檔＝我們發行的檔」。它不是「重建正確」的定義——一次重建可以數值上完全等價，雜湊卻不同。
+
+| 模型 | 判準 | 說明 |
+|---|---|---|
+| 偵測（DBNet） | **逐位元相同**——sha256 對得上 `models.json` | 實測：冷啟動重跑仍精確重現 `9e6db2f8…` / `f57bdbed…` |
+| OCR（int8） | **逐位元相同**——sha256 對得上 `models.json` | 實測：精確重現 `353e68a5…29fa4c5c`。量化這步是決定性的 |
+| 去字（AOT-GAN） | **數值等價**——`out0` 逐位元相同 ＋ 逐層權重比對。**sha256 對不上** | 這是預期內、已查清的：pnnx 的層自動命名與排序不同。見下 |
+
+**為什麼 AOT 的雜湊永遠對不上。** 我們重建出的 `mit_aot_fixed512.ncnn.param` 是 33,762 B，release 是 33,810 B（差 −48 B）；`.bin` 則是**跟 release 一模一樣的 size、但位元不同**。兩個差異都是 pnnx 版本造成的，而且都追到底了：
+
+- **param**：層自動命名（我們是 `conv_24` / `relu_0` / `reflectpad2d_40`，release 是 `conv_70` / `relu_6` / `pad_0`），加上 release 多寫了 Padding 的預設值 `5=0 6=0`。**op 直方圖 diff 完全為空**，layer/blob 數也都是 402/500。
+- **bin**：77% 的位元組不同，但逐層解析後，**76 層權重是同一組、每層 bit-identical**——只是新版 pnnx 把 AOTBlock 的平行 dilated 分支與 fuse conv 排成了不同順序。
+
+真正該看的判準是行為面的，而且只要你把 release 權重給它比對，腳本就會跑：對真頁比對，`out0` 在 s=512 與 s=768 **皆逐位元相同**（`np.array_equal` 為真、max|d| = 0.0）。
+
+**「逐位元」這件事綁在釘住的版本上。** 上面 DBNet 與 OCR 的結果，成立於 torch 2.1.1 + pnnx 1.0.20260526、x86 Linux。換版本大概率會退化成「數值等價但非逐位元相同」——**那是預期，不是失敗**，這種情況請改用各模型段落列的容差來判斷。
+
+## 前置
+
+### Python 環境
+
+```bash
+pip install -r parity/requirements.txt
+```
+
+該檔的「模型重建」區段是**刻意釘死版本**的——逐位元重現就是綁這一組：
+
+| 套件 | 版本 | 誰要用 |
+|---|---|---|
+| torch | 2.1.1 | 三條路徑都要 |
+| torchvision | 0.16.1 | DBNet——ResNet34 backbone |
+| onnx | 1.17.0 | OCR——`quant_pre_process` |
+| onnxruntime | 1.23.0 | OCR——`quantize_dynamic`、驗證 |
+| pnnx | 1.0.20260526 | torch → ncnn |
+| ncnn | 1.0.20260526 | 驗證：載入產出、比對 forward |
+
+實測環境：Python 3.10.12 / numpy 1.26.4 / opencv 4.11、x86 Linux（WSL2）。
+
+**pnnx 是 pip 套件，不是要自己編的外部 binary。** `pip install pnnx` 會同時給你 Python module（`import pnnx`，AOT 腳本用）與 `~/.local/bin/pnnx` 這支 console script（DBNet 腳本以 subprocess 呼叫）。裝到別的地方就用 `YAKU_PNNX` 指過去。
+
+### 上游 clone
+
+三支腳本都是從 manga-image-translator 的 clone 讀模型定義，而不是把副本 vendored 進來：
+
+```bash
+git clone https://github.com/zyddnys/manga-image-translator
+export YAKU_MIT_CLONE=/path/to/manga-image-translator   # 預設 /mnt/d/Gits/manga-image-translator
+```
+
+**腳本只讀 clone——不動它的任何檔案，也不動它的 git 狀態。** 但沒辦法直接 import：上游 `manga_translator/__init__` 會把 translators → tiktoken → openai 整包拖進來，`detection/__init__` 又會 import 根本不在的 `rusty_manga_image_translator`。每支腳本都在記憶體裡繞過去——塞假 module stub 與 package shell（有 `__path__`、但**不執行** `__init__` body）。模型類別本身是純 torch 模組，這樣就解得開。
+
+### `.upstream-ref` 的不一致
+
+有一條不一致值得講白。[`.upstream-ref`](../.upstream-ref) 釘的是 `efdc229`（2026-07-01），但這些模型實際對著建的 clone 停在 `d5a3eee`（2026-05-24），三支腳本檔頭寫的也都是 `@ d5a3eee`。
+
+**這對重建沒有影響**，而且這是查過的、不是假設的。把 `d5a3eee..efdc229` 對 watched 的模型路徑逐一 diff：
+
+- `detection/default_utils/DBNet_resnet34.py`——**完全零差異**
+- `inpainting/inpainting_aot.py` 與 `ocr/model_48px_ctc.py`——**各 1 行**，而且兩者都落在 *loader* 類別的 device dispatch（`cuda`/`mps`/`xpu`），**不在**我們匯出的 `nn.Module` 裡
+- `detection/default.py`——同一行 device dispatch
+- 整個 `detection/`、`ocr/`、`inpainting/` 範圍內，**沒有任何 class 或 function 簽章變動**
+
+所以我們 trace 的架構在兩個 commit 上是相同的。腳本的 `@ d5a3eee` 檔頭記錄的是「實際建出並驗過的版本」；pin 比 clone 新的那些差異，對我們而言是 no-op（§4 第三層那類——刻意不追的上游漂移）。
+
+## 上游 ckpt
+
+**這些你都不用自己抓。** 每支腳本會透過 [`parity/paths.py`](../parity/paths.py) 裡同一支 `fetch()` 下載它要的檔，並在使用前驗過。以下每個雜湊都是照抄上游自己 `_MODEL_MAPPING` 的宣告、不是我們自己編的；全部出自 [beta-0.3 release](https://github.com/zyddnys/manga-image-translator/releases/tag/beta-0.3)。
+
+| 上游檔案 | 大小 | sha256（上游宣告值） | 誰去抓 |
+|---|---|---|---|
+| `detect-20241225.ckpt` | 308,380,176 B | `67ce1c4ed4793860f038c71189ba9630a7756f7683b1ee5afb69ca0687dc502e` | `export_dbnet_ncnn.py` |
+| `inpainting.ckpt` | 22,785,303 B | `878d541c68648969bc1b042a6e997f3a58e49b6c07c5636ad55130736977149f` | `export_aot_ncnn.py` |
+| `ocr-ctc.zip` | — | `fc61c52f7a811bc72c54f6be85df814c6b60f63585175db27cb94a08e0c30101` | `export_ocr_onnx.py`（並解壓） |
+
+ckpt 快取在 `parity/out/ckpt/`（已 gitignore，大檔不會進 repo）。`fetch()` 是**每次跑都驗 sha256**（不只是剛下載完才驗）；hash 不符的檔會重下一次，仍不符就拒用、不會硬吃。下載走 `.part` 再 `os.replace`，所以中斷的執行不會留一個半截檔冒充成品。已經有現成檔就用 `YAKU_DET_CKPT` / `YAKU_INPAINT_CKPT` / `YAKU_OCR_CTC_DIR` 指過去跳過下載。
+
+**OCR 的 ckpt 多一步：它是 zip 發的。** `export_ocr_onnx.py` 會下載 `ocr-ctc.zip`、驗過、再把 `ocr-ctc.ckpt` + `alphabet-all-v5.txt` 解壓到 `parity/out/ckpt/ocr-ctc/`。注意**上游宣告 hash 的只有 zip 本身**——解壓出來的那兩個檔上游沒宣告 hash，所以腳本**不會**自己算一個塞進去釘住。驗 zip 才是在證明來源；自己算的 hash 只能證明「解壓沒把檔弄壞」，那是另一件事。（供參考，本機觀察到的值：`ocr-ctc.ckpt` 169,075,247 B、`alphabet-all-v5.txt` 95,997 B / `c1295ae1…54da33`。）
+
+所有路徑與 env 覆蓋都集中在 `parity/paths.py`。
+
+## 重建偵測器（DBNet）
+
+```bash
+python3 parity/export_dbnet_ncnn.py              # 匯出 + 驗證（約 2-3 分鐘，pnnx 那步最久）
+python3 parity/export_dbnet_ncnn.py --skip-verify
+```
+
+驗 ckpt → 從 clone 取出 `TextDetection` → `load_state_dict`（strict）→ `model.eval()` → `torch.jit.trace` @ `[1,3,1024,768]` → pnnx → ncnn。
+
+**產出**——`parity/out/dbnet/dbnet.ncnn.param` + `.bin`。應該精確等於：
+
+```
+dbnet.ncnn.param      13,392 B  sha256 9e6db2f8c6b0662ab00eb2100b3373d3c984a235eaac0e61c0b2a484ee1ff7b5
+dbnet.ncnn.bin   153,010,556 B  sha256 f57bdbede7764a534c56e88be0269602259a7fcd47e54e8b7d954fd0fcc55c3d
+```
+
+這是 `models.json` 的值。**但檔名不是**——見[上線](#上線)。
+
+**驗證**會自動跑：用 ncnn 載入產出、檢查 blob 契約（`in0` / `out0` / `out1`），並把 forward 拿去跟 torch eager 比對。測試頁預設是 `app-sandbox/src/main/assets/test/ch34_006.jpg`——在 repo 裡，所以**從空白 clone 就跑得起來**（`YAKU_DBNET_TESTPAGE` 可覆蓋）。跟 **release 權重**比對則是額外、選配的一步：手上有那份權重才用 `YAKU_DBNET_REF` 指過去；沒有的話腳本會明說「跳過」，不會假裝驗過。而這顆其實不需要它——對 `models.json` 的 sha256 檢查是更強的陳述。
+
+對 torch eager 的已知容差是：
+
+- `out0` sigmoid(ch0)：maxdiff 0.0034（mean 4.5e-05、corr 0.9999997）
+- `out1` mask：maxdiff 0.272——那是單點離群。mean 6.9e-06、只有 0.004% 的像素差 >0.05，二值化 @0.5 只翻 196,608 中的 ~3 個像素。
+
+那是 ncnn fp16 storage 在 sigmoid 陡峭處的捨入，對框與遮罩無實質影響；而且因為我們的重建與 release 逐位元相同，**這個差異本來就存在於現行上線的模型裡**，不是重建引入的。
+
+**這顆別量化。** int8 實測**完全吐不出框**，在 ARM 上也沒比較快。維持 fp16 storage——這也是為什麼光偵測器就 ~153 MB。
+
+**trace 的 shape 不是執行限制。** 這個網路是全卷積的——產出的 param 只有 Convolution/Deconvolution/Pooling/Concat/Split/ReLU/BinaryOp，沒有 Reshape 或 Interp——所以換任何尺寸照跑。用 768×1024 矩形是為了對齊引擎實際餵的形狀，順便繞開 ncnn 對 832–992 正方形輸入的 heap corruption。
+
+## 重建 OCR（48px CTC、int8）
+
+兩棒接力，零手動下載。
+
+```bash
+python3 parity/export_ocr_onnx.py        # ckpt（自動抓 + 解壓）→ fp32 ONNX
+python3 parity/quantize_ocr_int8.py      # fp32 ONNX → int8（約 3 秒）+ 驗證
+```
+
+**第 1 棒**把 `OCR.forward` 以 opset 17 + 動態軸 N/W 匯出 → `parity/out/ocr_48px_ctc.onnx`，164,974,063 B、sha256 `3019b406…2c35d8`。重跑結果一致；這一棒的位元結果取決於 torch 版本。
+
+只有這一棒需要 ckpt zip。第 2 棒與 parity 腳本只需要 alphabet，而 `paths.ALPHABET` 在解壓那份不在時會**自動退回引擎資產裡那份**（`engine/src/main/assets/models/alphabet-all-v5.txt`，與上游逐位元相同）——所以它們從空白 clone 不抓任何東西就跑得起來。
+
+**第 2 棒**產出 `parity/out/ocr_int8.onnx`，43,625,294 B、sha256 `353e68a5506a6b8967905cd9b3c59e67708df1bc6812e105aa54d4e829fa4c5c`——與 release 逐位元相同、檔名本來就對，可直接上 release。
+
+它內部是兩個呼叫，而且**缺一不可**：
+
+1. **`quant_pre_process(..., skip_symbolic_shape=True)`**——常數摺疊。
+2. **`quantize_dynamic(..., weight_type=QUInt8)`**。
+
+為什麼兩個都非跑不可，見[坑的段落](#坑-4ocr-量化有兩個不直覺的前置)——這正是這一步當初重建不出來的原因。
+
+**為什麼是動態量化、不是靜態/QDQ：** 輸入寬度 W 隨文字 strip 的字數而變。靜態量化需要一組固定 shape 的校準集去離線算 activation 的 scale，對 W 動態的模型不成立。動態量化只把權重離線量化，activation 的 scale/zero-point 在 runtime 現算——免校準集、免固定 shape，代價是每次推論多一點開銷。
+
+**為什麼是 `weight_type=QUInt8`**（不是 ORT 預設的 QInt8）：這是反證出來的——用 QUInt8 產出的檔與 release **逐位元相同**，所以當初就是這個設定。
+
+**驗證**分兩層，而且好的那層就是預設：
+
+- **真 strip**（預設，從空白 clone 就跑得起來）——對 30 個真實文字 quad 跑 fp32 vs int8、比對解碼出的文字。兩個輸入都在 repo 裡：頁圖是 `app-sandbox/src/main/assets/test/demo03.png`（`paths.SANDBOX_PAGE`）、quad 是 [`parity/fixtures/faithful_boxes.json`](../parity/fixtures/faithful_boxes.json)（`paths.FAITHFUL_BOXES`）。實測：max|Δchar_logits| 40.682、argmax 一致率 99.94%（1684/1685 timestep）、CTC 逐行 exact match **29/30**。
+- **合成輸入**——頁圖 fixture 拿不到時退回隨機張量：只驗 load 與數值等價、不驗文字。它是誠實降級，不會假裝驗過了什麼。
+
+那組 quad fixture 是**刻意凍結**的。它由 `ctd_reference.py` 用 comic-text-detector 產出，而那顆偵測器已經退役、任何 models release 都不再帶它 ⇒ **無法重新產生**。這樣沒問題：要驗的主張是「同一批 strip 上 int8 vs fp32」——那是 OCR 模型對的性質，不是「哪顆偵測器找出這些 strip」的性質。把 strip 凍起來，正是讓這個數字能從空白 clone 重現的原因。該檔自己的 `_provenance` 區塊記著這件事。
+
+**29/30 要讀對。** 這就是 `models.json` 寫的「96.7% CTC parity」的來歷。唯一不同的那行是低信心行（p=0.66）：fp32 讀成 `ふふ口`、int8 讀成 `ふふっ`——**對的是 int8**（`ふふっ` 是真的日文，`ふふ口` 是誤讀）。所以那 3.3% 不等於 3.3% 的品質損失。
+
+只想重驗 parity 數字、不想重跑量化 → 用 `parity/ocr_parity.py`（吃現成的那兩顆 ONNX）。
+
+## 重建去字模型（AOT-GAN）
+
+```bash
+python3 parity/export_aot_ncnn.py            # 轉檔 + 驗證（約 1-2 分鐘）
+python3 parity/export_aot_ncnn.py --skip-ref # 略過與 release 權重的比對
+```
+
+ckpt（自動下載）→ 從 clone 取 `AOTGenerator` → `load_state_dict` → `model.eval()` → **`my_layer_norm` monkey-patch**（見[坑 1](#坑-1pnnx-下不了-torchstd產出一顆死模型卻不報錯)——沒有它你會得到一顆死模型）→ `torch.jit.trace` @512 → `pnnx.convert(fp16=True, optlevel=2)` → ncnn。
+
+如果你有真的 m-i-t 安裝，注意它的模型夾裡可能**只有** `lama_large_512px.ckpt`——`inpainting.ckpt` 是另外一個下載，腳本會處理。
+
+**產出**——`parity/out/aot/mit_aot_fixed512.ncnn.param`（33,762 B）+ `.bin`（11,366,088 B）。檔名本來就對得上 `models.json`，不用改名。
+
+**用判準看它、不要看雜湊**——sha256 一定不同，理由見[前面](#可重現在這裡的意思)。腳本會驗 blob 契約（`in0`/`in1`/`out0`）、在 512 與 768 兩種 shape 對 torch 比對。對 torch fp32 的容差是 s=512 max|d| 0.0477（mean 5.3e-4）、s=768 max|d| 0.1017（mean 4.8e-4）——fp16 storage 的正常誤差，release 權重同樣有。
+
+**這是三顆裡唯一「完整判準需要空白 clone 沒有的東西」的模型**：要確認 **`out0` 與 release 權重逐位元相同**、以及跑逐層權重比對，都需要那份 release 權重。用 `YAKU_REF_MODELS` 指到放著它的資料夾（從 [`models.json`](../models.json) 裡 `models-v2` 的 url 下載），或者用 `--skip-ref` 只靠上面那組 torch 比對。
+
+**檔名裡的 `fixed512` 是 trace shape、不是限制。** AOT-GAN 是全卷積的；引擎實跑的是 **tile 768**（`InpainterConfig.tileSize`）。這名字純屬歷史包袱——改名要連 `models.json` 與 release asset 一起換，不值得。@512 trace 的一個副產物是 layer-norm 的元素數被烤成常數（`mul_10 2=16384.0` / `div_11 2=16383.0` ＝ 128×128）。跑 768 時真值該是 36864/36863，但這只讓 Bessel 係數從 1.0000271 變成 1.0000610——相對誤差 ~3e-5，而 reduction 本身仍是動態的。768 的輸出與 release 逐位元相同，就是最實際的背書。
+
+## 那些坑
+
+這些就是為什麼在此之前，除了當初做的人以外沒人重建得出來。
+
+### 坑 1：pnnx 下不了 `torch.std`——產出一顆死模型卻不報錯
+
+`AOTBlock.my_layer_norm` 用了 `feat.std((2,3))`。pnnx 1.0.20260526 轉得出 pnnx IR，但**下不到 ncnn 層**：`layer torch.std not exists or registered` → `network graph not ready` → `find_blob_index_by_name in0/in1/out0 failed`，extract 回 −1。
+
+**而它不會讓轉檔失敗。** pnnx 開開心心 exit，照樣寫出一個看起來完全正常的 `.param`（29,852 B）與 `.bin`。要等到有人載入它，才會發現這顆模型是死的。**重建完不驗證，你就會發出一顆死模型。**
+
+解法是腳本在匯出時（純記憶體、不動 clone）把 `my_layer_norm` monkey-patch 成手刻的等價式：mean → sub → `d*d` → mean → ×N ÷(N−1) → sqrt → +1e-9。兩個很容易寫錯的細節：
+
+- **`×N ÷(N−1)` 是 Bessel 修正。** `torch.std` 預設 `unbiased=True`——它不是除以 N。漏掉這個，你的輸出會有微妙的偏差。
+- **用 `d*d`、不要用 `d**2`**，這樣 pnnx 才會出 BinaryOp mul、對齊 release。
+
+這同時也是「當初那次轉檔做的是同一件事」的證據：release 的 param 裡**沒有** `std`，而是同一組展開（`mean_87` / `mul_10 2=16384.0` / `div_11 2=16383.0` / `sqrt_12`），而且它的 op 直方圖與我們的重建**逐項相同**。
+
+### 坑 2：DBNet 的 `out0` 是 raw logits——沒有 sigmoid
+
+`out0` ch0 是 shrink map 的 **raw logits**。上游是在模型**外面**套 sigmoid（`detection/default.py:23`，`db = db.sigmoid()`），引擎也是（`Detector.kt:59`）。如果你「好心」把 sigmoid 併進匯出的模型，它就會被套兩次，**框會全爆**。不要加。
+
+（ch1 那個 threshold map 則**確實**是在模型內就 sigmoid 過的。這個不對稱是上游的設計，不是我們的。）
+
+### 坑 3：`model.eval()` 是硬性要求，不是衛生習慣
+
+`DBHead.forward` 是照 `self.training` 分支的：train 模式會多吐一個 `binary_maps`，於是 `out0` 變成 3 channel、跟引擎介面對不上。DBNet 腳本用 `assert db.shape[1] == 2` 擋這個。
+
+AOT-GAN 也一樣，但理由不同：`AOTGenerator.forward` 的 training 分支**不含 `clip(-1,1)`**，輸出值域會安靜地改掉。
+
+### 坑 4：OCR 量化有兩個不直覺的前置
+
+1. **必須先常數摺疊。** 在 torch 匯出的圖裡，`layer4.5/conv1` 的權重是以 `Conv <- Identity <- initializer` 進來的。ORT 的 Conv 量化器只認「input[1] 直接是 initializer」，不會穿過那顆 Identity，於是裸跑 `quantize_dynamic` 直接死在 `ValueError: Expected onnx::Conv_1267 to be an initializer`。匯出時已經 `do_constant_folding=True` 也**不會**消掉這一顆；`quant_pre_process` 才會（節點 646 → 437、非-initializer 的 Conv 權重 1 → 0）。
+2. **`skip_symbolic_shape=True` 是必要的。** 符號形狀推論碰到動態 W 就算不下去：`Cannot determine if floor(floor(W/2)/2) - 1 < 0` → `Incomplete symbolic shape inference`。反正動態量化本來就不需要形狀推論——我們要的只是它的常數摺疊那一段。
+
+### 坑 5：ncnn 的 `.param` 與 `.bin` 必須「同一次轉檔」配對出貨
+
+ncnn 的 `.bin` 就是照 `.param` 的層順序線性排的權重流。pnnx 版本不同 → 層順序不同 → `.bin` 位元組整個變——即使每一顆張量其實都 bit-identical。**混用（新 `.param` + 舊 `.bin`）不會報錯，而是安靜吐出全 0**（去字結果整片黑）。
+
+實測：`ours.param` + `release.bin` → 0.0、`release.param` + `ours.bin` → 0.0；而各自配對則都得到相同的 513071.40625。在 `models.json` 裡 `.param` 與 `.bin` 是**兩個獨立 asset**——**永遠要用同一次轉檔的產物一起換**，而且別忘了 app 端可能還快取著舊的那顆。AOT 腳本的 `compare_weights()` 就是為了擋這一類錯誤而存在。
+
+### 比較小、但每個都花過時間的
+
+- **`ncnn.Mat(ndarray)` 不會複製 buffer。** 傳一個暫存進去（`ncnn.Mat(np.ascontiguousarray(x))`）會讓它當場被 GC，於是你讀的是已釋放的記憶體。症狀很陰險：**同一顆模型跑兩次差 max|d| = 2.0**（整個值域），而且時好時壞。要用變數把 numpy 物件持有住。（腳本已標註那兩個變數「別簡化掉」。）
+- **解析 ncnn param 時，Padding 的 `6=` 是 `per_channel_pad_data_size`、不是 `weight_data_size`。** 照後者算會整個位移、解出垃圾——而那個垃圾讀起來會很像「權重不一樣」。只有 Convolution / Deconvolution / InnerProduct 帶權重。
+- **別用 `torch.randn` 驗證。** 雜訊不在去字模型的資料分布內，它的輸出本來就會亂跳，於是你會得到一堆看起來很糟、但毫無意義的數字。腳本用的是真漫畫頁 + 矩形擦除塊。
+- **中間的 `.pt` 不是 bit-stable**（兩次 trace 得到 308,689,713 vs 308,689,649 B——zip metadata/timestamp），即使 ncnn 產出**是**逐位元相同的。永遠別拿 `.pt` 的雜湊當可重現性的訊號，只看 ncnn 產出。
+- **`DBNet_resnet34.py` 裡的 `ImageMultiheadSelfAttention` 是死碼**——`TextDetection` 根本沒用到它，產出的 param 也證實沒有任何 attention 層。別跑去為 attention 的轉檔除錯。
+
+## 上線
+
+產出都落在 `parity/out/`（已 gitignore）。五個檔裡有兩個上線的檔名跟建出來的不一樣：
+
+| 建出來 | 上線名 | `models.json` 角色 |
+|---|---|---|
+| `dbnet.ncnn.param` / `.bin` | **`dbnet_detect.ncnn.param` / `.bin`**——必須改名 | detector |
+| `ocr_int8.onnx` | `ocr_int8.onnx`——原名直用 | ocr |
+| `mit_aot_fixed512.ncnn.param` / `.bin` | `mit_aot_fixed512.ncnn.param` / `.bin`——原名直用 | inpainter |
+
+```bash
+cp parity/out/dbnet/dbnet.ncnn.param /tmp/ship/dbnet_detect.ncnn.param
+cp parity/out/dbnet/dbnet.ncnn.bin   /tmp/ship/dbnet_detect.ncnn.bin
+```
+
+偵測器改名是人工步驟，所以很容易漏。自備模型（BYOM）就算不改名也還是會認得——`ModelSet` 是 substring 比對（`.param` 含 `dbnet` → 偵測、`.param` 含 `aot` → 去字、`.onnx` 含 `ocr` → OCR），`.bin` 則靠把副檔名換掉找同名檔——但 **release asset 一定要用 `models.json` 宣告的名字**，否則自動下載會失敗。
+
+如果你發佈的權重跟現行的不同，請在同一個改動裡一起更新 `models.json` 的 `size` 與 `sha256`——manifest 跟檔案一起版本化，這正是那個檢查有意義的原因。
+
+## 桌面重建驗不到的東西
+
+講明白，免得有人白花一天：
+
+- **效能數字是裝置端量的。** 「ARM 快 ~3.6×」，以及 [MODELS_zh.md](MODELS_zh.md) 裡 10.3 秒 / 6 頁那組數字，都是在真機（SD 8 Gen 3）上量的。**這條重建流程量不出來。**
+- **這些腳本在 x86 上量到的時間是噪音。** 同一顆**逐位元相同**的 OCR 模型跑兩次，量到 1732 ms 與 3336 ms——同一個檔、~2× 的落差。x86 上看到的 fp32 vs int8「~29×」同樣是假象。**別從桌面跑的結果讀出任何速度結論。**
+- **`out1` mask 的解析度隨平台而異，兩端都別寫死。** x86 上回來的是半解析（H/2 × W/2）、arm64 上回來的是全解析。引擎的做法是「配全解析上限的緩衝 + 由 JNI 回實際尺寸」動態讀（commit `7c62f78` 修的就是這個越界）。別讓桌面量到的結果說服你把尺寸寫死在任何一端。

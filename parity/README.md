@@ -42,6 +42,33 @@ Outputs land in `parity/out/` (cached JSON + comparison PNGs; gitignored).
 
 ---
 
+## Fixtures (`parity/fixtures/`, committed)
+
+Verification material that is **in the repo on purpose**, so the numbers we publish can be
+re-measured from a clean clone:
+
+- `faithful_boxes.json` — the 30 text-line quads that define the OCR **int8-vs-fp32 CTC parity**
+  figure quoted in `models.json` / `docs/MODELS.md`. Frozen: they came from `ctd_reference.py`
+  running the **retired** comic-text-detector, which no longer ships in any models release, so
+  they cannot be regenerated — and freezing them is what makes the number a stable measurement
+  of the *OCR model pair* rather than of the detector. Provenance is inside the file (`_provenance`).
+- Test page — `app-sandbox/src/main/assets/test/demo03.png` (was `page.png`; commit `ea3e166`
+  **renamed** it, same bytes). Paired with the quads above.
+- Alphabet — `engine/src/main/assets/models/alphabet-all-v5.txt` (byte-identical to upstream's),
+  which `paths.ALPHABET` falls back to, so decode-only scripts need no checkpoint download.
+
+Reproduce the parity number (needs both OCR models — see `docs/BUILD_MODELS.md`):
+
+```bash
+python3 parity/ocr_parity.py     # prints "逐行 exact match = N/30 = xx.x%"
+```
+
+Measured 2026-07-16: **29/30 = 96.7%**, matching the published figure. The one differing line is
+low-confidence (p=0.66) and int8 is the *better* read there — so 96.7% is not a 3.3% quality loss.
+Speed claims (e.g. "~3.6× on ARM") are **device numbers and cannot be verified on desktop**.
+
+---
+
 ## What's here
 
 **End-to-end**
@@ -50,7 +77,9 @@ Outputs land in `parity/out/` (cached JSON + comparison PNGs; gitignored).
 
 **Per-stage parity** (run/inspect one stage)
 - `ctd_reference.py [page]` — detection: faithful (m-i-t post-processing) vs simplified, side by side.
-- `ocr_parity.py` — 48px CTC recognition on detected boxes.
+  Frozen in history: needs the retired comic-text-detector ONNX (see Fixtures above).
+- `ocr_parity.py` — 48px CTC recognition on the frozen quads; with an int8 model present it also
+  reports the published CTC parity figure. Runs from a clean clone (fixtures + repo alphabet).
 - `group_exp.py <name…>` — grouping: our regions vs m-i-t's, drawn as boxes.
 - `translate_parity.py` — OCR'd JP → DeepSeek → CHT.
 - `merge_translate_parity.py` — line-merge then translate.

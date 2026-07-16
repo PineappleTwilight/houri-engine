@@ -16,7 +16,7 @@ Group：`li.joye.yakuyomi:engine`。Min SDK 26。
 val models = ModelSet.resolve(localModelFiles) ?: return // null = 沒到齊
 // 或明確指定各檔（NCNN 角色給 .param 路徑，對應的 .bin 要放在旁邊）：
 val models = ModelSet(
-    detectorNcnn     = "/path/detector_noblk.ncnn.param",
+    detectorNcnn     = "/path/dbnet_detect.ncnn.param",
     ocr              = "/path/ocr_int8.onnx",
     aotInpainterNcnn = "/path/mit_aot_fixed512.ncnn.param",
 )
@@ -35,7 +35,7 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 }
 ```
 
-`translatePage` 是 `suspend`，從背景 dispatcher 呼叫。一個引擎實例一次處理一頁；不要在同一個實例上並發呼叫 `translatePage`。
+`translatePage` 是 `suspend`，從背景 dispatcher 呼叫。對同一個 **warm** 引擎實例並發呼叫是安全的，reader 就是這樣做跨頁流水線——見[生命週期與執行緒](#生命週期與執行緒)。
 
 ## 模型（BYOM）
 
@@ -43,11 +43,11 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 
 | 角色 | 檔名（常見） | 後端 | 做什麼 | 來源 |
 |---|---|---|---|---|
-| detector | `detector_noblk.ncnn.param`（+ `.bin`） | NCNN | 文字框 + 筆畫遮罩 | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| detector | `dbnet_detect.ncnn.param`（+ `.bin`） | NCNN | 文字框 + 筆畫遮罩 | DBNet，出自 [manga-image-translator](https://github.com/zyddnys/manga-image-translator)（它的 default 偵測器） |
 | ocr | `ocr_int8.onnx` | ONNX Runtime | 48px CTC 日文 OCR，int8 動態量化 | manga-image-translator |
 | inpainter | `mit_aot_fixed512.ncnn.param`（+ `.bin`） | NCNN | AOT-GAN 去字 | [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-`ModelSet.resolve(files)` 把一份扁平的 `(檔名, 本機路徑)` 清單按名字加副檔名對到各角色（`.param` NCNN：`detect`/`comictext` 對 detector、`aot` 對 inpainter；`.onnx` ORT：`ocr` 對 ocr，外加選配的 `detect`/`comictext` 與 `lama`/`aot` 備援），少了 OCR、偵測、或去字任一顆就回 `null`。拿這個當「能翻了嗎？」的檢查。
+`ModelSet.resolve(files)` 把一份扁平的 `(檔名, 本機路徑)` 清單按檔名加副檔名對到各角色：`.param` 含 `dbnet` 是偵測器、`.param` 含 `aot` 是去字、`.onnx` 含 `ocr` 是 OCR。三顆少任一就回 `null`——拿這個當「能翻了嗎？」的檢查。注意 NCNN 角色要兩個檔：`resolve` 只看得到 `.param`，對應的 `.bin` 請自行確保放在旁邊。
 
 路徑必須是本機檔，不能是 SAF/content URI：後端直接從路徑載進 native 記憶體。別用 `readBytes()` 把權重讀進 JVM heap；heap 上限約 512MB（跟裝置 RAM 無關）會 OOM。來源是 SAF 的話，先複製到 `filesDir` 再傳路徑。
 
@@ -60,7 +60,7 @@ val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // 丟低信心 OCR
     inpainter  = InpainterConfig(method = "auto_aot"),    // "boxfill"（快速）| "auto_aot"（AI）
     render     = RenderConfig(orientation = TextOrientation.AUTO),
-    translator = TranslatorConfig(model = "deepseek-chat", batchSize = 8),
+    translator = TranslatorConfig(model = "deepseek-chat", temperature = 0.3),
 )
 Yakuyomi.create(models, alphabet, apiKey, config)
 ```
@@ -69,6 +69,7 @@ Yakuyomi.create(models, alphabet, apiKey, config)
 
 - `OcrConfig.useXnnpack = false`。必須關：XNNPACK 在真機上會把 48px CTC 算錯、OCR 吐空。OCR 是唯一的 ONNX Runtime 模型；偵測器跟去字都跑 NCNN。
 - `OcrConfig.concurrent = true`、`concurrency = 8`。OCR 把文字行並發辨識；8 核手機上 OCR 時間大約砍半，輸出不變。
+- `OcrConfig.stripPad = 4`。裁 OCR 條之前把偵測四邊形往外擴 4px（**偵測框本身不動**，所以去字不受影響）。不擴的話瘦框會把最後一個字切掉、CTC 吐空字串 → 整區被丟掉不翻，見[為何是這些預設](#為何是這些預設)。
 - `InpainterConfig.method = "auto_aot"`、`wholeImage = true`。去字分兩門別：`"boxfill"`（快速去字）把每個字區用就近的背景色平塗——瞬間、平/單色泡泡最乾淨，但壓在畫面上的字會塗成色塊；`"auto_aot"`（AI 去字，預設）把乾淨泡泡平塗、對忙碌區（壓畫面的字）用整頁一次的 AOT-GAN 重建背景（`tileSize = 768`）。
 - `RenderConfig.orientation = AUTO`。跟著每區塊偵測到的方向，再沿區塊傾斜角旋轉。
 - `TranslatorConfig.provider = "deepseek"`，配 `apiBase` 跟 `model`。任何 OpenAI 相容端點。`LlmProviders.ALL` 內建 manga-image-translator 的 LLM 那組外加 OpenRouter 的預設（全 OpenAI 相容；Gemini 走它的 compat 端點），`LlmModels.list()` 撈服務商的即時模型清單。詳見 [`docs/PROVIDERS_zh.md`](../docs/PROVIDERS_zh.md)。
@@ -103,23 +104,86 @@ translator = TranslatorConfig(
 ## 生命週期與執行緒
 
 - `TranslationEngine : AutoCloseable`。`close()` 釋放 detector、OCR、inpainter 的 native session（OCR 的 ONNX Runtime session 加偵測器與去字的 NCNN net）。一律 `use { }` 或 `close()`。
-- `translatePage` 是 `suspend`，一個實例一次一頁。它內部用 coroutines（並發 OCR、去字跟翻譯重疊），但別在單一實例上並發呼叫。
+- `translatePage` 是 `suspend`，且**對同一個 warm 實例並發呼叫是安全的**——reader 就是靠這個做跨頁流水線（第 N 頁的網路翻譯疊上第 N+1 頁的 detect/OCR）。它內部也用 coroutines（並發 OCR、去字跟翻譯重疊）。並發之所以安全：
+  - **翻譯是 per-call。** `LlmTranslator.translateDetailed` 全程走區域變數、把結果（translations／usage／error／raw）從呼叫回傳，所以併發的頁不會互相覆蓋。單值診斷欄位 `lastError` / `lastRaw` **會** race，只給單執行緒呼叫端（如 sandbox）用；pipeline 不讀它們。
+  - **NCNN 推論被序列化。** 偵測與去字在後端拿一把全域鎖：ncnn 用 OpenMP 平行化，兩條緒同時進 forward 會直接 abort 行程（`__kmp_abort_process`）。序列化幾乎不損吞吐——這兩段都是 CPU-bound、本來就塞在翻譯的網路等待窗內，CPU 也無法真的同時跑兩份。OCR（ONNX Runtime）與翻譯（網路）維持併發。
+  - **但要 warm。** 引擎不會自己預熱：多頁同時打進剛載好、lazy init 還沒跑過的原生 session 會在真機上閃退。reader 的做法是載完後第一頁單緒跑完，之後才放行併發。
 - 引擎不回收輸入 bitmap。`Translated.page` 是新的 bitmap。
 
 ## Pipeline
 
-```
-頁  Detector    行 + 筆畫遮罩
-    Ocr         每行日文（並發；就地改 lines）
-    Grouping    區塊（連邊 + MST 分裂；閱讀序；傾斜角）
-    Translator  目標語言（每頁、無滾動上文；可選）
-    TextFilter  判定哪些區塊有可用譯文
-    Inpainter   抹掉原文（跟 Translator 並發跑）
-    Renderer    排版譯文（直/橫排，沿角度）
-    -> 翻好的頁 bitmap
+```mermaid
+flowchart TD
+    P["頁 bitmap"] --> DET
+
+    subgraph DET["① Detector — NCNN·CPU"]
+        direction TB
+        D1["resize_aspect 到 1024<br/>pad 到 256 倍數 → 矩形輸入"]
+        D2["DBNet forward<br/>ResNet34 + DB head"]
+        D3["out0：sigmoid → 二值化 0.5<br/>連通元件 → minAreaRect<br/>框分數 ≥ 0.7 → unclip 2.3"]
+        D4["out1：筆畫遮罩<br/>→ 門檻 0.12 → 膨脹"]
+        D1 --> D2
+        D2 --> D3
+        D2 --> D4
+    end
+
+    DET --> LINES["文字行<br/>（旋轉四邊形 + 分數）"]
+    DET --> MASK["筆畫遮罩<br/>（原圖尺寸·二值）"]
+
+    LINES --> OCR
+    subgraph OCR["② Ocr — ONNX Runtime·int8"]
+        direction TB
+        O1["四邊形 + 4px 外擴 → perspective<br/>bicubic warp → 48px 條 + 16px 白邊"]
+        O2["48px CTC forward<br/>並發：每行 1 緒 × 8 行"]
+        O3["CTC decode → 文字 + prob<br/>prob &lt; 0.5 丟掉"]
+        O1 --> O2 --> O3
+    end
+
+    OCR --> GRP
+    subgraph GRP["③ Grouping"]
+        direction TB
+        G1["寬鬆連邊<br/>（quadrilateral_can_merge_region）"]
+        G2["MST 分裂<br/>（split_text_region）"]
+        G3["閱讀序（RTL）+ 逐區傾斜角"]
+        G1 --> G2 --> G3
+    end
+
+    GRP --> REG["文字區塊<br/>（原文、方向、角度）"]
+
+    REG --> TR["④ Translator — 雲端 LLM<br/>整頁一個請求<br/>無滾動上文"]
+    REG --> INP["⑤ Inpainter — NCNN AOT-GAN<br/>泡泡：就近取色平塗<br/>壓畫面：整頁 tile 768"]
+    MASK --> INP
+
+    TR <-.->|"並發跑<br/>（網路等待 ∥ CPU）"| INP
+
+    TR --> TF["⑥ TextFilter<br/>有可用譯文嗎？<br/>（沒有 → 重貼原文）"]
+    TF --> RND
+    INP --> RND["⑦ Renderer — Canvas<br/>直/橫排、沿傾斜角<br/>縱中橫、自動文字色"]
+    RND --> OUT["翻好的頁 bitmap"]
 ```
 
+去字（⑤）跟翻譯請求（④）是**並發**跑的：去字吃 CPU、翻譯等網路，兩者互不需要對方的輸出——所以 `PageStats.wallMs` 會比各階段相加短。
+
 設計理由跟桌面 parity 驗證見 [`docs/ARCHITECTURE_zh.md`](../docs/ARCHITECTURE_zh.md)。行為對齊 [manga-image-translator](https://github.com/zyddnys/manga-image-translator)。
+
+## 為何是這些預設
+
+Pipeline 對齊 manga-image-translator，但每個參數都在真機（Snapdragon 8 Gen 3）上重新 tune 過、不是直接沿用。凡是跟上游不同的預設，都有真機 A/B 撐著：
+
+| | manga-image-translator | 本引擎 | 實測理由 |
+|---|---|---|---|
+| 偵測尺寸 | 2048（它的預設） | **1024** | 每次 forward 比上游預設少 4 倍像素。這是抽樣查證、不是通則：在 m-i-t 自己的 pipeline 上，006 頁的「その通りじゃ」@1024 有框但 OCR 讀出空字串、要到 @1536／@2048 才讀得出來；本引擎配上下面的 OCR 裁切修正，@1024 就讀得出來。（放大不是免費的：1280+ 開始字誤變多又更慢。） |
+| OCR 權重 | 48px CTC fp32、165 MB | **int8、44 MB** | ARM 上快 3.6×，CTC parity 96.7% |
+| OCR 裁切內插 | bilinear | **手刻 bicubic perspective warp** | 救回小假名——包括句尾否定，漏掉它會讓整句**意思相反** |
+| OCR 裁切框 | 直接用偵測四邊形 | **四邊形 + 4px 外擴** | 瘦框會切掉最後一個字 → CTC 吐空 → 整區被丟掉不翻。6 頁實測：救回 2、**弄壞 0**，OCR 還快 ~20% |
+| 去字 | LaMa／逐區 AOT | **AOT-GAN 整頁 tile 768** | CPU 上快 5–9× 且品質相當或更好；逐區 AOT 在 CPU 無法並行 |
+
+目前數字（6 張代表頁、161 個偵測框）：**讀出 160 — 99.4%**；裝置端偵測 + OCR 共 **10.3 秒**。
+
+另外兩件「量測說不要做」的事，記在這免得重蹈：
+
+- **別把 `dbBoxThreshold` 降到上游的 0.7 以下。** 整章 16 頁量下來框數幾乎不動——0.7 是 401、0.6 是 405、0.5 是 406——而多出來的那幾個框過不了第二道閘：`Ocr` 對低於 `minProb` 的行留空字串，`Pipeline` 再把空白區塊濾掉。真正救回的完整句子：**0 句**。
+- **別把偵測器 int8 量化。** 它**完全吐不出框**，在 ARM 上也沒更快。
 
 ## 進階：直接用各元件
 

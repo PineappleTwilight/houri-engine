@@ -17,7 +17,7 @@ page bitmap
   detect    (NCNN)   text-line boxes + per-pixel stroke mask
   OCR       (ONNX·int8)  one forward per line  ->  source text
   group             merge aligned lines into bubble regions
-  translate (LLM)   one request per page, batched, rate-limited
+  translate (LLM)   one request per page
   remove    (NCNN)   erase the original text (flat-fill or AOT-GAN reconstruction)
   typeset   (Canvas) draw the translation back
   translated bitmap
@@ -37,10 +37,10 @@ Text over artwork is the hard case. A box-fill (what most overlay translators do
 
 - **Speed over maximal quality — a deliberate tradeoff for a phone.** The first instinct was to chase image quality: LaMa inpainting, per-region native-resolution reconstruction, the sharpest text removal possible. On a phone that is a dead end — those cost seconds per page and gigabytes of memory, and the reader stalls. On an end device the goal is not the last few percent of quality but *speed*: a page has to appear while you read. So every stage is settled at the quality/efficiency knee, not the quality ceiling:
   - **OCR** int8-quantized (~3.6× faster than fp32 on ARM, 96.7% parity, a quarter the size).
-  - **Detection and text removal** on NCNN's mobile kernels (~2.9× faster than ORT for detection).
+  - **Detection and text removal** on NCNN's mobile kernels (NEON/Winograd). The detector runs in fp16 — int8 quantization was tried and produced no boxes at all, with no speedup on ARM.
   - **Text removal at tile 768** — whole-page AOT-GAN, the point where quality is good *and* the work stays hidden under the translation wait (see Concurrency). A larger tile or per-region reconstruction is marginally sharper but pokes above that wait; LaMa is slower and blurrier. **GPU/NPU was tried and does not work for these models** — NCNN's Vulkan path miscomputes the AOT-GAN (garbage output), and LiteRT cannot compile it — so everything runs on the **CPU**, which turned out to be enough.
 
-  A page is roughly **5 s** on a Snapdragon 8 Gen 3, peak memory ~1.9–2.1 GB — no GPU, nowhere near 16 GB of RAM.
+  Measured on a Snapdragon 8 Gen 3: detection + OCR take **10.3 s across 6 representative pages** — 161 detected boxes, 160 read back (99.4%). Translation and text removal come on top of that, and overlap each other (see Concurrency). Peak memory ~1.9–2.1 GB — no GPU, nowhere near 16 GB of RAM.
 - **Concurrency, two layers.**
   - *Within a page* — text removal needs only the OCR'd regions, known before the LLM replies, so it runs on a background coroutine while the translate request is in flight; a page pays only the longer of the two. (This is why a failed block keeps its re-pasted source text rather than the untouched image — decoupling removal from the translation result is what lets them overlap.)
   - *Across pages* — `translatePage` is safe to call concurrently on one warm engine (shared detection / OCR / translator / removal sessions; benchmarked on device — no crash, no corruption). So the reader can pipeline: page N's network translate overlaps page N+1's on-device detect/OCR. With the cheap box-fill removal the pipeline reaches the network-bound ceiling — about **2× the sequential rate** at a shallow depth (~4). Pages read first at box-fill quality, then upgrade to full AOT-GAN removal when idle (re-render, below).
@@ -53,9 +53,9 @@ Two layers of concurrency. *Within a page*, text removal (CPU) overlaps the tran
 
 ## What it can do
 
-- **Detection** — comic-text-detector on NCNN (mobile-tuned NEON/Winograd kernels, ~2.9× faster than ORT-XNNPACK on device). Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.
+- **Detection** — DBNet (ResNet34 + DB head, manga-image-translator's default detector) on NCNN. It replaced comic-text-detector, which is gone: DBNet reads **1.6–2.5× more text correctly** on device. Pages are resized aspect-preserving to 1024 and padded to a multiple of 256 — a rectangular input, which also avoids an ncnn heap-corruption bug on square sizes between 832 and 992. Returns text-line quads and a per-pixel stroke mask used to limit text removal to the glyphs.
 - **OCR** — a 48px CTC model on ONNX Runtime, **int8 dynamic-quantized** (~3.6× faster on ARM, 96.7% CTC parity vs fp32, and a quarter the size). One forward per line, decoded greedily; lines are recognized concurrently. Runs on pure CPU MLAS (XNNPACK miscomputes this model).
-- **Translation** — a cloud LLM with the line-numbered protocol from manga-image-translator. Any OpenAI-compatible provider works; presets cover manga-image-translator's set (OpenAI, DeepSeek, Gemini, Groq, Qwen, Sakura, custom) plus OpenRouter, each with its model list fetched live. DeepSeek by default. Per-page requests run concurrently under a semaphore to avoid rate limits. A failed line falls back to its source text rather than breaking the page. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
+- **Translation** — a cloud LLM with the line-numbered protocol from manga-image-translator. Any OpenAI-compatible provider works; presets cover manga-image-translator's set (OpenAI, DeepSeek, Gemini, Groq, Qwen, Sakura, custom) plus OpenRouter, each with its model list fetched live. DeepSeek by default. The engine sends one request per page; running pages concurrently (and rate-limiting them) is the caller's job — the reader does it with a semaphore, see Concurrency above. A failed line falls back to its source text rather than breaking the page. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 - **Text removal** — two modes on NCNN. Speech bubbles are always flat-filled (clean, no halo); the modes differ in how text drawn over artwork is handled:
 
   | Mode | How | Speed |
@@ -84,12 +84,12 @@ Weights are not committed and not packed into the APK. The reader can auto-downl
 
 | Stage | Model | Backend | Source |
 |---|---|---|---|
-| Detection | comic-text-detector (`.ncnn.param`/`.bin`) | NCNN | [dmMaze/comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| Detection | DBNet, ResNet34 + DB head (`.ncnn.param`/`.bin`) | NCNN | from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (its default detector) |
 | OCR | 48px CTC, int8-quantized (`.onnx`) | ONNX Runtime | weights from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 | Text removal | AOT-GAN manga inpaint (`.ncnn.param`/`.bin`) | NCNN | from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 | Fonts | Noto Sans/Serif CJK, Source Han | — | CJK rendering (OFL / Apache) |
 
-NCNN roles ship as a `.param` + `.bin` pair (both required). The full set is about 92 MB.
+NCNN roles ship as a `.param` + `.bin` pair (both required). The full set is about 208 MB, most of it the fp16 detector (153 MB).
 
 ## Building
 
@@ -112,8 +112,7 @@ The engine is a from-scratch Kotlin implementation. It contains no manga-image-t
 ## Credits
 
 - [mihon](https://github.com/mihonapp/mihon) — the reader the app forks (Apache-2.0)
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt and behaviour reference; the OCR and AOT-GAN inpaint model weights
-- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — the text-detection model
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — prompt and behaviour reference; the DBNet detection, OCR, and AOT-GAN inpaint model weights
 - [ncnn](https://github.com/Tencent/ncnn) — the on-device inference runtime for detection and removal
 - Noto Sans/Serif CJK, Source Han — fonts
 
@@ -122,10 +121,9 @@ The engine is a from-scratch Kotlin implementation. It contains no manga-image-t
 **GPL-3.0** — see [LICENSE](LICENSE). The code here is written from scratch in Kotlin, but it ports manga-image-translator's prompts, parameters, and grouping; as a derivative of that GPL-3.0 project, this engine is GPL-3.0.
 
 Component licenses:
-- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0 (prompt/protocol, detection/OCR/removal behaviour, line grouping; 48px CTC OCR model and AOT-GAN inpaint model)
-- [comic-text-detector](https://github.com/dmMaze/comic-text-detector) — GPL-3.0 (text-detection model)
+- [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0 (prompt/protocol, detection/OCR/removal behaviour, line grouping; DBNet detection model, 48px CTC OCR model, and AOT-GAN inpaint model)
 - [ncnn](https://github.com/Tencent/ncnn) — BSD-3-Clause (inference runtime, statically linked)
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) — MIT (OCR inference runtime)
 - [mihon](https://github.com/mihonapp/mihon) — Apache-2.0 (reader fork lives in the separate product repo; Apache-2.0 is GPL-3.0-compatible, so the combined app is GPL-3.0)
 
-Model weights are all GPL-3.0 and are **redistributed** through this repo's [`models-v2` release](https://github.com/joyeli/yakuyomi-engine/releases/tag/models-v2) for one-tap auto-download (see [docs/MODELS.md](docs/MODELS.md)); you can also bring your own from the sources above. Fonts are not bundled (system CJK fallback).
+Model weights are all GPL-3.0 and are **redistributed** through this repo's releases for one-tap auto-download — the manifest is [`models.json`](models.json), pointing at the detector in [`models-v3`](https://github.com/joyeli/yakuyomi-engine/releases/tag/models-v3) and the unchanged OCR and inpaint assets in [`models-v2`](https://github.com/joyeli/yakuyomi-engine/releases/tag/models-v2) (see [docs/MODELS.md](docs/MODELS.md)); you can also bring your own from the sources above. Fonts are not bundled (system CJK fallback).

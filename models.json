@@ -11,7 +11,7 @@
       "sha256": "9e6db2f8c6b0662ab00eb2100b3373d3c984a235eaac0e61c0b2a484ee1ff7b5",
       "license": "GPL-3.0",
       "source": "https://github.com/zyddnys/manga-image-translator",
-      "note": "DBNet (m-i-t default detector). resize_aspect to 1024 (pad to 256 multiples); rectangular input avoids ncnn's 832-992 square crash band. fp16 storage (146MB); int8 quant drops all boxes so not used."
+      "note": "DBNet (m-i-t default detector). resize_aspect to 1024 (pad to 256 multiples); rectangular input avoids ncnn's 832-992 square crash band. fp16 storage (153MB); int8 quant drops all boxes so not used."
     },
     {
       "role": "detector",

@@ -11,7 +11,7 @@ package li.joye.yakuyomi.engine
 data class ModelSet(
     /** 48px CTC OCR（int8 量化 `.onnx`）；OCR 留 ORT（NCNN 有寬度牆，見 memory litert-gpu-blocked）。 */
     val ocr: String,
-    /** DBNet（m-i-t default 偵測器）的 NCNN 版（`.param`，同名 `.bin` 需在旁）。偵測純 NCNN（手機 CPU 比 ORT-XNNPACK 快 ~2.9×）。 */
+    /** DBNet（m-i-t default 偵測器）的 NCNN 版（`.param`，同名 `.bin` 需在旁）。偵測純 NCNN（手機 CPU 的 NEON/Winograd 核心；ORT 偵測路徑已退役移除）。 */
     val detectorNcnn: String? = null,
     /** AOT-GAN 去字的 NCNN 版（`.param`，同名 `.bin` 需在旁）。去字純 NCNN（整頁固定 tile 768）。 */
     val aotInpainterNcnn: String? = null,

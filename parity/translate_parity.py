@@ -8,10 +8,8 @@ prompt/協定 ported from manga_translator/translators/{chatgpt.py,config_gpt.py
 import os, re, json, glob, urllib.request
 import numpy as np
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "parity/out")
+from paths import ROOT, OUT, SANDBOX_PAGE as IMG  # 集中路徑，見 paths.py
 OCR_JSON = os.path.join(OUT, "ocr_results.json")
-IMG = os.path.join(ROOT, "app-sandbox/src/main/assets/test/page.png")
 
 API_BASE = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-chat"

@@ -3,6 +3,9 @@ seg 細筆畫遮罩驗證（M3 去字升級的規格）。
 comictextdetector 吐 blk/seg/det，我們本來只用 det（文字行框）。seg[1,1,1024,1024]=逐像素文字機率。
 這支把 seg letterbox 還原→原圖尺寸→上色疊圖，確認：①筆畫對齊文字 ②夠細（不是整塊）③挑門檻。
 Kotlin Detector 要逐位元對齊這裡的前處理與還原。
+
+⚠ comictextdetector 已於 commit 163ee2b **退役**（DBNet 為唯一偵測器），該模型不在任何 models
+  release 裡 ⇒ 這支凍在歷史、跑不動很正常，留著當當初 seg 遮罩的規格紀錄。
 """
 import os
 import cv2
@@ -32,7 +35,7 @@ def seg_mask(img):
     return cv2.resize(segm, (w, h))              # 回原圖尺寸
 
 
-for name in ("demo3.png", "page.png", "demo2.png"):
+for name in ("demo04.png", "demo03.png"):   # 舊名 demo3.png / page.png，commit ea3e166 改名（demo2.png 已剃除）
     img = cv2.imread(os.path.join(ASSETS, name))
     segm = seg_mask(img)
     for th in (0.3, 0.5):

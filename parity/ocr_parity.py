@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
 """
-OCR parity (M1)：對偵測到的文字行跑 48px CTC OCR ONNX，讀出日文。
+OCR parity：對凍結的 30 個文字行 quad 跑 48px CTC OCR ONNX，讀出日文；
+給了 int8 模型就順便算出 models.json / docs/MODELS.md 宣稱的「CTC parity vs fp32」數字。
+
 裁切複製自 manga_translator/utils/generic.py:sort_pnts + Quadrilateral.get_transformed_region @ d5a3eee
 CTC 解碼複製自 model_48px_ctc.py:decode_ctc_top1（greedy, blank=0, 收合重複+去blank）
+
+素材（皆入庫 ⇒ 空白 clone 可跑）：
+  頁圖   app-sandbox/src/main/assets/test/demo03.png（paths.SANDBOX_PAGE；舊名 page.png，
+         commit ea3e166 只是改名、位元相同）
+  quad   parity/fixtures/faithful_boxes.json（paths.FAITHFUL_BOXES；30 框，來歷見該檔 _provenance）
+  字表   engine/src/main/assets/models/alphabet-all-v5.txt（paths.ALPHABET 缺 ckpt 時自動退回這份）
+
+模型（不入庫，兩條路擇一）：
+  重建   python3 parity/export_ocr_onnx.py     → parity/out/ocr_48px_ctc.onnx（fp32，需 ckpt）
+         python3 parity/quantize_ocr_int8.py   → parity/out/ocr_int8.onnx（int8）
+  下載   從 models-v2 release 抓 ocr_int8.onnx（fp32 沒發佈 ⇒ parity 數字要自己重建 fp32）
+
+用法：
+  python3 parity/ocr_parity.py                       # 有 int8 就自動一起跑並印 parity
+  python3 parity/ocr_parity.py --fp32 A.onnx --int8 B.onnx
+  python3 parity/ocr_parity.py --int8 ""             # 只跑 fp32、不比對
+
+⚠ 這支只驗「同一批 strip 上 int8 與 fp32 讀出的文字是否逐行相同」。**效能數字（如 ARM 快 3.6×）
+  桌面驗不出來**——x86 上逐位元相同的同一顆模型都能測到 ~2× 落差（純噪音），要真機才算數。
 """
-import os, json, glob
+import os, json, glob, argparse
 import numpy as np
 import cv2
 import onnxruntime as ort
 
-from paths import ROOT, OUT, ALPHABET, MIT_CLONE, SANDBOX_PAGE as IMG  # 集中路徑，見 paths.py
-MODEL = os.path.join(OUT, "ocr_48px_ctc.onnx")
-BOXES = os.path.join(OUT, "faithful_boxes.json")
+from paths import ROOT, OUT, ALPHABET, MIT_CLONE, SANDBOX_PAGE, FAITHFUL_BOXES  # 集中路徑，見 paths.py
+FP32 = os.path.join(OUT, "ocr_48px_ctc.onnx")
+INT8 = os.path.join(OUT, "ocr_int8.onnx")
 TEXT_H, BLANK = 48, 0
 
 
@@ -123,13 +144,9 @@ def find_font():
     return None
 
 
-def main():
-    dictionary = [s[:-1] for s in open(ALPHABET, encoding="utf-8").readlines()]
-    sess = ort.InferenceSession(MODEL, providers=["CPUExecutionProvider"])
-    img = cv2.cvtColor(cv2.imread(IMG), cv2.COLOR_BGR2RGB)
-    boxes = json.load(open(BOXES, encoding="utf-8"))["boxes"]
-
-    results = []
+def build_strips(img, boxes):
+    """quad → 48px strip（每框一條，含方向）。兩顆模型吃同一批 ⇒ 差異只可能來自模型本身。"""
+    strips = []
     for i, b in enumerate(boxes):
         try:
             pts, is_v = sort_pnts(b["quad"])
@@ -138,17 +155,92 @@ def main():
             if region is None or region.shape[1] < 2:
                 continue
             x = np.transpose((region.astype(np.float32) - 127.5) / 127.5, (2, 0, 1))[None]
-            char_logits, _ = sess.run(["char_logits", "color"], {"image": x})
-            text, prob = ctc_decode(char_logits[0], dictionary)
-            if text.strip():
-                results.append({"i": i, "dir": direction, "prob": round(prob, 3), "text": text,
-                                "quad": b["quad"]})
-                print(f"[{i:2d}] {direction} p={prob:.2f}  {text}")
+            strips.append({"i": i, "dir": direction, "x": x, "quad": b["quad"]})
         except Exception as e:
-            print(f"[{i:2d}] error: {e}")
+            print(f"[{i:2d}] strip error: {e}")
+    return strips
 
+
+def run_ocr(model_path, strips, dictionary, label):
+    """對整批 strip 跑一顆模型 → 每條的 (text, prob)。回傳 dict: strip index → result。"""
+    sess = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+    out = {}
+    for s in strips:
+        try:
+            char_logits, _ = sess.run(["char_logits", "color"], {"image": s["x"]})
+            text, prob = ctc_decode(char_logits[0], dictionary)
+        except Exception as e:
+            print(f"[{s['i']:2d}] {label} error: {e}")
+            continue
+        out[s["i"]] = {"i": s["i"], "dir": s["dir"], "prob": round(prob, 3), "text": text,
+                       "quad": s["quad"]}
+    return out
+
+
+def report_parity(fp32_res, int8_res):
+    """models.json / docs 宣稱的「CTC parity vs fp32」＝逐行 exact match 率。
+    ⚠ 這是「讀出的字是否一模一樣」，**不等於品質損失**——不同的那行可能 int8 讀得比較對。"""
+    keys = sorted(set(fp32_res) | set(int8_res))
+    same = [k for k in keys if fp32_res.get(k, {}).get("text") == int8_res.get(k, {}).get("text")]
+    diff = [k for k in keys if k not in same]
+    pct = 100.0 * len(same) / len(keys) if keys else 0.0
+    print(f"\n=== CTC parity：int8 vs fp32 ===")
+    print(f"逐行 exact match = {len(same)}/{len(keys)} = {pct:.1f}%")
+    for k in diff:
+        f, q = fp32_res.get(k, {}), int8_res.get(k, {})
+        print(f"  [{k:2d}] fp32 p={f.get('prob')} {f.get('text')!r}"
+              f"  ≠  int8 p={q.get('prob')} {q.get('text')!r}")
+    return {"lines": len(keys), "match": len(same), "parity_pct": round(pct, 2),
+            "diff": [{"i": k, "fp32": fp32_res.get(k, {}).get("text"),
+                      "fp32_prob": fp32_res.get(k, {}).get("prob"),
+                      "int8": int8_res.get(k, {}).get("text"),
+                      "int8_prob": int8_res.get(k, {}).get("prob")} for k in diff]}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="48px CTC OCR parity（fp32 讀字；給 int8 就順便算 parity）")
+    ap.add_argument("--page", default=SANDBOX_PAGE, help="頁圖（預設 repo 內 demo03.png）")
+    ap.add_argument("--boxes", default=FAITHFUL_BOXES, help="quad fixture（預設 parity/fixtures/）")
+    ap.add_argument("--fp32", default=FP32, help="fp32 ONNX（export_ocr_onnx.py 產）")
+    ap.add_argument("--int8", default=INT8, help="int8 ONNX（quantize_ocr_int8.py 產）；'' = 不比對")
+    args = ap.parse_args()
+
+    for p, what in ((args.page, "頁圖"), (args.boxes, "quad fixture"), (ALPHABET, "alphabet")):
+        if not os.path.exists(p):
+            raise SystemExit(f"缺{what}：{p}")
+    if not os.path.exists(args.fp32):
+        raise SystemExit(f"缺 fp32 模型：{args.fp32}\n  先跑：python3 parity/export_ocr_onnx.py（需上游 ocr-ctc ckpt）")
+
+    os.makedirs(OUT, exist_ok=True)   # 空白 clone 沒有 parity/out
+    dictionary = [s[:-1] for s in open(ALPHABET, encoding="utf-8").readlines()]
+    img = cv2.cvtColor(cv2.imread(args.page), cv2.COLOR_BGR2RGB)
+    boxes = json.load(open(args.boxes, encoding="utf-8"))["boxes"]
+    print(f"page  : {args.page}")
+    print(f"boxes : {args.boxes}（{len(boxes)} 框）")
+    print(f"fp32  : {args.fp32}")
+
+    strips = build_strips(img, boxes)
+    fp32_res = run_ocr(args.fp32, strips, dictionary, "fp32")
+    for r in (fp32_res[k] for k in sorted(fp32_res)):
+        print(f"[{r['i']:2d}] {r['dir']} p={r['prob']:.2f}  {r['text']}")
+
+    parity = None
+    if args.int8:
+        if os.path.exists(args.int8):
+            print(f"\nint8  : {args.int8}")
+            int8_res = run_ocr(args.int8, strips, dictionary, "int8")
+            parity = report_parity(fp32_res, int8_res)
+        else:
+            print(f"\n（跳過 parity：找不到 int8 模型 {args.int8}）")
+
+    # 讀出的字：沿用舊行為只留非空行（給 merge/translate 那幾支接手用）
+    results = [fp32_res[k] for k in sorted(fp32_res) if fp32_res[k]["text"].strip()]
     json.dump(results, open(os.path.join(OUT, "ocr_results.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
+    if parity:
+        json.dump(parity, open(os.path.join(OUT, "ocr_parity.json"), "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=2)
+        print(f"parity → {OUT}/ocr_parity.json")
 
     font = find_font()
     print(f"\nfont: {font}")

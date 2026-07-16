@@ -1,0 +1,253 @@
+# Building the models
+
+English ｜ [中文](BUILD_MODELS_zh.md)
+
+The three models the engine loads are our own conversions of [manga-image-translator](https://github.com/zyddnys/manga-image-translator)'s upstream checkpoints — there is no upstream distributable to point at, so we build and host them. [MODELS.md](MODELS.md) covers what they are and how to get them; this page covers how to rebuild them from the upstream checkpoints, and how to tell whether your rebuild came out right.
+
+Nothing here is a recipe you have to reconstruct by hand — each path is one script. What follows is the environment those scripts need, the criteria for judging their output, and the traps that make an unverified rebuild silently wrong.
+
+## What "reproducible" means here
+
+Read this before you compare any hashes, because the obvious check is wrong for one of the three models.
+
+**The sha256 values in [`models.json`](../models.json) are a distribution integrity check, not a reproducibility criterion.** They exist so the app can confirm the file it downloaded is the file we published. They are not a definition of "correctly rebuilt" — a rebuild can be numerically identical and still hash differently.
+
+| Model | Criterion | Notes |
+|---|---|---|
+| Detector (DBNet) | **Bit-identical** — sha256 matches `models.json` | Verified: reproduces `9e6db2f8…` / `f57bdbed…` exactly, on a cold rerun |
+| OCR (int8) | **Bit-identical** — sha256 matches `models.json` | Verified: reproduces `353e68a5…29fa4c5c` exactly. Quantization is deterministic |
+| Inpaint (AOT-GAN) | **Numerical equivalence** — `out0` bit-identical + per-layer weight compare. **The sha256 will not match** | Expected and understood: pnnx's layer auto-naming and ordering differ. See below |
+
+**Why AOT's hash never matches.** Our rebuild produces `mit_aot_fixed512.ncnn.param` at 33,762 B against the released 33,810 B (−48 B), and a `.bin` of exactly the released size but different bytes. Both differences are pnnx version artifacts, and both were traced to the end:
+
+- **param**: layer auto-naming (`conv_24` / `relu_0` / `reflectpad2d_40` here vs `conv_70` / `relu_6` / `pad_0` in the release), plus the release writing out Padding's defaults `5=0 6=0`. The op histogram diff is empty, and layer/blob counts match at 402/500.
+- **bin**: 77% of bytes differ, but parsed layer by layer, the 76 weight tensors are the same set, each bit-identical — a newer pnnx just orders AOTBlock's parallel dilated branches and its fuse conv differently.
+
+The check that matters is behavioural, and the script runs it once you give it the released weights to compare against: on a real page, `out0` is bit-identical at both s=512 and s=768 (`np.array_equal` true, max|d| = 0.0).
+
+**Bit-identity is bound to the pinned versions.** The DBNet and OCR results above hold for torch 2.1.1 + pnnx 1.0.20260526 on x86 Linux. On other versions they will most likely degrade to numerical equivalence — **that is expected, not a failure**. Judge those rebuilds by the same tolerances listed per model below.
+
+## Prerequisites
+
+### Python environment
+
+```bash
+pip install -r parity/requirements.txt
+```
+
+The model-build section of that file is **pinned on purpose** — bit-for-bit reproduction depends on this exact set:
+
+| Package | Version | Used by |
+|---|---|---|
+| torch | 2.1.1 | all three export paths |
+| torchvision | 0.16.1 | DBNet — ResNet34 backbone |
+| onnx | 1.17.0 | OCR — `quant_pre_process` |
+| onnxruntime | 1.23.0 | OCR — `quantize_dynamic`, verification |
+| pnnx | 1.0.20260526 | torch → ncnn |
+| ncnn | 1.0.20260526 | verification: load the exported model and compare forward |
+
+Verified on Python 3.10.12 / numpy 1.26.4 / opencv 4.11, x86 Linux (WSL2).
+
+**pnnx is a pip package, not a binary you have to build.** `pip install pnnx` gives you both the Python module (`import pnnx`, used by the AOT script) and a console script at `~/.local/bin/pnnx` (invoked as a subprocess by the DBNet script). Override the binary path with `YAKU_PNNX` if yours lands elsewhere.
+
+### The upstream clone
+
+All three scripts read the model definitions out of a manga-image-translator clone rather than vendoring copies:
+
+```bash
+git clone https://github.com/zyddnys/manga-image-translator
+export YAKU_MIT_CLONE=/path/to/manga-image-translator   # default: /mnt/d/Gits/manga-image-translator
+```
+
+**The scripts only read the clone — they make no changes to its files or git state.** They can't simply import it: upstream's `manga_translator/__init__` drags in translators → tiktoken → openai, and `detection/__init__` imports a `rusty_manga_image_translator` that isn't there. Each script gets around this in memory, by installing fake module stubs and package shells that carry a `__path__` but never execute the `__init__` body. The model classes themselves are plain torch modules and resolve fine that way.
+
+### A note on `.upstream-ref`
+
+There is a discrepancy worth stating plainly. [`.upstream-ref`](../.upstream-ref) pins `efdc229` (2026-07-01), but the clone these models were built against sits at `d5a3eee` (2026-05-24), and all three script headers say `@ d5a3eee`.
+
+This does not affect rebuilds, and that was checked rather than assumed. Diffing `d5a3eee..efdc229` across the watched model paths:
+
+- `detection/default_utils/DBNet_resnet34.py` — **no diff at all**
+- `inpainting/inpainting_aot.py` and `ocr/model_48px_ctc.py` — **one line each**, and in both cases it is device dispatch in the *loader* class (`cuda`/`mps`/`xpu`), not in the `nn.Module` we export
+- `detection/default.py` — the same one-line device dispatch
+- Across `detection/`, `ocr/` and `inpainting/` as a whole, **no class or function signature changes**
+
+So the architectures we trace are identical at either commit. The scripts' `@ d5a3eee` headers record what was actually built and verified; the pin is ahead of the clone by changes that are, for our purposes, no-ops (§4 tier three material — the kind of upstream drift we deliberately don't chase).
+
+## Upstream checkpoints
+
+**You don't have to fetch any of these by hand.** Each script downloads what it needs through one shared `fetch()` in [`parity/paths.py`](../parity/paths.py) and verifies it before use. Every hash below is copied from upstream's own `_MODEL_MAPPING` declaration, not invented here; all come from the [beta-0.3 release](https://github.com/zyddnys/manga-image-translator/releases/tag/beta-0.3).
+
+| Upstream file | Size | sha256 (upstream-declared) | Fetched by |
+|---|---|---|---|
+| `detect-20241225.ckpt` | 308,380,176 B | `67ce1c4ed4793860f038c71189ba9630a7756f7683b1ee5afb69ca0687dc502e` | `export_dbnet_ncnn.py` |
+| `inpainting.ckpt` | 22,785,303 B | `878d541c68648969bc1b042a6e997f3a58e49b6c07c5636ad55130736977149f` | `export_aot_ncnn.py` |
+| `ocr-ctc.zip` | — | `fc61c52f7a811bc72c54f6be85df814c6b60f63585175db27cb94a08e0c30101` | `export_ocr_onnx.py` (also unzips) |
+
+Checkpoints are cached in `parity/out/ckpt/` (gitignored, so nothing large enters the repo). `fetch()` verifies sha256 on **every** run, not just after downloading; a file whose hash doesn't match is re-downloaded once and then refused rather than used. Downloads go through a `.part` file, so an interrupted run can't leave a truncated file masquerading as the real one. Point `YAKU_DET_CKPT` / `YAKU_INPAINT_CKPT` / `YAKU_OCR_CTC_DIR` at copies you already have to skip the downloads.
+
+**The OCR checkpoint takes one extra step: it ships as a zip.** `export_ocr_onnx.py` downloads `ocr-ctc.zip`, verifies it, and extracts `ocr-ctc.ckpt` + `alphabet-all-v5.txt` into `parity/out/ckpt/ocr-ctc/`. Note that **upstream declares a hash for the zip only** — the two extracted files have no upstream-declared hash, so the scripts don't invent one and pin it. Verifying the zip is what establishes provenance; a hash we computed ourselves could only prove the unzip didn't corrupt anything, which is a different claim. (For reference, what we observe locally: `ocr-ctc.ckpt` 169,075,247 B, `alphabet-all-v5.txt` 95,997 B / `c1295ae1…54da33`.)
+
+`parity/paths.py` holds every path and env override in one place.
+
+## Rebuilding the detector (DBNet)
+
+```bash
+python3 parity/export_dbnet_ncnn.py              # export + verify (~2-3 min; pnnx is the slow step)
+python3 parity/export_dbnet_ncnn.py --skip-verify
+```
+
+Checkpoint verify → pull `TextDetection` out of the clone → `load_state_dict` (strict) → `model.eval()` → `torch.jit.trace` at `[1,3,1024,768]` → pnnx → ncnn.
+
+**Output** — `parity/out/dbnet/dbnet.ncnn.param` + `.bin`. Expect, exactly:
+
+```
+dbnet.ncnn.param      13,392 B  sha256 9e6db2f8c6b0662ab00eb2100b3373d3c984a235eaac0e61c0b2a484ee1ff7b5
+dbnet.ncnn.bin   153,010,556 B  sha256 f57bdbede7764a534c56e88be0269602259a7fcd47e54e8b7d954fd0fcc55c3d
+```
+
+Those are the `models.json` values. **The file name is not** — see [Shipping](#shipping-a-rebuild).
+
+**Verification** runs automatically: it loads the output in ncnn, checks the blob contract (`in0` / `out0` / `out1`), and compares a forward pass against torch eager. The test page defaults to `app-sandbox/src/main/assets/test/ch34_006.jpg`, which is in the repo, so this works from a clean clone (`YAKU_DBNET_TESTPAGE` to override). Comparing against the *released* weights is an extra step and optional — point `YAKU_DBNET_REF` at a folder holding them if you have them; the script says it skipped rather than pretending otherwise. For this model you don't need them anyway: the sha256 check against `models.json` is the stronger statement.
+
+Against torch eager, the known tolerance is:
+
+- `out0` sigmoid(ch0): maxdiff 0.0034 (mean 4.5e-05, corr 0.9999997)
+- `out1` mask: maxdiff 0.272 — a single outlier. Mean 6.9e-06, only 0.004% of pixels differ by >0.05, and thresholding at 0.5 flips ~3 of 196,608 pixels.
+
+That is ncnn's fp16 storage rounding where sigmoid is steep, it has no practical effect on boxes or masks, and — since our rebuild is bit-identical to the release — **it is already present in the shipping model**. It is not something the rebuild introduces.
+
+**Don't quantize this one.** int8 makes it emit no boxes at all, and isn't faster on ARM either. fp16 storage is why the detector alone is ~153 MB.
+
+**The trace shape is not a runtime limit.** The network is fully convolutional — the output param contains only Convolution/Deconvolution/Pooling/Concat/Split/ReLU/BinaryOp, no Reshape or Interp — so it runs at any size. The 768×1024 rectangle matches what the engine actually feeds it, which also keeps clear of an ncnn heap-corruption bug on square inputs in the 832–992 band.
+
+## Rebuilding the OCR model (48px CTC, int8)
+
+Two stages, no manual downloads.
+
+```bash
+python3 parity/export_ocr_onnx.py        # ckpt (auto-fetch + unzip) -> fp32 ONNX
+python3 parity/quantize_ocr_int8.py      # fp32 ONNX -> int8 (~3 s), + verify
+```
+
+**Stage 1** exports `OCR.forward` with opset 17 and dynamic axes N/W → `parity/out/ocr_48px_ctc.onnx`, 164,974,063 B, sha256 `3019b406…2c35d8`. Deterministic on a rerun; the torch version is what this stage's bytes hinge on.
+
+Only this stage needs the checkpoint zip. Stage 2 and the parity scripts need just the alphabet, and `paths.ALPHABET` falls back to the copy in the engine's assets (`engine/src/main/assets/models/alphabet-all-v5.txt`, bit-identical to upstream's) when the extracted one isn't there — so they run from a clean clone without fetching anything.
+
+**Stage 2** produces `parity/out/ocr_int8.onnx`, 43,625,294 B, sha256 `353e68a5506a6b8967905cd9b3c59e67708df1bc6812e105aa54d4e829fa4c5c` — bit-identical to the released model, name already correct, ready to ship.
+
+Internally it is two calls, and **neither is optional**:
+
+1. **`quant_pre_process(..., skip_symbolic_shape=True)`** — constant folding.
+2. **`quantize_dynamic(..., weight_type=QUInt8)`**.
+
+Why each is mandatory is the [trap section](#trap-4-the-ocr-quantizer-needs-two-non-obvious-preconditions) — it is the reason this step was previously not reproducible.
+
+**Why dynamic quantization, not static/QDQ:** the input width W varies with the number of characters in a text strip. Static quantization needs a fixed-shape calibration set to compute activation scales offline, which doesn't hold for a W-dynamic model. Dynamic quantization only quantizes weights offline and derives activation scale/zero-point at runtime — no calibration set, no fixed shape, at the cost of some per-inference overhead.
+
+**Why `weight_type=QUInt8`** (not ORT's default QInt8): proven by construction — QUInt8 reproduces the released file bit-for-bit, so that is what was originally used.
+
+**Verification** has two levels, and the good one is the default:
+
+- **Real strips** (default, works from a clean clone) — runs fp32 vs int8 over 30 real text quads and compares the decoded text. Both inputs are in the repo: the page is `app-sandbox/src/main/assets/test/demo03.png` (`paths.SANDBOX_PAGE`) and the quads are [`parity/fixtures/faithful_boxes.json`](../parity/fixtures/faithful_boxes.json) (`paths.FAITHFUL_BOXES`). Measured: max|Δchar_logits| 40.682, argmax agreement 99.94% (1684/1685 timesteps), CTC per-line exact match **29/30**.
+- **Synthetic** — a random tensor, if the page fixture is unavailable: load + numerical equivalence only, no text. It degrades honestly rather than pretending it verified something.
+
+The quad fixture is **frozen on purpose**. It was produced by `ctd_reference.py` using comic-text-detector, which is retired and no longer shipped in any models release, so it cannot be regenerated. That's fine: the claim being verified is "int8 vs fp32 over the same strips" — a property of the OCR model pair, not of whichever detector found the strips. Freezing them is what keeps the number reproducible from a clean clone. The file's own `_provenance` block records this.
+
+**Read 29/30 correctly.** That is where `models.json`'s "96.7% CTC parity" comes from. The one line that differs is a low-confidence line (p=0.66) where fp32 reads `ふふ口` and int8 reads `ふふっ` — **int8 is the one that's right** (`ふふっ` is real Japanese; `ふふ口` is a misread). 3.3% divergence is not 3.3% quality loss.
+
+To re-check the parity number without redoing the quantization, use `parity/ocr_parity.py`, which takes the two existing ONNX files.
+
+## Rebuilding the inpaint model (AOT-GAN)
+
+```bash
+python3 parity/export_aot_ncnn.py            # convert + verify (~1-2 min)
+python3 parity/export_aot_ncnn.py --skip-ref # skip the comparison against released weights
+```
+
+Checkpoint (auto-download) → `AOTGenerator` from the clone → `load_state_dict` → `model.eval()` → **`my_layer_norm` monkey-patch** (see [trap 1](#trap-1-pnnx-cant-lower-torchstd--a-dead-model-with-no-error) — without it you get a dead model) → `torch.jit.trace` at 512 → `pnnx.convert(fp16=True, optlevel=2)` → ncnn.
+
+If you have a real m-i-t install, note its models folder may only carry `lama_large_512px.ckpt` — `inpainting.ckpt` is a separate download, which the script handles.
+
+**Output** — `parity/out/aot/mit_aot_fixed512.ncnn.param` (33,762 B) + `.bin` (11,366,088 B). The name already matches `models.json`; no rename needed.
+
+**Judge it by the criterion, not the hash** — the sha256 will differ, for the reasons given [above](#what-reproducible-means-here). The script verifies the blob contract (`in0`/`in1`/`out0`) and compares against torch at 512 and 768. Against torch fp32 the tolerance is s=512 max|d| 0.0477 (mean 5.3e-4) and s=768 max|d| 0.1017 (mean 4.8e-4) — ordinary fp16 storage error, present in the released weights too.
+
+This is the one model whose full criterion needs something a clean clone doesn't have: the released weights, to confirm **`out0` is bit-identical** and to run the layer-by-layer weight compare. Point `YAKU_REF_MODELS` at a folder containing them — download them from the `models-v2` release urls in [`models.json`](../models.json) — or pass `--skip-ref` and settle for the torch comparison above.
+
+**`fixed512` in the name is the trace shape, not a limit.** AOT-GAN is fully convolutional; the engine runs it at **tile 768** (`InpainterConfig.tileSize`). The name is historical baggage — renaming would mean churning `models.json` and the release assets, which isn't worth it. One artifact of tracing at 512 is that the layer-norm element count is baked in as a constant (`mul_10 2=16384.0` / `div_11 2=16383.0` = 128×128). At 768 the true values would be 36864/36863, but this only shifts the Bessel factor from 1.0000271 to 1.0000610 — a ~3e-5 relative difference, and the reduction itself stays dynamic. The 768 output being bit-identical to the release is the practical proof.
+
+## The traps
+
+These are the reasons the models were, until now, not rebuildable by anyone but the person who first did it.
+
+### Trap 1: pnnx can't lower `torch.std` — a dead model, with no error
+
+`AOTBlock.my_layer_norm` uses `feat.std((2,3))`. pnnx 1.0.20260526 converts it into pnnx IR but **cannot lower it to an ncnn layer**: `layer torch.std not exists or registered` → `network graph not ready` → `find_blob_index_by_name in0/in1/out0 failed`, extract returns −1.
+
+**It does not fail the build.** pnnx exits happily and writes a perfectly normal-looking `.param` (29,852 B) and `.bin`. The model is only discovered to be dead when something tries to load it. **Rebuild without verifying and you will ship a dead model.**
+
+The fix, which the script applies at export time (in memory — the clone is not modified), is to monkey-patch `my_layer_norm` into the hand-expanded equivalent: mean → sub → `d*d` → mean → ×N ÷(N−1) → sqrt → +1e-9. Two details that are easy to get wrong:
+
+- **`×N ÷(N−1)` is Bessel's correction.** `torch.std` defaults to `unbiased=True` — it does not divide by N. Drop this and your output is subtly biased.
+- **Use `d*d`, not `d**2`**, so pnnx emits a BinaryOp mul, matching the release.
+
+This is also evidence that the original conversion did exactly the same thing: the released param contains no `std`, but does contain that same expansion (`mean_87` / `mul_10 2=16384.0` / `div_11 2=16383.0` / `sqrt_12`), and its op histogram matches our rebuild item for item.
+
+### Trap 2: DBNet's `out0` is raw logits — not sigmoid'd
+
+`out0` ch0 is the shrink map as **raw logits**. Upstream applies sigmoid outside the model (`detection/default.py:23`, `db = db.sigmoid()`), and so does the engine (`Detector.kt:59`). If you "helpfully" fold sigmoid into the exported model, it gets applied twice and **every box is wrong**. Leave it out.
+
+(ch1, the threshold map, *is* sigmoid'd inside the model. The asymmetry is upstream's, not ours.)
+
+### Trap 3: `model.eval()` is a hard requirement, not hygiene
+
+`DBHead.forward` branches on `self.training`: in train mode it emits an extra `binary_maps`, so `out0` becomes 3-channel and no longer matches the engine's interface. The DBNet script asserts `db.shape[1] == 2` to catch this.
+
+The same applies to AOT-GAN for a different reason: `AOTGenerator.forward`'s training branch **omits the `clip(-1,1)`**, so the output range silently changes.
+
+### Trap 4: the OCR quantizer needs two non-obvious preconditions
+
+1. **Constant-fold first.** In torch's exported graph, `layer4.5/conv1`'s weight arrives as `Conv <- Identity <- initializer`. ORT's Conv quantizer only recognises "input[1] is directly an initializer" and won't see through the Identity, so a bare `quantize_dynamic` dies with `ValueError: Expected onnx::Conv_1267 to be an initializer`. Exporting with `do_constant_folding=True` does *not* remove this one. `quant_pre_process` does (nodes 646 → 437, non-initializer Conv weights 1 → 0).
+2. **`skip_symbolic_shape=True` is required.** Symbolic shape inference can't cope with the dynamic W: `Cannot determine if floor(floor(W/2)/2) - 1 < 0` → `Incomplete symbolic shape inference`. Dynamic quantization doesn't need shape inference anyway — we only want the constant folding.
+
+### Trap 5: an ncnn `.param` and its `.bin` must ship as a matched pair
+
+An ncnn `.bin` is just a linear stream of weights laid out in the `.param`'s layer order. A different pnnx version orders layers differently, so the `.bin` bytes change completely — even when every individual tensor is bit-identical. **Mixing a new `.param` with an old `.bin` does not error. It silently outputs all zeros** (text removal renders solid black).
+
+Measured: `ours.param` + `release.bin` → 0.0, and `release.param` + `ours.bin` → 0.0, while each matched pair gives the same 513071.40625. In `models.json` the `.param` and `.bin` are two independent assets — **always replace both from the same conversion**, and remember the app may have cached the old one. The AOT script's `compare_weights()` exists to catch this class of mistake.
+
+### Smaller ones, all of which have cost time
+
+- **`ncnn.Mat(ndarray)` does not copy the buffer.** Passing a temporary (`ncnn.Mat(np.ascontiguousarray(x))`) lets it be garbage-collected immediately, and you read freed memory. The symptom is vicious: the same model, run twice, differing by max|d| = 2.0 (the entire value range), intermittently. Hold the numpy object in a variable. (The scripts flag these variables as not-to-be-simplified.)
+- **When parsing an ncnn param, Padding's `6=` is `per_channel_pad_data_size`, not `weight_data_size`.** Reading it as the latter shifts everything and decodes garbage — which reads convincingly as "the weights are different". Only Convolution / Deconvolution / InnerProduct carry weights.
+- **Don't verify with `torch.randn`.** Noise is outside the inpaint model's data distribution; its output legitimately flails, and you get bad-looking numbers that mean nothing. The script uses a real manga page with a rectangular erase block.
+- **The intermediate `.pt` is not bit-stable** (two traces gave 308,689,713 vs 308,689,649 B — zip metadata/timestamps), even when the ncnn output *is* bit-identical. Never use the `.pt` hash as a reproducibility signal; judge only the ncnn output.
+- **`ImageMultiheadSelfAttention` in `DBNet_resnet34.py` is dead code** — `TextDetection` never uses it, and the exported param confirms there are no attention layers. Don't go debugging attention conversion.
+
+## Shipping a rebuild
+
+Outputs land in `parity/out/` (gitignored). Two of the five files ship under a different name than they're built with:
+
+| Built | Ships as | `models.json` role |
+|---|---|---|
+| `dbnet.ncnn.param` / `.bin` | **`dbnet_detect.ncnn.param` / `.bin`** — rename required | detector |
+| `ocr_int8.onnx` | `ocr_int8.onnx` — as-is | ocr |
+| `mit_aot_fixed512.ncnn.param` / `.bin` | `mit_aot_fixed512.ncnn.param` / `.bin` — as-is | inpainter |
+
+```bash
+cp parity/out/dbnet/dbnet.ncnn.param /tmp/ship/dbnet_detect.ncnn.param
+cp parity/out/dbnet/dbnet.ncnn.bin   /tmp/ship/dbnet_detect.ncnn.bin
+```
+
+The detector rename is a manual step and therefore easy to forget. Bring-your-own-model will still resolve the unrenamed file — `ModelSet` matches by substring (`.param` containing `dbnet` → detector, `.param` containing `aot` → inpainter, `.onnx` containing `ocr` → OCR) and finds the `.bin` by swapping the suffix — but a release asset must carry the name `models.json` declares, or auto-download fails.
+
+If you publish weights that differ from the current ones, update `models.json`'s `size` and `sha256` in the same change — the manifest is versioned with the files, which is what keeps that check meaningful.
+
+## What you cannot check from a desktop rebuild
+
+Being explicit, so nobody burns a day trying:
+
+- **Performance numbers are device-side.** "~3.6× faster on ARM", and the 10.3 s / 6 pages figures in [MODELS.md](MODELS.md), were measured on real hardware (SD 8 Gen 3). They cannot be reproduced by this build process.
+- **x86 timings from these scripts are noise.** Two runs of a *bit-identical* OCR model measured 1732 ms and 3336 ms — a ~2× spread on the same file. The fp32-vs-int8 "~29×" seen on x86 is likewise an artifact. Don't read any speed conclusion out of a desktop run.
+- **`out1` mask resolution differs by platform and must not be hard-coded.** On x86 it comes back half-resolution (H/2 × W/2); on arm64 it comes back full-resolution. The engine allocates for the full-resolution worst case and reads the actual dimensions back from JNI (commit `7c62f78` fixed exactly this overrun). Don't let a desktop measurement talk you into fixing a size at either end.

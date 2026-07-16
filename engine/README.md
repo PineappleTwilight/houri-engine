@@ -18,7 +18,7 @@ val models = ModelSet.resolve(localModelFiles) ?: return // null = not all prese
 // or name the files explicitly (NCNN roles take the .param path; the matching
 // .bin must sit alongside it):
 val models = ModelSet(
-    detectorNcnn     = "/path/detector_noblk.ncnn.param",
+    detectorNcnn     = "/path/dbnet_detect.ncnn.param",
     ocr              = "/path/ocr_int8.onnx",
     aotInpainterNcnn = "/path/mit_aot_fixed512.ncnn.param",
 )
@@ -37,7 +37,7 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 }
 ```
 
-`translatePage` is a `suspend` function; call it from a background dispatcher. One engine instance handles one page at a time; it isn't safe to call `translatePage` concurrently on the same instance.
+`translatePage` is a `suspend` function; call it from a background dispatcher. It is safe to call concurrently on one warm engine instance, which is how the reader pipelines pages — see [Lifecycle and threading](#lifecycle-and-threading).
 
 ## Models (BYOM)
 
@@ -45,11 +45,11 @@ The engine ships no model weights. The host supplies the model files plus the OC
 
 | Role | File (typical name) | Backend | What it does | Source |
 |---|---|---|---|---|
-| detector | `detector_noblk.ncnn.param` (+ `.bin`) | NCNN | text boxes + stroke mask | [comic-text-detector](https://github.com/dmMaze/comic-text-detector) |
+| detector | `dbnet_detect.ncnn.param` (+ `.bin`) | NCNN | text boxes + stroke mask | DBNet, from [manga-image-translator](https://github.com/zyddnys/manga-image-translator) (its default detector) |
 | ocr | `ocr_int8.onnx` | ONNX Runtime | 48px CTC Japanese OCR, int8 dynamic quantization | manga-image-translator |
 | inpainter | `mit_aot_fixed512.ncnn.param` (+ `.bin`) | NCNN | AOT-GAN text removal | [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-`ModelSet.resolve(files)` maps a flat `(filename, localPath)` listing to the roles by name and extension (`.param` NCNN: `detect`/`comictext` to detector, `aot` to inpainter; `.onnx` ORT: `ocr` to ocr, plus optional `detect`/`comictext` and `lama`/`aot` fallbacks) and returns `null` if OCR, a detector, or an inpainter is missing. Use that as your "ready to translate?" check.
+`ModelSet.resolve(files)` maps a flat `(filename, localPath)` listing to the roles by filename and extension: `.param` containing `dbnet` is the detector, `.param` containing `aot` is the inpainter, `.onnx` containing `ocr` is OCR. It returns `null` if any of the three is missing — use that as your "ready to translate?" check. Note NCNN roles need both files: `resolve` only sees the `.param`, so make sure the matching `.bin` sits next to it.
 
 Paths must be local files, not SAF/content URIs: the backends load from the path into native memory. Don't read weights into the JVM heap with `readBytes()`; the heap is capped around 512 MB regardless of device RAM and will OOM. If the source is SAF, copy to `filesDir` first and pass the path.
 
@@ -62,7 +62,7 @@ val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // drop low-confidence OCR
     inpainter  = InpainterConfig(method = "auto_aot"),    // "boxfill" (fast) | "auto_aot" (AI)
     render     = RenderConfig(orientation = TextOrientation.AUTO),
-    translator = TranslatorConfig(model = "deepseek-chat", batchSize = 8),
+    translator = TranslatorConfig(model = "deepseek-chat", temperature = 0.3),
 )
 Yakuyomi.create(models, alphabet, apiKey, config)
 ```
@@ -71,6 +71,7 @@ The full list, with ranges and the effect of each, is in [`docs/PARAMETERS.md`](
 
 - `OcrConfig.useXnnpack = false`. Must stay off: XNNPACK miscomputes the 48px CTC model on real hardware and OCR returns empty. OCR is the only ONNX Runtime model; the detector and inpainter run on NCNN.
 - `OcrConfig.concurrent = true`, `concurrency = 8`. OCR recognizes lines in parallel; on an 8-core phone this roughly halves OCR time, with no change to output.
+- `OcrConfig.stripPad = 4`. Widens each detection quad by 4 px before cropping the OCR strip (the detection box itself is untouched, so text removal is unaffected). Thin boxes otherwise clip the last glyph and the CTC head returns an empty string, which drops the whole region — see [Why these defaults](#why-these-defaults).
 - `InpainterConfig.method = "auto_aot"`, `wholeImage = true`. Two flavours of text removal: `"boxfill"` (fast text removal) flat-fills every text region with the nearest background colour — instant, cleanest on flat bubbles, but paints a colour block over busy artwork; `"auto_aot"` (AI text removal, default) flat-fills clean bubbles and rebuilds the background under busy areas with a whole-page AOT-GAN pass (`tileSize = 768`).
 - `RenderConfig.orientation = AUTO`. Follows each region's detected direction, then rotates along the region's skew angle.
 - `TranslatorConfig.provider = "deepseek"`, with `apiBase` and `model`. Any OpenAI-compatible endpoint. `LlmProviders.ALL` carries presets for manga-image-translator's LLM set plus OpenRouter (all OpenAI-compatible; Gemini via its compat endpoint), and `LlmModels.list()` fetches a provider's live model list. See [`docs/PROVIDERS.md`](../docs/PROVIDERS.md).
@@ -105,23 +106,86 @@ Per-region resilience is built in: if one bubble fails to translate, the engine 
 ## Lifecycle and threading
 
 - `TranslationEngine : AutoCloseable`. `close()` releases the detector, OCR, and inpainter native sessions (the OCR ONNX Runtime session plus the detector and inpainter NCNN nets). Always `use { }` or `close()`.
-- `translatePage` is `suspend`, one page at a time per instance. It uses coroutines internally (parallel OCR, removal overlapping translation), but don't call it concurrently on a single instance.
+- `translatePage` is `suspend` and **safe to call concurrently on one warm instance** — that is how the reader pipelines pages (page N's network translate overlapping page N+1's detect/OCR). It also uses coroutines internally (parallel OCR, removal overlapping translation). What makes concurrent calls safe:
+  - **Translation is per-call.** `LlmTranslator.translateDetailed` runs entirely on locals and returns its result (translations, usage, error, raw) from the call, so concurrent pages never clobber each other. The single-value diagnostic fields `lastError` / `lastRaw` *do* race and exist only for single-threaded callers like the sandbox; the pipeline doesn't read them.
+  - **NCNN inference is serialized.** Detection and removal take a global lock inside the backend: ncnn parallelises with OpenMP, and two threads entering a forward at once abort the process (`__kmp_abort_process`). Serializing costs almost no throughput — both stages are CPU-bound and already fit inside the network wait, and a CPU can't truly run two of them at once anyway. OCR (ONNX Runtime) and translation (network) stay concurrent.
+  - **Warm, though.** The engine doesn't warm itself up: firing several pages at freshly loaded native sessions whose lazy init hasn't run crashed on device. The reader runs the first page after a load single-threaded, then allows concurrency.
 - The input bitmap isn't recycled by the engine. `Translated.page` is a new bitmap.
 
 ## Pipeline
 
-```
-page  Detector    lines + stroke mask
-      Ocr         Japanese text per line (parallel; mutates lines in place)
-      Grouping    regions (connect + MST-split; reading order; skew angle)
-      Translator  target text (per page, no rolling context; optional)
-      TextFilter  decide which regions have a usable translation
-      Inpainter   erase original text (runs concurrently with Translator)
-      Renderer    typeset translation (vertical/horizontal, angle-aware)
-      -> translated page bitmap
+```mermaid
+flowchart TD
+    P["page bitmap"] --> DET
+
+    subgraph DET["① Detector — NCNN, CPU"]
+        direction TB
+        D1["resize_aspect to 1024<br/>pad to 256 multiples → rectangular input"]
+        D2["DBNet forward<br/>ResNet34 + DB head"]
+        D3["out0: sigmoid → binarize 0.5<br/>connected components → minAreaRect<br/>box score ≥ 0.7 → unclip 2.3"]
+        D4["out1: stroke mask<br/>→ threshold 0.12 → dilate"]
+        D1 --> D2
+        D2 --> D3
+        D2 --> D4
+    end
+
+    DET --> LINES["text lines<br/>(rotated quads + score)"]
+    DET --> MASK["stroke mask<br/>(page-sized, binary)"]
+
+    LINES --> OCR
+    subgraph OCR["② Ocr — ONNX Runtime, int8"]
+        direction TB
+        O1["quad + 4px pad → perspective<br/>bicubic warp → 48px strip + 16px margin"]
+        O2["48px CTC forward<br/>parallel: 1 thread/line × 8 lines"]
+        O3["CTC decode → text + prob<br/>drop if prob &lt; 0.5"]
+        O1 --> O2 --> O3
+    end
+
+    OCR --> GRP
+    subgraph GRP["③ Grouping"]
+        direction TB
+        G1["loose connect<br/>(quadrilateral_can_merge_region)"]
+        G2["MST split<br/>(split_text_region)"]
+        G3["reading order (RTL) + per-region skew angle"]
+        G1 --> G2 --> G3
+    end
+
+    GRP --> REG["text regions<br/>(source text, direction, angle)"]
+
+    REG --> TR["④ Translator — cloud LLM<br/>whole page in one request<br/>no rolling context"]
+    REG --> INP["⑤ Inpainter — NCNN AOT-GAN<br/>bubbles: flat-fill nearest colour<br/>busy art: whole-page tile 768"]
+    MASK --> INP
+
+    TR <-.->|"run concurrently<br/>(network wait ∥ CPU)"| INP
+
+    TR --> TF["⑥ TextFilter<br/>usable translation?<br/>(else: repaint source text)"]
+    TF --> RND
+    INP --> RND["⑦ Renderer — Canvas<br/>vertical/horizontal, angle-aware<br/>tate-chu-yoko, auto text colour"]
+    RND --> OUT["translated page bitmap"]
 ```
 
+Text removal (⑤) runs **concurrently** with the translation request (④): removal is CPU-bound, translation is network-bound, and neither needs the other's output — so `PageStats.wallMs` is shorter than the sum of the stages.
+
 See [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for the design rationale and the desktop-parity validation. Behaviour follows [manga-image-translator](https://github.com/zyddnys/manga-image-translator).
+
+## Why these defaults
+
+The pipeline mirrors manga-image-translator, but every parameter is re-tuned against real hardware (Snapdragon 8 Gen 3) rather than inherited. Where a default differs from upstream, an on-device A/B backs it:
+
+| | manga-image-translator | this engine | measured reason |
+|---|---|---|---|
+| detection size | 2048 (its default) | **1024** | 4× fewer pixels per forward than upstream's default. Spot-checked rather than proven in general: on m-i-t's own pipeline, page 006's 「その通りじゃ」 has a box at 1024 but OCRs *empty* there, and only reads at 1536 and 2048 — this engine reads it at 1024, thanks to the OCR crop fixes below. (Larger isn't free: at 1280+ character errors go up and it gets slower.) |
+| OCR weights | 48px CTC fp32, 165 MB | **int8, 44 MB** | 3.6× faster on ARM, 96.7% CTC parity |
+| OCR crop resampling | bilinear | **hand-rolled bicubic perspective warp** | recovers small kana — including sentence-final negations, whose loss silently *inverts* a line's meaning |
+| OCR crop box | detection quad as-is | **quad + 4px pad** | thin boxes clip the last glyph → CTC returns empty → the region is dropped and left untranslated. On 6 pages: 2 rescued, **0 regressions**, and OCR ~20% faster |
+| text removal | LaMa / per-region AOT | **AOT-GAN, whole-page tile 768** | 5–9× faster on CPU at equal or better quality; per-region AOT can't parallelise on CPU |
+
+Current numbers (6 representative pages, 161 detected boxes): **160 read — 99.4%**; detection + OCR **10.3 s** total on-device.
+
+Two things measurement said *not* to do, kept here so they aren't re-attempted:
+
+- **Don't lower `dbBoxThreshold` below upstream's 0.7.** Over one 16-page chapter it barely moves the box count — 401 at 0.7, 405 at 0.6, 406 at 0.5 — and those few extra boxes don't survive the second gate: `Ocr` leaves any line scoring under `minProb` blank, and `Pipeline` drops blank regions. Complete sentences actually recovered: **zero**.
+- **Don't int8-quantise the detector.** It produces **zero** boxes, and is no faster on ARM.
 
 ## Advanced: direct component access
 
