@@ -341,57 +341,86 @@ class MainActivity : AppCompatActivity() {
                 val tree = runTree ?: run { log("✗ 請先按「選擇模型資料夾」"); return@launch }
                 val dbnetPath = ensureNcnnPair(tree, "dbnet")
                     ?: run { log("✗ 缺 DBNet 模型（需 dbnet*.ncnn.param/.bin 放模型資料夾）"); writeLog(); return@launch }
-                // 完整詳細測（demo06）：size 768-1536 × 銳利與否，框圖(肉眼看碎/貼合) + OCR 純文字(比讀對品質) + 秒數
                 val ocrF = findOnnx(tree, "ocr")
                     ?: run { log("✗ 缺 OCR 模型（ocr .onnx）"); writeLog(); return@launch }
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
-                val ocr = Ocr(ensureLocal(ocrF), alphabet, OcrConfig())
-                // 多圖（稀疏 011 / 密集 013 / 中等 014）× size 768-1536 × 銳利否/是；每組每圖出框數/讀出/OCR文字/秒
-                val imgs = listOf("test/ch34_011.jpg", "test/demo06.jpg", "test/ch34_014.jpg")
+                val ocrLocal = ensureLocal(ocrF)
+                // OCR strip pad A/B @1024：pad 只動 OCR 裁切、**不動偵測** ⇒ 偵測跑一次快取、各 pad 只重跑 OCR。
+                // 桌面 16 頁實測 pad=4 讀出 345→398(+15%)，但桌面用 m-i-t warp 模擬、引擎是自刻 bicubic warp → 真機重定值。
+                // 關鍵樣本 006「その通りじゃ」：框僅 23px 寬「通」被切 → pad=0 空讀（＝現在漏它的原因）。
+                val imgs = listOf(
+                    "test/ch34_006.jpg", "test/ch34_010.jpg", "test/ch34_011.jpg",
+                    "test/demo06.jpg", "test/ch34_014.jpg", "test/ch34_015.jpg",
+                )
                 val pages = imgs.map { it.substringAfterLast('/').substringBeforeLast('.') to loadAssetBitmap(it) }
-                val sizes = listOf(768, 960, 1024, 1280, 1536)
-                log("▶ DBNet 完整測：${sizes.size} size × 銳利否/是 × ${pages.size} 圖（011/013/014），框+OCR文字+秒"); writeLog()
+                val pads = listOf(0, 4, 8, 12)
+                log("▶ OCR strip pad A/B @1024：${pads.size} pad × ${pages.size} 圖（偵測快取、只重跑 OCR）"); writeLog()
                 try {
-                    for (size in sizes) {
-                        for (sharpen in listOf(false, true)) {
-                            val tag = "@$size${if (sharpen) "+S" else ""}"
-                            try {
-                                Detector(
-                                    dbnetPath,
-                                    li.joye.yakuyomi.engine.DetectorConfig(dbnetInputSize = size, detectUnsharp = sharpen),
-                                ).use { det ->
-                                    det.detect(pages[0].second) // warm（丟）
-                                    for ((name, page) in pages) {
-                                        val t0 = System.currentTimeMillis()
-                                        val d = det.detect(page)
-                                        val detMs = System.currentTimeMillis() - t0
-                                        val to0 = System.currentTimeMillis()
-                                        ocr.recognize(page, d.lines)
-                                        val ocrMs = System.currentTimeMillis() - to0
-                                        val texts = d.lines.mapNotNull { it.text.takeIf { t -> t.isNotBlank() } }
-                                        log("$tag $name: ${d.lines.size}框 讀${texts.size}塊｜det ${"%.2f".format(detMs / 1000.0)}s ocr ${"%.2f".format(ocrMs / 1000.0)}s"); writeLog()
-                                        log("  ${texts.joinToString(" / ")}"); writeLog()
-                                        if (name == "demo06") {
-                                            addImage(
-                                                "$tag（${d.lines.size}框/${texts.size}讀）",
-                                                page.copy(Bitmap.Config.ARGB_8888, true).also {
-                                                    drawLines(it, d.lines); labelBmp(it, tag, "${d.lines.size}框${texts.size}讀", detMs)
-                                                },
-                                            )
+                    // 偵測一次（pad 不影響偵測 → 各 pad 共用同一批框，可精確配對）
+                    val dets = HashMap<String, List<li.joye.yakuyomi.engine.TextLine>>()
+                    Detector(dbnetPath, li.joye.yakuyomi.engine.DetectorConfig()).use { det ->
+                        det.detect(pages[0].second).textMask.recycle() // warm（丟）
+                        for ((name, page) in pages) {
+                            val d = det.detect(page)
+                            dets[name] = d.lines
+                            d.textMask.recycle()
+                            log("  偵測 $name: ${d.lines.size} 框"); writeLog()
+                        }
+                    }
+                    // ★ 按「偵測框 index」精確配對（不可用讀出順序 zip：多讀一塊就整排錯位、diff 全錯）
+                    val base = HashMap<String, List<String>>() // pad=0 每框 text（含空字串，index 對齊）
+                    for (pad in pads) {
+                        try {
+                            Ocr(ocrLocal, alphabet, OcrConfig(stripPad = pad)).use { ocr ->
+                                var padRead = 0
+                                var padBoxes = 0
+                                var sumRescue = 0
+                                var sumLost = 0
+                                var sumChange = 0
+                                for ((name, page) in pages) {
+                                    val lines = dets[name] ?: continue
+                                    // ★ 每 pad 重建 TextLine：recognize 就地寫 text，共用會殘留上一 pad 的結果
+                                    val fresh = lines.map { li.joye.yakuyomi.engine.TextLine(it.quad, it.score) }
+                                    val t0 = System.currentTimeMillis()
+                                    ocr.recognize(page, fresh)
+                                    val ms = System.currentTimeMillis() - t0
+                                    val texts = fresh.map { it.text } // 含空 → index 與偵測框一一對應
+                                    val read = texts.count { it.isNotBlank() }
+                                    padRead += read; padBoxes += fresh.size
+                                    log("pad=$pad $name: ${fresh.size}框 讀${read}塊｜ocr ${"%.2f".format(ms / 1000.0)}s"); writeLog()
+                                    if (pad == pads.first()) {
+                                        base[name] = texts
+                                        log("  ${texts.filter { it.isNotBlank() }.joinToString(" / ")}"); writeLog()
+                                    } else {
+                                        val b = base[name] ?: texts
+                                        var rescue = 0; var lost = 0; var change = 0
+                                        texts.forEachIndexed { i, t ->
+                                            val o = b.getOrNull(i) ?: ""
+                                            when {
+                                                o.isBlank() && t.isNotBlank() -> { rescue++; log("  +救回 #$i: '$t'") }
+                                                o.isNotBlank() && t.isBlank() -> { lost++; log("  -弄壞 #$i: '$o' → (空)") }
+                                                o != t -> { change++; log("  ~改字 #$i: '$o' → '$t'") }
+                                            }
                                         }
-                                        d.textMask.recycle()
+                                        sumRescue += rescue; sumLost += lost; sumChange += change
+                                        log("  → 救回$rescue 弄壞$lost 改字$change"); writeLog()
                                     }
                                 }
-                            } catch (e: Throwable) {
-                                log("$tag ✗ ${e.message}"); writeLog()
+                                if (pad == pads.first()) {
+                                    log("── pad=$pad(baseline) 總計：$padBoxes 框 讀出 $padRead 塊 ──")
+                                } else {
+                                    log("── pad=$pad 總計：$padBoxes 框 讀出 $padRead 塊｜vs baseline: 救回$sumRescue 弄壞$sumLost 改字$sumChange ──")
+                                }
+                                writeLog()
                             }
+                        } catch (e: Throwable) {
+                            log("pad=$pad ✗ ${e.message}"); writeLog()
                         }
                     }
                 } finally {
-                    ocr.close()
                     pages.forEach { it.second.recycle() }
                 }
-                log("★ 完成（多圖 OCR 文字比讀對普遍性 + demo06 框圖比碎/貼合 + 秒數）"); writeLog()
+                log("★ 完成（pad A/B：比各 pad 總讀出塊數 + 文字品質；006 找「その通りじゃ」）"); writeLog()
             } catch (t: Throwable) {
                 Log.e(TAG, "DBNet size 對照失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")

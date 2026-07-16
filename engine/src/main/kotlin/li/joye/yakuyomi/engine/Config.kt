@@ -39,6 +39,17 @@ data class OcrConfig(
     val minTextLength: Int = 0,       // config.ocr.min_text_length
     val ignoreBubble: Int = 0,        // 〔設定〕config.ocr.ignore_bubble：1–50 開啟，跳過彩色/非氣泡 SFX 類文字（預設 0＝關）
     val minProb: Float = 0.5f,        // config.ocr.prob：OCR 平均信心 < 此值就丟（剃除低信心誤讀；m-i-t 預設 0.5）
+    // OCR 裁切前把偵測 quad 四邊各外擴 N px（RotRect.expand；只動 OCR 裁切、**不動偵測框** ⇒ 去字遮罩走 seg 筆畫不受影響）。
+    // 病根：偵測框太瘦把字切掉 → 48px CTC 空讀（model_48px_ctc 對 0 字元框在 prob 門檻前就丟）→ 該區被 Pipeline 的
+    // textRegions filter 濾掉 → 留原文不翻＝使用者看到的「漏氣泡」。桌面 16 頁實測：pad=4 讀出 345→398(+15%)、框數不變、
+    // 弄壞 9 vs 救回 350；006「その通りじゃ」框僅 23px 寬「通」被切 → pad=0 空讀、pad=12 讀對 p=0.993。
+    // ★ 預設 4＝真機 A/B 定案（sandbox 6 頁 161 框、按偵測框 index 精確配對）：救回 2（含 006「その通りじゃ」＝
+    //   使用者回報的漏氣泡）、**弄壞 0**、實質修復 ~14（'と一も百白です'→'とても面白いですね'、'あいませか'→
+    //   'ありませんか'、'お父雄'→'お父様'、'そんな学識も'→'そんな常識も'…），代價＝微小雜訊（'！'→'ー'、少個假名，
+    //   LLM 容錯；同 [useBicubic] 的權衡）。**且 OCR 快 ~20%**（框變寬→warp 後 strip 比例→CTC 序列變短）。
+    //   pad=8/12 開始退步（8：弄壞 2；12：弄壞 1）⇒ 4 是甜蜜點。桌面 m-i-t warp 模擬曾給 +15% 讀出，真機只 +2
+    //   （引擎自刻 bicubic warp 的 baseline 已達 98%），故真機定值不可照抄桌面。
+    val stripPad: Int = 4,
     val useXnnpack: Boolean = false,  // ★預設關：XNNPACK 會把 48px CTC OCR 模型算錯（真機實證吐空），改純 CPU 才正確
     // 逐行並發 OCR：小圖塊（48px 高、窄）吃不滿 intra-op 4 緒 → 改「每行單緒、N 行並發」把核填滿。
     // concurrent=true → session intra-op 設 1（單行單緒）、靠 Semaphore(concurrency) 並發；false → 單行用滿 NUM_THREADS、序列（現狀）。

@@ -103,7 +103,9 @@ class Ocr(
 
     /** 單行 OCR：裁切→前處理→CTC→填 text。thread-safe：只寫自己的 line、session.run 可並發、其餘皆 local/唯讀。 */
     private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String, bicubic: Boolean) {
-        val (ordered, isV) = sortPnts(line.quad)
+        // ★ 先外擴、再 sortPnts：sortPnts 定的點序是 warp 要的，擴完才排才不會亂序（擴張本身不改直/橫書判定）。
+        val quad = if (cfg.stripPad > 0) expandQuad(line.quad, cfg.stripPad, page.width, page.height) else line.quad
+        val (ordered, isV) = sortPnts(quad)
         line.direction = if (isV) "v" else "h"
         val strip = transformedRegion(page, ordered, isV, cfg.textHeight, bicubic) ?: return
         if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
@@ -124,6 +126,18 @@ class Ocr(
             Log.w(TAG, "OCR 單行失敗：${t.message}")
         } finally {
             strip.recycle()
+        }
+    }
+
+    /**
+     * quad 四邊各外擴 [pad] px 供 OCR 裁切（[OcrConfig.stripPad]）：minAreaRect → w,h 各 +2*pad → corners → clamp 進圖內。
+     * **只回新的點、不動 [TextLine.quad]** ⇒ 偵測框與去字遮罩（走 seg 筆畫）完全不受影響。
+     * 對齊桌面 exp_pad.py:expand_quad（cv2.minAreaRect + boxPoints）。救「框太瘦把字切掉 → CTC 空讀 → 留原文不翻」。
+     */
+    private fun expandQuad(pts: List<Pt>, pad: Int, w: Int, h: Int): List<Pt> {
+        val rect = Geometry.minAreaRect(pts) ?: return pts
+        return rect.expand(pad.toFloat()).corners().map {
+            Pt(it.x.coerceIn(0f, (w - 1).toFloat()), it.y.coerceIn(0f, (h - 1).toFloat()))
         }
     }
 

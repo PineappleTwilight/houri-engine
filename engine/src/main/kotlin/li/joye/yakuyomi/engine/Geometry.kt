@@ -35,6 +35,13 @@ class RotRect(
         val d = if (peri > 1e-6f) (w * h) * ratio / peri else 0f
         return RotRect(cx, cy, ux, uy, w + 2f * d, h + 2f * d)
     }
+
+    /**
+     * 固定 px 外擴：四邊各外推 [pad]（w,h 各 +2*pad）。與 [unclip] 的差別＝絕對值而非比例。
+     * 給 OCR 裁切用（見 [OcrConfig.stripPad]）：偵測框太瘦會把字切掉 → 48px CTC 空讀。
+     * 對齊桌面實驗 exp_pad.py:expand_quad（cv2.minAreaRect → boxPoints(w+2pad, h+2pad)）。
+     */
+    fun expand(pad: Float): RotRect = RotRect(cx, cy, ux, uy, w + 2f * pad, h + 2f * pad)
 }
 
 internal object Geometry {
