@@ -12,7 +12,7 @@
 | OCR | ONNX（int8） | `ocr_int8.onnx` | ~44 MB | GPL-3.0 | 由 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) 權重在本專案匯出 |
 | 去字 | NCNN | `mit_aot_fixed512.ncnn.param` + `.bin` | ~11 MB | GPL-3.0 | AOT-GAN，出自 [manga-image-translator](https://github.com/zyddnys/manga-image-translator) |
 
-**後端。** 偵測與去字跑 NCNN（ARM-NEON；去字是固定 tile）；OCR 走 ONNX Runtime，且是 int8 動態量化（QUInt8——ARM 快 ~3.6×、對 fp32 有 96.7% CTC parity、165 MB → 44 MB）。三顆都跑 CPU——GPU/NPU 試過、對這些模型不管用（NCNN Vulkan 把 AOT-GAN 算成垃圾、LiteRT 編不出來），GPU/Vulkan 路徑已移除。v1 的 LaMa 去字已退役移除，改由 AOT-GAN（manga-image-translator 的 inpaint）取代。
+**後端。** 偵測與去字跑 NCNN（ARM-NEON）；OCR 走 ONNX Runtime，且是 int8 動態量化（QUInt8——ARM 快 ~3.6×、對 fp32 有 96.7% CTC parity、165 MB → 44 MB）。三顆都跑 CPU——GPU/NPU 試過、對這些模型不管用（NCNN Vulkan 把 AOT-GAN 算成垃圾、LiteRT 編不出來）。v1 的 LaMa 去字已退役移除，改由 AOT-GAN（manga-image-translator 的 inpaint）取代。
 
 **v3 偵測器。** comic-text-detector 已退役、整條移除；改用 manga-image-translator 的 default detector（DBNet：ResNet34 + DB head），真機讀對的文字多 **1.6–2.5×**。權重維持 fp16 storage——int8 量化實測**完全吐不出框**、在 ARM 上也沒有比較快，因此不採用；這也是為什麼光偵測器就佔了裝置端 ~208 MB 權重裡的 ~153 MB。前處理是 resize_aspect 到 1024、再 pad 到 256 的倍數；這樣得到的**矩形**輸入同時繞開 ncnn 對 832–992 正方形尺寸的 heap corruption。SD 8 Gen 3 上的實測：6 張代表頁、161 個偵測框，偵測 + OCR 共 10.3 秒、讀出其中 160——99.4%。
 

@@ -77,7 +77,7 @@ Everything is a `data class` with defaults; override only what you need:
 ```kotlin
 val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // drop low-confidence OCR
-    inpainter  = InpainterConfig(method = "auto_aot"),    // "boxfill" (fast) | "auto_aot" (AI)
+    inpainter  = InpainterConfig(method = "aot"),        // "boxfill" (fast) | "aot" (AI)
     render     = RenderConfig(orientation = TextOrientation.AUTO),
     translator = TranslatorConfig(model = "deepseek-chat", temperature = 0.3),
 )
@@ -89,7 +89,7 @@ The full list, with ranges and the effect of each, is in [`docs/PARAMETERS.md`](
 - `OcrConfig.useXnnpack = false`. Must stay off: XNNPACK miscomputes the 48px CTC model on real hardware and OCR returns empty. OCR is the only ONNX Runtime model; the detector and inpainter run on NCNN.
 - `OcrConfig.concurrent = true`, `concurrency = 8`. OCR recognizes lines in parallel; on an 8-core phone this roughly halves OCR time, with no change to output.
 - `OcrConfig.stripPad = 4`. Widens each detection quad by 4 px before cropping the OCR strip (the detection box itself is untouched, so text removal is unaffected). Thin boxes otherwise clip the last glyph and the CTC head returns an empty string, which drops the whole region — see [Why these defaults](#why-these-defaults).
-- `InpainterConfig.method = "auto_aot"`, `wholeImage = true`. Two flavours of text removal: `"boxfill"` (fast text removal) flat-fills every text region with the nearest background colour — instant, cleanest on flat bubbles, but paints a colour block over busy artwork; `"auto_aot"` (AI text removal, default) flat-fills clean bubbles and rebuilds the background under busy areas with a whole-page AOT-GAN pass (`tileSize = 768`).
+- `InpainterConfig.method = "aot"`. Two flavours of text removal: `"boxfill"` (fast text removal) flat-fills every text region with the nearest background colour — instant, cleanest on flat bubbles, but paints a colour block over busy artwork; `"aot"` (AI text removal, default) rebuilds the background under every text region with a whole-page AOT-GAN pass (`tileSize = 768`) — slower, but reconstructs the artwork instead of blocking it.
 - `RenderConfig.orientation = AUTO`. Follows each region's detected direction, then rotates along the region's skew angle.
 - `TranslatorConfig.provider = "deepseek"`, with `apiBase` and `model`. Any OpenAI-compatible endpoint. `LlmProviders.ALL` carries presets for manga-image-translator's LLM set plus OpenRouter (all OpenAI-compatible; Gemini via its compat endpoint), and `LlmModels.list()` fetches a provider's live model list. See [`docs/PROVIDERS.md`](../docs/PROVIDERS.md).
 
@@ -170,7 +170,7 @@ flowchart TD
     GRP --> REG["text regions<br/>(source text, direction, angle)"]
 
     REG --> TR["④ Translator — cloud LLM<br/>whole page in one request<br/>no rolling context"]
-    REG --> INP["⑤ Inpainter — NCNN AOT-GAN<br/>bubbles: flat-fill nearest colour<br/>busy art: whole-page tile 768"]
+    REG --> INP["⑤ Inpainter — NCNN AOT-GAN<br/>whole-page rebuild · tile 768<br/>(or boxfill: nearest colour)"]
     MASK --> INP
 
     TR <-.->|"run concurrently<br/>(network wait ∥ CPU)"| INP

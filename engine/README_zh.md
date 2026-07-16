@@ -75,7 +75,7 @@ val models = ModelSet.resolve(dir.listFiles()!!.map { it.name to it.absolutePath
 ```kotlin
 val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // 丟低信心 OCR
-    inpainter  = InpainterConfig(method = "auto_aot"),    // "boxfill"（快速）| "auto_aot"（AI）
+    inpainter  = InpainterConfig(method = "aot"),        // "boxfill"（快速）| "aot"（AI）
     render     = RenderConfig(orientation = TextOrientation.AUTO),
     translator = TranslatorConfig(model = "deepseek-chat", temperature = 0.3),
 )
@@ -87,7 +87,7 @@ Yakuyomi.create(models, alphabet, apiKey, config)
 - `OcrConfig.useXnnpack = false`。必須關：XNNPACK 在真機上會把 48px CTC 算錯、OCR 吐空。OCR 是唯一的 ONNX Runtime 模型；偵測器跟去字都跑 NCNN。
 - `OcrConfig.concurrent = true`、`concurrency = 8`。OCR 把文字行並發辨識；8 核手機上 OCR 時間大約砍半，輸出不變。
 - `OcrConfig.stripPad = 4`。裁 OCR 條之前把偵測四邊形往外擴 4px（**偵測框本身不動**，所以去字不受影響）。不擴的話瘦框會把最後一個字切掉、CTC 吐空字串 → 整區被丟掉不翻，見[為何是這些預設](#為何是這些預設)。
-- `InpainterConfig.method = "auto_aot"`、`wholeImage = true`。去字分兩門別：`"boxfill"`（快速去字）把每個字區用就近的背景色平塗——瞬間、平/單色泡泡最乾淨，但壓在畫面上的字會塗成色塊；`"auto_aot"`（AI 去字，預設）把乾淨泡泡平塗、對忙碌區（壓畫面的字）用整頁一次的 AOT-GAN 重建背景（`tileSize = 768`）。
+- `InpainterConfig.method = "aot"`。去字分兩門別：`"boxfill"`（快速去字）把每個字區用就近的背景色平塗——瞬間、平/單色泡泡最乾淨，但壓在畫面上的字會塗成色塊；`"aot"`（AI 去字，預設）用整頁一次的 AOT-GAN pass 重建每個字區底下的背景（`tileSize = 768`）——較慢，但重建畫面而非蓋色塊。
 - `RenderConfig.orientation = AUTO`。跟著每區塊偵測到的方向，再沿區塊傾斜角旋轉。
 - `TranslatorConfig.provider = "deepseek"`，配 `apiBase` 跟 `model`。任何 OpenAI 相容端點。`LlmProviders.ALL` 內建 manga-image-translator 的 LLM 那組外加 OpenRouter 的預設（全 OpenAI 相容；Gemini 走它的 compat 端點），`LlmModels.list()` 撈服務商的即時模型清單。詳見 [`docs/PROVIDERS_zh.md`](../docs/PROVIDERS_zh.md)。
 
@@ -168,7 +168,7 @@ flowchart TD
     GRP --> REG["文字區塊<br/>（原文、方向、角度）"]
 
     REG --> TR["④ Translator — 雲端 LLM<br/>整頁一個請求<br/>無滾動上文"]
-    REG --> INP["⑤ Inpainter — NCNN AOT-GAN<br/>泡泡：就近取色平塗<br/>壓畫面：整頁 tile 768"]
+    REG --> INP["⑤ Inpainter — NCNN AOT-GAN<br/>整頁重建 · tile 768<br/>（或 boxfill：就近取色）"]
     MASK --> INP
 
     TR <-.->|"並發跑<br/>（網路等待 ∥ CPU）"| INP

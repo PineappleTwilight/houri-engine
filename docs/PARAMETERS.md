@@ -104,7 +104,7 @@ Dropdown, default auto (= core count). How many text lines OCR recognizes at onc
 Default 0.12. Range 0–1. The cutoff on the detector's per-pixel stroke probability for deciding what counts as text to remove. Lower: more pixels count, so screentone and noise get pulled into the mask and removal spreads into non-text. Higher: only the boldest strokes count, so the faint kana printed next to kanji get left behind as a residue. The default is low specifically to catch those faint kana.
 
 ### Detection size (dbnetInputSize)
-Default 1024, in pixels. Range 768–1536 in steps of 128. The resolution the DBNet detector runs at. 1024 is the sweet spot for read accuracy at a warm ~0.9 s a page. Lower (960): boxes get rough and text is misread; 768 misses text entirely. Higher (1280+): slower, and it starts over-splitting into mis-reads.
+Default 1024, in pixels. Range 768–1536 in steps of 128. The resolution the DBNet detector runs at. 1024 is the sweet spot for read accuracy at a warm ~0.9 s a page. Lower (896): boxes get rough and text is misread; 768 misses text entirely. Higher (1280+): slower, and it starts over-splitting into mis-reads.
 
 ### Sharpen detector input (detectUnsharp)
 Switch, default off. Sharpens the image fed to detection. The gain is marginal and it pushes the input out of the model's training distribution, so on some pages it does worse. Off by default — leave it unless a specific page reads better with it on.

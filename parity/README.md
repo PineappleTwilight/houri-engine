@@ -73,7 +73,9 @@ Speed claims (e.g. "~3.6× on ARM") are **device numbers and cannot be verified 
 
 **End-to-end**
 - `pipeline_parity.py <img…>` — full chain detect→OCR→group→translate→inpaint→typeset for a page.
-  The main driver; writes `out/final_<name>.png` + caches intermediates.
+  The main driver; writes `out/final_<name>.png` + caches intermediates. (Still runs the retired ctd +
+  LaMa end-to-end; the shipped DBNet/AOT are validated per-stage — int8 OCR parity, the grouping test,
+  and the `export_*_ncnn.py` build/verify.)
 
 **Per-stage parity** (run/inspect one stage)
 - `ctd_reference.py [page]` — detection: faithful (m-i-t post-processing) vs simplified, side by side.
@@ -83,7 +85,8 @@ Speed claims (e.g. "~3.6× on ARM") are **device numbers and cannot be verified 
 - `group_exp.py <name…>` — grouping: our regions vs m-i-t's, drawn as boxes.
 - `translate_parity.py` — OCR'd JP → DeepSeek → CHT.
 - `merge_translate_parity.py` — line-merge then translate.
-- `inpaint_parity.py` — LaMa text removal on regions.
+- `inpaint_parity.py` — LaMa text removal on regions. Frozen: LaMa is retired from the engine; the
+  shipped AOT-GAN inpaint is built and compared via `export_aot_ncnn.py` / `compare_inpaint.py`.
 - `typeset_parity.py [v|h|auto]` / `retypeset.py <name…>` — typesetting (retypeset = re-render from
   cache without re-calling the LLM; for tuning layout fast).
 
@@ -93,6 +96,10 @@ Speed claims (e.g. "~3.6× on ARM") are **device numbers and cannot be verified 
 
 **Tools**
 - `export_ocr_onnx.py` — export the 48px CTC checkpoint to ONNX (build-time, needs torch).
+- `quantize_ocr_int8.py` — dynamic-quantize that fp32 OCR ONNX to int8 → `ocr_int8.onnx` (the shipped OCR weights).
+- `export_dbnet_ncnn.py` — build the shipped DBNet detector NCNN files (`dbnet_detect.ncnn.param`/`.bin`) from the upstream ckpt.
+- `export_aot_ncnn.py` — build the shipped AOT-GAN inpaint NCNN files (`mit_aot_fixed512.ncnn.param`/`.bin`) from the upstream ckpt.
+- `compare_inpaint.py` — inpaint model × method comparison + timing; verifies the shipped AOT-GAN removal.
 - `seg_validate.py` — inspect the detector's `seg` stroke mask at thresholds.
 - `emit_grouping_fixture.py` — generate the Kotlin grouping test fixture (see below).
 

@@ -53,7 +53,7 @@ Three places, for throughput:
 
 The engine aligns on behaviour, not source. Three layers, tightest first:
 
-1. **Copy verbatim.** Language-independent data: the prompt and protocol, per-stage thresholds and defaults, the config schema, model choice, and processing order. This reuses m-i-t's tuning instead of re-deriving it.
+1. **Copy verbatim.** Language-independent data: the prompt and protocol, the config schema and many stage thresholds, model choice, and processing order — reusing m-i-t's tuning where it transfers. Several defaults are retuned on device, though (detector input 1024 vs m-i-t's 2048, inpaint tile 768, strip pad, mask dilate).
 2. **Match behaviour, implement freely.** The *what* tracks m-i-t; the *how* follows Kotlin/NCNN/ONNX idioms. Detection post-processing, coordinate inverse-mapping, mask generation, the grouping two-stage, reading order, concurrent translation. The test is "same input, close output".
 3. **Informed divergence, recorded in code.** Platform-forced or deliberate trade-offs: NCNN and ONNX instead of torch, no CUDA, no rolling translation context, the two text-removal modes.
 

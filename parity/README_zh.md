@@ -67,7 +67,8 @@ python3 parity/ocr_parity.py     # 印出「逐行 exact match = N/30 = xx.x%」
 
 **端到端**
 - `pipeline_parity.py <img…>`——整條 detect→OCR→group→translate→inpaint→typeset。
-  主驅動；寫 `out/final_<name>.png` + 快取中間結果。
+  主驅動；寫 `out/final_<name>.png` + 快取中間結果。（端到端仍跑退役的 ctd + LaMa；出貨的 DBNet/AOT
+  走 per-stage 驗證——int8 OCR parity、分組測試、`export_*_ncnn.py` 轉檔比對。）
 
 **逐階段 parity**（跑/檢視單一階段）
 - `ctd_reference.py [page]`——偵測：faithful（m-i-t 後處理）vs simplified，並排。
@@ -77,7 +78,8 @@ python3 parity/ocr_parity.py     # 印出「逐行 exact match = N/30 = xx.x%」
 - `group_exp.py <name…>`——分組：我們的區域 vs m-i-t 的，畫成框。
 - `translate_parity.py`——OCR 出的日文 → DeepSeek → 繁中。
 - `merge_translate_parity.py`——先併行再翻。
-- `inpaint_parity.py`——對區域跑 LaMa 去字。
+- `inpaint_parity.py`——對區域跑 LaMa 去字。已凍結：LaMa 已從引擎退役、僅留凍結參考；現行 AOT-GAN
+  去字由 `export_aot_ncnn.py`／`compare_inpaint.py` 產出/比對。
 - `typeset_parity.py [v|h|auto]` / `retypeset.py <name…>`——排版（retypeset = 從快取重排、不重打 LLM；快速調版用）。
 
 **規格本**（ground truth，從 m-i-t 複製——跟 `.upstream-ref` 同步）
@@ -86,6 +88,10 @@ python3 parity/ocr_parity.py     # 印出「逐行 exact match = N/30 = xx.x%」
 
 **工具**
 - `export_ocr_onnx.py`——把 48px CTC checkpoint 匯出成 ONNX（build-time，需 torch）。
+- `quantize_ocr_int8.py`——把上面那顆 fp32 OCR ONNX 動態量化成 int8 → `ocr_int8.onnx`（出貨的 OCR 權重）。
+- `export_dbnet_ncnn.py`——從上游 ckpt 產出出貨的 DBNet 偵測器 NCNN 檔（`dbnet_detect.ncnn.param`/`.bin`）。
+- `export_aot_ncnn.py`——從上游 ckpt 產出出貨的 AOT-GAN 去字 NCNN 檔（`mit_aot_fixed512.ncnn.param`/`.bin`）。
+- `compare_inpaint.py`——去字模型×方法比較 + 計時；驗證出貨的 AOT-GAN 去字。
 - `seg_validate.py`——在不同閾值下檢視偵測器的 `seg` 筆畫遮罩。
 - `emit_grouping_fixture.py`——產生 Kotlin 分組測試 fixture（見下）。
 
