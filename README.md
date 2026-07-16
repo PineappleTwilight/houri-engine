@@ -134,7 +134,7 @@ Every tunable parameter, its range, and the effect of changing it is documented 
 
 ## How it relates to manga-image-translator
 
-The engine is a from-scratch Kotlin implementation. It contains no manga-image-translator source code; what it borrows is behaviour — the translation prompt and protocol, the parameter defaults, the model choice and processing order. The details, and the layered alignment policy, are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The engine is a from-scratch Kotlin implementation. It contains no manga-image-translator source code; what it borrows is behaviour — the translation prompt and protocol, the parameter schema (many defaults retuned for on-device), the model choice and processing order. The details, and the layered alignment policy, are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Credits
 
@@ -145,7 +145,7 @@ The engine is a from-scratch Kotlin implementation. It contains no manga-image-t
 
 ## License
 
-**GPL-3.0** — see [LICENSE](LICENSE). The code here is written from scratch in Kotlin, but it ports manga-image-translator's prompts, parameters, and grouping; as a derivative of that GPL-3.0 project, this engine is GPL-3.0.
+**GPL-3.0** — see [LICENSE](LICENSE). The code here is written from scratch in Kotlin, but it ports manga-image-translator's prompts, parameter schema, and grouping; as a derivative of that GPL-3.0 project, this engine is GPL-3.0.
 
 Component licenses:
 - [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0 (prompt/protocol, detection/OCR/removal behaviour, line grouping; DBNet detection model, 48px CTC OCR model, and AOT-GAN inpaint model)

@@ -134,7 +134,7 @@ reader app（Yakuyomi）在另一個 fork repo。
 
 ## 與 manga-image-translator 的關係
 
-引擎是純 Kotlin 從頭實作，不含 manga-image-translator 的原始碼。借的是行為——翻譯 prompt 與協定、參數預設、模型選擇與處理順序。細節與分層對齊原則在 [docs/ARCHITECTURE_zh.md](docs/ARCHITECTURE_zh.md)。
+引擎是純 Kotlin 從頭實作，不含 manga-image-translator 的原始碼。借的是行為——翻譯 prompt 與協定、參數 schema（不少預設值針對裝置重調）、模型選擇與處理順序。細節與分層對齊原則在 [docs/ARCHITECTURE_zh.md](docs/ARCHITECTURE_zh.md)。
 
 ## 致謝
 
@@ -145,7 +145,7 @@ reader app（Yakuyomi）在另一個 fork repo。
 
 ## 授權
 
-**GPL-3.0** — 見 [LICENSE](LICENSE)。這裡的程式碼是用 Kotlin 從頭寫的，但移植了 manga-image-translator 的 prompt、參數與分組；作為該 GPL-3.0 專案的衍生，本引擎為 GPL-3.0。
+**GPL-3.0** — 見 [LICENSE](LICENSE)。這裡的程式碼是用 Kotlin 從頭寫的，但移植了 manga-image-translator 的 prompt、參數 schema 與分組；作為該 GPL-3.0 專案的衍生，本引擎為 GPL-3.0。
 
 各組件授權：
 - [manga-image-translator](https://github.com/zyddnys/manga-image-translator) — GPL-3.0（prompt/協定、偵測/OCR/去字行為、文字行分組；DBNet 偵測模型、48px CTC OCR 模型與 AOT-GAN 去字模型）
