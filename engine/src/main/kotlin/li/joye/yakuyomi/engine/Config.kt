@@ -60,6 +60,10 @@ data class OcrConfig(
     // parity 517字/100行 vs bilinear 486/96；真機 A/B 驗過：+6% OCR 時間、把「才能がある/言わないから/言いなさい」
     // 等句尾/關鍵詞讀回（消滅最陰險的「意思相反」），偶爾多讀個雜訊字（LLM 可容錯）。淨正面 → 預設開。
     val useBicubic: Boolean = true,
+    // OCR strip 銳化（unsharp mask，見 Ocr.unsharp）：抵銷 warp 把 ~30px 寬直行上採樣到 48px 的模糊、
+    // 救回被糊掉漏讀的小假名（v0.16.9 加）。★預設開＝實測救回小假名（對本就讀對 p≈1.0 的乾淨行無副作用）；
+    // 關＝退回無銳化（strip 較糊、小假名可能漏讀）。原本硬編碼永遠開，2026-07-16 抽成設定（進階玩家可關）。
+    val ocrUnsharp: Boolean = true,
 )
 
 // 預設 few-shot（日→繁中）：示範 <|i|> 逐行格式。改語言對時連同 toLangName/fromLangName 一起換成對應譯文。

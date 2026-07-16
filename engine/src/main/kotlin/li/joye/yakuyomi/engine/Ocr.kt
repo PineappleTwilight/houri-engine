@@ -350,7 +350,7 @@ class Ocr(
         val w = sw + PAD_MARGIN // 右側白邊：避免 CTC 截掉尾字（坂→坂本、ねえね→ねえねえ）
         val px = IntArray(sw * h)
         strip.getPixels(px, 0, sw, 0, 0, sw, h)
-        unsharp(px, sw, h) // 銳化：抵銷縮放模糊、救回被糊掉漏讀的小假名（見 [unsharp]）
+        if (cfg.ocrUnsharp) unsharp(px, sw, h) // 銳化：抵銷縮放模糊、救回漏讀小假名（見 [unsharp]、OcrConfig.ocrUnsharp）
         val area = h * w
         val chw = FloatArray(3 * area) { 1f } // 白底（(255-127.5)/127.5=1.0），右邊維持白
         for (y in 0 until h) {
