@@ -47,10 +47,18 @@
                 android:orientation="horizontal" />
         </HorizontalScrollView>
 
+        <!-- ===== 選圖測試：跑「上方選取的縮圖」 ===== -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="──── 選圖測試（跑上方選取的縮圖）────"
+            android:textStyle="bold" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="4dp"
             android:orientation="horizontal">
 
             <Button
@@ -90,12 +98,20 @@
             android:layout_marginTop="8dp"
             android:text="OCR 內插比較（bilinear vs bicubic·效能+品質）" />
 
-        <Button
-            android:id="@+id/dbnetSizeButton"
+        <!-- ===== 固定圖測試：跑「內建測試圖」，與上方縮圖選取無關 ===== -->
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="DBNet 三size對照（960 / 960+銳化 / 1024·框+秒數）" />
+            android:layout_marginTop="12dp"
+            android:text="──── 固定圖測試（跑內建圖·與上方選取無關）────"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/detectOcrCheckButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="偵測 + OCR 檢驗（內建 6 圖·產品設定·框/讀出/秒）" />
 
         <Switch
             android:id="@+id/genLogSwitch"

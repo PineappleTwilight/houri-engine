@@ -60,8 +60,8 @@ object ModelDownloader {
             }
         }
 
-    /** 解析 models.json（`{ version, models: [{role,name,url,size,sha256,...}] }`）。 */
-    fun parseManifest(json: String): List<RemoteModel> {
+    /** 解析 models.json（`{ version, models: [{role,name,url,size,sha256,...}] }`）。只給 [fetchManifest] 用。 */
+    private fun parseManifest(json: String): List<RemoteModel> {
         val arr = JSONObject(json).getJSONArray("models")
         return (0 until arr.length()).map {
             val m = arr.getJSONObject(it)
@@ -142,16 +142,6 @@ object ModelDownloader {
             }
         }
     }
-
-    /**
-     * 只驗證不下載：本機 [dir] 的檔案 sha256 是否符合 manifest。role→是否相符（缺檔＝false）。
-     * 給「下載後 / 啟動時」確認「手上的跟發行版是同一份」。
-     */
-    fun verify(models: List<RemoteModel>, dir: File): Map<String, Boolean> =
-        models.associate { m ->
-            val f = File(dir, m.name)
-            m.role to (f.exists() && f.length() == m.size && sha256(f) == m.sha256)
-        }
 
     /** 串流算 sha256（64KB buffer，不把整顆模型讀進 heap）。 */
     fun sha256(file: File): String {

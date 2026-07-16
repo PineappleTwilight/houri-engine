@@ -78,7 +78,7 @@ class MainActivity : AppCompatActivity() {
         binding.repoDemoButton.setOnClickListener { runRepoDemo() }
         binding.crossPageButton.setOnClickListener { runCrossPageBench() }
         binding.ocrAbButton.setOnClickListener { runOcrAb() }
-        binding.dbnetSizeButton.setOnClickListener { runDbnetSizeCompare() }
+        binding.detectOcrCheckButton.setOnClickListener { runDetectOcrCheck() }
         binding.inpaintSpinner.adapter = android.widget.ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, INPAINT_MODES,
         )
@@ -140,7 +140,7 @@ class MainActivity : AppCompatActivity() {
         binding.repoDemoButton.isEnabled = selected.size == 1
         binding.crossPageButton.isEnabled = selected.size == 1
         binding.ocrAbButton.isEnabled = selected.isNotEmpty()
-        binding.dbnetSizeButton.isEnabled = true // demo06 硬寫、不吃縮圖選取，恆可按
+        binding.detectOcrCheckButton.isEnabled = true // 內建圖硬寫、不吃縮圖選取 ⇒ 恆可按
     }
 
     private fun loadAssetThumbnail(path: String, target: Int): Bitmap {
@@ -326,8 +326,13 @@ class MainActivity : AppCompatActivity() {
      * 驗桌面結論在真機重現：@960＝甜蜜點（涵蓋追上 @1024、OCR 讀對更多）、@1024 過度分割、銳化 marginal（真機 A/B）。
      * 需模型資料夾含 dbnet*.ncnn.param/.bin（DBNet 走 DetectorConfig.useDbnet 分支）。
      */
-    private fun runDbnetSizeCompare() {
-        binding.dbnetSizeButton.isEnabled = false
+    /**
+     * 偵測 + OCR 檢驗（固定圖測試）：用**產品當前設定**（[DetectorConfig] / [OcrConfig] 的預設值）跑內建測試圖，
+     * 印每頁框數 / OCR 讀出塊數 / 讀出的文字 / 秒數 + 總計讀出率。**不吃縮圖選取**（內建圖硬寫）。
+     * 用途＝改動引擎後的回歸檢驗：一眼看出當前 pipeline 的偵測涵蓋、OCR 讀對率、速度是否退步。
+     */
+    private fun runDetectOcrCheck() {
+        binding.detectOcrCheckButton.isEnabled = false
         lifecycleScope.launch(Dispatchers.Default) {
             clearOutputs()
             logBuf.clear(); runImgIdx = 0; runTree = currentTree(); runStamp = stamp()
@@ -345,82 +350,54 @@ class MainActivity : AppCompatActivity() {
                     ?: run { log("✗ 缺 OCR 模型（ocr .onnx）"); writeLog(); return@launch }
                 val alphabet = assets.open(ALPHABET).bufferedReader().use { it.readLines() }
                 val ocrLocal = ensureLocal(ocrF)
-                // OCR strip pad A/B @1024：pad 只動 OCR 裁切、**不動偵測** ⇒ 偵測跑一次快取、各 pad 只重跑 OCR。
-                // 桌面 16 頁實測 pad=4 讀出 345→398(+15%)，但桌面用 m-i-t warp 模擬、引擎是自刻 bicubic warp → 真機重定值。
-                // 關鍵樣本 006「その通りじゃ」：框僅 23px 寬「通」被切 → pad=0 空讀（＝現在漏它的原因）。
+                // 內建測試圖＝章 34.1 的代表頁（006 有瘦框「その通りじゃ」/ 010 有手寫「商人」/ 011 稀疏 /
+                // 013(demo06) 密集 / 014 中等 / 015 長對話）。改動引擎後跑這個當回歸檢驗。
                 val imgs = listOf(
                     "test/ch34_006.jpg", "test/ch34_010.jpg", "test/ch34_011.jpg",
                     "test/demo06.jpg", "test/ch34_014.jpg", "test/ch34_015.jpg",
                 )
                 val pages = imgs.map { it.substringAfterLast('/').substringBeforeLast('.') to loadAssetBitmap(it) }
-                val pads = listOf(0, 4, 8, 12)
-                log("▶ OCR strip pad A/B @1024：${pads.size} pad × ${pages.size} 圖（偵測快取、只重跑 OCR）"); writeLog()
+                val detCfg = li.joye.yakuyomi.engine.DetectorConfig()
+                val ocrCfg = OcrConfig()
+                log("▶ 偵測+OCR 檢驗（${pages.size} 內建圖）｜產品設定：DBNet @${detCfg.dbnetInputSize}、" +
+                    "OCR stripPad=${ocrCfg.stripPad} bicubic=${ocrCfg.useBicubic} minProb=${ocrCfg.minProb}"); writeLog()
+                val ocr = Ocr(ocrLocal, alphabet, ocrCfg)
                 try {
-                    // 偵測一次（pad 不影響偵測 → 各 pad 共用同一批框，可精確配對）
-                    val dets = HashMap<String, List<li.joye.yakuyomi.engine.TextLine>>()
-                    Detector(dbnetPath, li.joye.yakuyomi.engine.DetectorConfig()).use { det ->
-                        det.detect(pages[0].second).textMask.recycle() // warm（丟）
+                    Detector(dbnetPath, detCfg).use { det ->
+                        det.detect(pages[0].second).textMask.recycle() // warm（丟，不計時）
+                        var totBox = 0
+                        var totRead = 0
+                        var totMs = 0L
                         for ((name, page) in pages) {
+                            val t0 = System.currentTimeMillis()
                             val d = det.detect(page)
-                            dets[name] = d.lines
-                            d.textMask.recycle()
-                            log("  偵測 $name: ${d.lines.size} 框"); writeLog()
-                        }
-                    }
-                    // ★ 按「偵測框 index」精確配對（不可用讀出順序 zip：多讀一塊就整排錯位、diff 全錯）
-                    val base = HashMap<String, List<String>>() // pad=0 每框 text（含空字串，index 對齊）
-                    for (pad in pads) {
-                        try {
-                            Ocr(ocrLocal, alphabet, OcrConfig(stripPad = pad)).use { ocr ->
-                                var padRead = 0
-                                var padBoxes = 0
-                                var sumRescue = 0
-                                var sumLost = 0
-                                var sumChange = 0
-                                for ((name, page) in pages) {
-                                    val lines = dets[name] ?: continue
-                                    // ★ 每 pad 重建 TextLine：recognize 就地寫 text，共用會殘留上一 pad 的結果
-                                    val fresh = lines.map { li.joye.yakuyomi.engine.TextLine(it.quad, it.score) }
-                                    val t0 = System.currentTimeMillis()
-                                    ocr.recognize(page, fresh)
-                                    val ms = System.currentTimeMillis() - t0
-                                    val texts = fresh.map { it.text } // 含空 → index 與偵測框一一對應
-                                    val read = texts.count { it.isNotBlank() }
-                                    padRead += read; padBoxes += fresh.size
-                                    log("pad=$pad $name: ${fresh.size}框 讀${read}塊｜ocr ${"%.2f".format(ms / 1000.0)}s"); writeLog()
-                                    if (pad == pads.first()) {
-                                        base[name] = texts
-                                        log("  ${texts.filter { it.isNotBlank() }.joinToString(" / ")}"); writeLog()
-                                    } else {
-                                        val b = base[name] ?: texts
-                                        var rescue = 0; var lost = 0; var change = 0
-                                        texts.forEachIndexed { i, t ->
-                                            val o = b.getOrNull(i) ?: ""
-                                            when {
-                                                o.isBlank() && t.isNotBlank() -> { rescue++; log("  +救回 #$i: '$t'") }
-                                                o.isNotBlank() && t.isBlank() -> { lost++; log("  -弄壞 #$i: '$o' → (空)") }
-                                                o != t -> { change++; log("  ~改字 #$i: '$o' → '$t'") }
-                                            }
-                                        }
-                                        sumRescue += rescue; sumLost += lost; sumChange += change
-                                        log("  → 救回$rescue 弄壞$lost 改字$change"); writeLog()
-                                    }
-                                }
-                                if (pad == pads.first()) {
-                                    log("── pad=$pad(baseline) 總計：$padBoxes 框 讀出 $padRead 塊 ──")
-                                } else {
-                                    log("── pad=$pad 總計：$padBoxes 框 讀出 $padRead 塊｜vs baseline: 救回$sumRescue 弄壞$sumLost 改字$sumChange ──")
-                                }
-                                writeLog()
+                            val detMs = System.currentTimeMillis() - t0
+                            val to0 = System.currentTimeMillis()
+                            ocr.recognize(page, d.lines)
+                            val ocrMs = System.currentTimeMillis() - to0
+                            val texts = d.lines.mapNotNull { it.text.takeIf { t -> t.isNotBlank() } }
+                            totBox += d.lines.size; totRead += texts.size; totMs += detMs + ocrMs
+                            log("$name: ${d.lines.size}框 讀${texts.size}塊｜det ${"%.2f".format(detMs / 1000.0)}s " +
+                                "ocr ${"%.2f".format(ocrMs / 1000.0)}s"); writeLog()
+                            log("  ${texts.joinToString(" / ")}"); writeLog()
+                            if (runSaveImg) {
+                                addImage(
+                                    "$name（${d.lines.size}框/${texts.size}讀）",
+                                    page.copy(Bitmap.Config.ARGB_8888, true).also {
+                                        drawLines(it, d.lines); labelBmp(it, name, "${d.lines.size}框${texts.size}讀", detMs)
+                                    },
+                                )
                             }
-                        } catch (e: Throwable) {
-                            log("pad=$pad ✗ ${e.message}"); writeLog()
+                            d.textMask.recycle()
                         }
+                        val rate = if (totBox > 0) totRead * 100.0 / totBox else 0.0
+                        log("★ 總計：$totBox 框、讀出 $totRead 塊（${"%.1f".format(rate)}%）｜" +
+                            "偵測+OCR 共 ${"%.2f".format(totMs / 1000.0)}s"); writeLog()
                     }
                 } finally {
+                    ocr.close()
                     pages.forEach { it.second.recycle() }
                 }
-                log("★ 完成（pad A/B：比各 pad 總讀出塊數 + 文字品質；006 找「その通りじゃ」）"); writeLog()
             } catch (t: Throwable) {
                 Log.e(TAG, "DBNet size 對照失敗", t)
                 log("✗✗ 例外：${t.javaClass.simpleName}: ${t.message}")
@@ -428,7 +405,7 @@ class MainActivity : AppCompatActivity() {
             } finally {
                 li.joye.yakuyomi.engine.EngineTrace.sink = null
                 withContext(Dispatchers.Main) {
-                    updateButtons(); binding.dbnetSizeButton.isEnabled = true
+                    updateButtons(); binding.detectOcrCheckButton.isEnabled = true
                 }
             }
         }

@@ -87,9 +87,12 @@ data class TranslatorConfig(
     val sampleSource: String = DEFAULT_SAMPLE_SOURCE, // 〔設定〕few-shot 原文（空白＝不放範例）
     val sampleTarget: String = DEFAULT_SAMPLE_TARGET, // 〔設定〕few-shot 譯文（要跟 toLangName 同語言）
     val temperature: Double = 0.3,
-    // 跨頁批次翻譯（對映 m-i-t --batch-size / --batch-concurrent；§2 翻譯批次策略、§10 並發旋鈕）
-    val batchSize: Int = 8,              // 〔設定〕批次頁數：concurrent 模式＝同時並發的頁數上限；merged 模式＝每 prompt 併幾頁
-    val batchConcurrent: Boolean = true, // 〔設定〕true＝逐頁分開請求、批內並發（防 truncation/幻覺，推薦）；false＝併大 prompt（有風險）
+    // 跨頁批次翻譯（對映 m-i-t --batch-size / --batch-concurrent；§2 翻譯批次策略、§10 並發旋鈕）。
+    // ★ 現況：引擎端**無消費者**——原本讀這兩欄的 BatchTranslator 已移除（跨頁併發改由 fork 的 PageTranslator
+    //   以 Semaphore(pipelineDepth) 負責、不吃這裡）。保留＝§4 第一層「config schema 照搬上游」（上游調參 ⇒
+    //   這裡零 code 改動）；日後引擎要自帶批次器可直接接回。**非產品設定頁項目**（故不標〔設定〕）。
+    val batchSize: Int = 8,              // m-i-t --batch-size：concurrent 模式＝同時並發頁數上限；merged 模式＝每 prompt 併幾頁
+    val batchConcurrent: Boolean = true, // m-i-t --batch-concurrent：true＝逐頁分開請求、批內並發（防 truncation/幻覺）；false＝併大 prompt
     val filterText: String? = null,   // 〔設定〕config.filter_text：regex 命中譯文則濾掉該區（例 ".*badtext.*"）
 )
 

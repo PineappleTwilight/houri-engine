@@ -52,14 +52,6 @@ class TextRegion(
     val y0: Float = lines.minOf { ln -> ln.quad.minOf { it.y } }
     val x1: Float = lines.maxOf { ln -> ln.quad.maxOf { it.x } }
     val y1: Float = lines.maxOf { ln -> ln.quad.maxOf { it.y } }
-
-    /** 原文字級估計＝各行短邊平均 ≈ 原漫畫字級。排版以此為字級上限，避免「同框大小字」。 */
-    val fontSizeHint: Float = lines.map { ln ->
-        minOf(
-            ln.quad.maxOf { it.x } - ln.quad.minOf { it.x },
-            ln.quad.maxOf { it.y } - ln.quad.minOf { it.y },
-        )
-    }.average().toFloat()
 }
 
 object Grouping {

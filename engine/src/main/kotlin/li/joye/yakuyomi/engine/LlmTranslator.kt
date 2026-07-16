@@ -57,10 +57,6 @@ class LlmTranslator(
     var lastRaw: String? = null
         private set
 
-    /** 最近一次請求回報的 token 用量（OpenAI 相容 `usage`；代理/自架未回＝null）。★併發下會 race，見上。 */
-    var lastUsage: Usage? = null
-        private set
-
     /**
      * 翻譯一頁的所有 query → **per-call** [TranslateResult]（translations + usage + error + raw）。
      * 全程走區域變數、**不寫任何實例欄位** → 多頁併發呼叫互不干擾（跨頁流水線安全）。[Pipeline] 走這條。
@@ -88,7 +84,6 @@ class LlmTranslator(
      */
     override suspend fun translate(queries: List<String>): List<String> {
         val r = translateDetailed(queries)
-        lastUsage = r.usage
         lastRaw = r.raw
         lastError = r.error
         return r.translations
