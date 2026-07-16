@@ -6,6 +6,8 @@ An on-device manga translation library (Android, Kotlin, NCNN + ONNX Runtime). G
 
 The module is reader-agnostic. Its only job is `translatePage(bitmap) -> PageResult`. Overwriting files, markers, resume, and cross-page batching are the caller's responsibility (see [Result handling](#result-handling)). The reader app (the [Yakuyomi](https://github.com/joyeli/Yakuyomi) mihon fork) consumes it via Gradle composite build.
 
+> **This page is the integration guide.** If you'd rather just *see it run* first, the [repo README](../README.md#try-it) walks through building the sandbox app and putting it on a phone — no integration needed. If you want to rebuild the model weights yourself from the upstream checkpoints, that's [docs/BUILD_MODELS.md](../docs/BUILD_MODELS.md).
+
 Group: `li.joye.yakuyomi:engine`. Min SDK 26.
 
 ## Quick start

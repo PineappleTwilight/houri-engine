@@ -8,6 +8,14 @@
 
 本 repo 是**引擎**（`yakuyomi-engine`）——翻譯函式庫，不是可安裝的 app。**要 app？** 那是 reader **Yakuyomi**，一個 [mihon](https://github.com/mihonapp/mihon) fork：[**下載簽章 APK**](https://github.com/joyeli/Yakuyomi/releases/latest) 或看它的 [repo](https://github.com/joyeli/Yakuyomi)。這個引擎 repo 以 submodule 被它引入，見[儲存庫結構](#儲存庫結構)。
 
+## 從哪開始
+
+| 你想做的事 | 去哪 |
+|---|---|
+| **看它跑起來** | 下面的[**試跑**](#試跑)——把 sandbox app 編出來裝到 arm64 手機上，看一頁走完整條 pipeline。LLM key 是選配：不給就跳過翻譯，偵測、OCR、去字照樣看得到。 |
+| **把引擎整合進自己的 app** | [**`engine/README_zh.md`**](engine/README_zh.md)——API 面：`translatePage`、模型怎麼進去、設定、結果處理、執行緒。 |
+| **自己重建模型** | [**`docs/BUILD_MODELS_zh.md`**](docs/BUILD_MODELS_zh.md)——從上游 checkpoint 轉，含各種坑與驗證判準。屬進階：我們轉好的可以直接下載，**用**引擎完全不需要走這條。 |
+
 ## 這是什麼
 
 Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（偵測與去字走 NCNN、OCR 走 ONNX Runtime、排版走 Canvas），只有翻譯連網：

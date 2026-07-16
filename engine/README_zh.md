@@ -6,6 +6,8 @@
 
 這個 module 跟 reader 無關，只做一件事：`translatePage(bitmap) -> PageResult`。覆蓋檔案、標記、續傳、跨頁批次是呼叫端的事（見[結果處理](#結果處理)）。reader app（[Yakuyomi](https://github.com/joyeli/Yakuyomi) mihon fork）用 Gradle composite build 引入。
 
+> **這頁是整合指南。** 如果你只想**先看它跑**，[repo README](../README_zh.md#試跑) 有一條路：把 sandbox app 編出來裝到手機上，不必整合任何東西。如果你想自己從上游 checkpoint 把模型轉出來，那是 [docs/BUILD_MODELS_zh.md](../docs/BUILD_MODELS_zh.md)。
+
 Group：`li.joye.yakuyomi:engine`。Min SDK 26。
 
 ## 快速開始

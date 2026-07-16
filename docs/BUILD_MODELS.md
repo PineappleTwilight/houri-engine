@@ -6,6 +6,8 @@ The three models the engine loads are our own conversions of [manga-image-transl
 
 Nothing here is a recipe you have to reconstruct by hand — each path is one script. What follows is the environment those scripts need, the criteria for judging their output, and the traps that make an unverified rebuild silently wrong.
 
+> **You probably don't need this page.** The weights we built are downloadable and checksum-verified — [MODELS.md](MODELS.md) covers that, and it's what both the reader and the sandbox use. Come here if you want to audit our conversions, retarget a different upstream checkpoint, or rebuild under your own toolchain. To just *see the engine run*, go to the [repo README](../README.md#try-it); to integrate it, [engine/README.md](../engine/README.md).
+
 ## What "reproducible" means here
 
 Read this before you compare any hashes, because the obvious check is wrong for one of the three models.

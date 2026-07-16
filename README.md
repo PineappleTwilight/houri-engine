@@ -8,6 +8,14 @@ Status: the full pipeline runs on-device and drives the Yakuyomi reader app — 
 
 This repo is the **engine** (`yakuyomi-engine`) — the translation library, not an installable app. **Want the app?** It's the reader, **Yakuyomi**, a [mihon](https://github.com/mihonapp/mihon) fork: [**download the signed APK**](https://github.com/joyeli/Yakuyomi/releases/latest) or see its [repo](https://github.com/joyeli/Yakuyomi). This engine repo pulls into it as a submodule; see [Repository layout](#repository-layout).
 
+## Where to start
+
+| You want to… | Go to |
+|---|---|
+| **See it run** | [**Try it**](#try-it) below — build the sandbox app, put it on an arm64 phone, watch a page go through the pipeline. An LLM key is optional: without one, translation is skipped and you still get detection, OCR and text removal. |
+| **Integrate the engine into your app** | [**`engine/README.md`**](engine/README.md) — the API surface: `translatePage`, getting the models in, configuration, result handling, threading. |
+| **Rebuild the models yourself** | [**`docs/BUILD_MODELS.md`**](docs/BUILD_MODELS.md) — from the upstream checkpoints, with the traps and the verification criteria. Advanced: ours are downloadable, so you never need this to *use* the engine. |
+
 ## What it is
 
 Yakuyomi translates manga pages. Four of the five stages run on the device (NCNN for detection and text removal, ONNX Runtime for OCR, Canvas for typesetting); only translation calls out to a network LLM:
