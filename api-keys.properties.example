@@ -1,0 +1,14 @@
+# BYOK — copy this file to `api-keys.properties` (repo root) and fill in your key.
+# The sandbox app reads it at build time and injects it into BuildConfig.
+#
+# Leaving it blank (or not creating the file at all) is fine: the sandbox then runs
+# detection + OCR + text removal and **skips translation**. That is still enough to see
+# the pipeline work — you get the erased page, the detected boxes, and the Japanese the
+# OCR read. Only the "translate + typeset" half needs a key.
+#
+# Any OpenAI-compatible provider works in the engine (see docs/PROVIDERS.md); the sandbox
+# is hardcoded to this one key for convenience. The reader app does it properly:
+# per-provider keys, encrypted with Android Keystore, set in its settings screen.
+#
+# `api-keys.properties` is gitignored — never commit a real key.
+DEEPSEEK_API_KEY=

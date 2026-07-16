@@ -39,9 +39,24 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 
 `translatePage` is a `suspend` function; call it from a background dispatcher. It is safe to call concurrently on one warm engine instance, which is how the reader pipelines pages — see [Lifecycle and threading](#lifecycle-and-threading).
 
-## Models (BYOM)
+## Models
 
-The engine ships no model weights. The host supplies the model files plus the OCR alphabet. Detection and text removal are NCNN (each a `.param` + `.bin` pair — both files required); OCR is ONNX Runtime:
+The engine ships no model weights — you get them onto the device one of two ways.
+
+**Auto-download.** The engine fetches them itself: `ModelDownloader` reads this repo's [`models.json`](../models.json) manifest, downloads each file into a directory you pick, and verifies every sha256 (files already present and valid are skipped). This is what the reader app does.
+
+```kotlin
+val remote = ModelDownloader.fetchManifest()        // defaults to this repo's models.json on main
+val dir = File(context.filesDir, "models")
+ModelDownloader.ensure(remote, dir) { progress ->   // ModelProgress.Downloading(role, name, bytes) …
+    updateNotification(progress)
+}
+val models = ModelSet.resolve(dir.listFiles()!!.map { it.name to it.absolutePath })!!
+```
+
+**Bring your own model (BYOM).** Or supply the files yourself — put them anywhere local and either let `ModelSet.resolve` name-match them, or name each role explicitly (see [Quick start](#quick-start)).
+
+Either way it's the same five files. Detection and text removal are NCNN (each a `.param` + `.bin` pair — both files required); OCR is ONNX Runtime:
 
 | Role | File (typical name) | Backend | What it does | Source |
 |---|---|---|---|---|

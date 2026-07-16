@@ -37,9 +37,24 @@ Yakuyomi.create(models, alphabet, apiKey).use { engine ->
 
 `translatePage` 是 `suspend`，從背景 dispatcher 呼叫。對同一個 **warm** 引擎實例並發呼叫是安全的，reader 就是這樣做跨頁流水線——見[生命週期與執行緒](#生命週期與執行緒)。
 
-## 模型（BYOM）
+## 模型
 
-引擎不帶模型權重。host 提供模型檔加 OCR 字典。偵測與去字走 NCNN（各是 `.param` + `.bin` 一對，兩個都要）；OCR 走 ONNX Runtime：
+引擎不帶模型權重——把模型弄到裝置上有兩條路。
+
+**自動下載。** 引擎自己會抓：`ModelDownloader` 讀本 repo 的 [`models.json`](../models.json) manifest、把每個檔下載到你指定的資料夾、並逐檔驗 sha256（已存在且驗過的會跳過）。reader app 走的就是這條。
+
+```kotlin
+val remote = ModelDownloader.fetchManifest()        // 預設抓本 repo main 上的 models.json
+val dir = File(context.filesDir, "models")
+ModelDownloader.ensure(remote, dir) { progress ->   // ModelProgress.Downloading(role, name, bytes) …
+    updateNotification(progress)
+}
+val models = ModelSet.resolve(dir.listFiles()!!.map { it.name to it.absolutePath })!!
+```
+
+**自備模型（BYOM）。** 或自己放檔——放在任何本機路徑，讓 `ModelSet.resolve` 按檔名比對，或明確指定各角色（見[快速開始](#快速開始)）。
+
+兩條路要的是同樣那五個檔。偵測與去字走 NCNN（各是 `.param` + `.bin` 一對，兩個都要）；OCR 走 ONNX Runtime：
 
 | 角色 | 檔名（常見） | 後端 | 做什麼 | 來源 |
 |---|---|---|---|---|

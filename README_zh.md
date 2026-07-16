@@ -91,15 +91,34 @@ Yakuyomi 翻譯漫畫頁。五個階段裡四個在裝置上跑（偵測與去�
 
 NCNN 角色是 `.param` + `.bin` 成對（兩個都要）。整套約 208 MB，其中大半是 fp16 偵測器（153 MB）。
 
-## 建置
+## 試跑
 
-引擎是標準的 Android Gradle library。要跑 pipeline 最快的方式是 sandbox app（`:app-sandbox`）：
+引擎是 Android library（arm64 NCNN + ONNX Runtime），所以要試跑就是把 sandbox app（`:app-sandbox`）編出來裝上去。**需要真的 arm64 Android 裝置**——sandbox 只打 `arm64-v8a`，x86 模擬器跑不起來。
+
+**1. 拿模型。** 模型不在 repo 裡。把 [`models.json`](models.json) 列的五個檔抓下來——偵測器的 `.param`+`.bin` 在 `models-v3` release，OCR 的 `.onnx` 與去字的 `.param`+`.bin` 在 `models-v2`——全放進同一個手機讀得到的資料夾。來源、雜湊與授權見 [docs/MODELS_zh.md](docs/MODELS_zh.md)。
+
+**2.（選配）給 LLM key。** 把 `api-keys.properties.example` 複製成 `api-keys.properties`、填入 `DEEPSEEK_API_KEY`。**不給也沒關係，翻譯那步會自動跳過**——偵測、OCR、去字照跑，一樣看得到 pipeline 在做什麼。
+
+**3. 編譯安裝。**
 
 ```
 ./gradlew :app-sandbox:assembleDebug
+adb install app-sandbox/build/outputs/apk/debug/app-sandbox-debug.apk
 ```
 
-裝起來，指向放模型的資料夾（NCNN 偵測與去字成對檔，加 int8 OCR 的 `.onnx`），選測試圖，跑診斷或去字比較。reader app（Yakuyomi）在另一個 fork repo。
+**4. 跑起來。** 開 app → 按「選擇模型資料夾」指到第 1 步那個夾 → 然後：
+
+| 按鈕 | 做什麼 |
+|---|---|
+| **偵測 + OCR 檢驗** | **先按這個。** 用產品預設把內建測試圖跑一遍偵測 + OCR，印出框數／讀出塊數／秒數。不用選圖、不用 key。 |
+| **診斷** | 點一張縮圖 → 跑**完整 pipeline**（偵測 → OCR → 翻譯 → 去字 → 排版），附各階段耗時。沒 key 就跳過翻譯那步。 |
+| **效能比較** | 單張圖，兩種去字方法並排比。 |
+
+按鈕分成「選圖測試」（跑你選的縮圖）與「固定圖測試」（跑內建圖、不理選取）兩區。
+
+想自己從上游 checkpoint 把模型轉出來、而不是下載我們轉好的？見 [docs/BUILD_MODELS_zh.md](docs/BUILD_MODELS_zh.md)。
+
+reader app（Yakuyomi）在另一個 fork repo。
 
 ## 設定
 

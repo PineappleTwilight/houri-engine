@@ -91,15 +91,34 @@ Weights are not committed and not packed into the APK. The reader can auto-downl
 
 NCNN roles ship as a `.param` + `.bin` pair (both required). The full set is about 208 MB, most of it the fp16 detector (153 MB).
 
-## Building
+## Try it
 
-The engine builds as a standard Android Gradle library. The sandbox app (`:app-sandbox`) is the quickest way to exercise the pipeline:
+The engine is an Android library (arm64 NCNN + ONNX Runtime), so trying it means building the sandbox app (`:app-sandbox`) and installing it. **A real arm64 Android device is required** — the sandbox only builds `arm64-v8a`, so an x86 emulator won't run it.
+
+**1. Get the models.** They aren't in the repo. Fetch the five files listed in [`models.json`](models.json) — the detector `.param`+`.bin` from the `models-v3` release, the OCR `.onnx` and the inpaint `.param`+`.bin` from `models-v2` — and put them all in one folder the phone can read. Details, checksums and licensing: [docs/MODELS.md](docs/MODELS.md).
+
+**2. (Optional) Add an LLM key.** Copy `api-keys.properties.example` to `api-keys.properties` and fill in `DEEPSEEK_API_KEY`. **Skip this and translation is simply skipped** — you still get detection, OCR and text removal, which is enough to watch the pipeline work.
+
+**3. Build and install.**
 
 ```
 ./gradlew :app-sandbox:assembleDebug
+adb install app-sandbox/build/outputs/apk/debug/app-sandbox-debug.apk
 ```
 
-Install it, point it at a folder containing the models (the NCNN detector and inpaint pairs plus the int8 OCR `.onnx`), pick test images, and run a diagnostic or a text-removal comparison. The reader app, Yakuyomi, lives in the separate fork repo.
+**4. Run it.** Open the app, tap *選擇模型資料夾* (pick model folder) and choose the folder from step 1. Then:
+
+| Button | What it does |
+|---|---|
+| *偵測 + OCR 檢驗* (detect + OCR check) | **Start here.** Runs the built-in test pages through detection + OCR at the product defaults and prints boxes / lines read / timings. No image picking, no key needed. |
+| *診斷* (diagnose) | Pick a thumbnail → the **full pipeline** (detection → OCR → translation → removal → typeset) with per-stage timings. Without a key, the translation step is skipped. |
+| *效能比較* (compare) | One image, both text-removal modes side by side. |
+
+The buttons are grouped into *選圖測試* (runs the thumbnails you selected) and *固定圖測試* (runs built-in images, ignores the selection). The sandbox UI is in Chinese — it is our own development tool, not a product surface.
+
+Want to build the models yourself from the upstream checkpoints instead of downloading ours? See [docs/BUILD_MODELS.md](docs/BUILD_MODELS.md).
+
+The reader app, Yakuyomi, lives in the separate fork repo.
 
 ## Configuration
 
