@@ -30,6 +30,15 @@ The provider is a preset picker: manga-image-translator's LLM set (OpenAI, DeepS
 ### LLM temperature (temperature) · advanced
 Default 0.3. Range 0.0–1.0. The sampling temperature passed to the LLM. Lower (toward 0) is more consistent and sticks closer to a literal translation; higher (toward 1) is more flexible but can drift from the original meaning. Most people don't need to touch it.
 
+Not every model accepts it. OpenAI's reasoning models (the o-series and the GPT-5 series) reject `temperature` with an HTTP 400, and DeepSeek accepts but ignores it while thinking is on — so the engine decides per provider and model whether to send it at all (see [PROVIDERS.md](PROVIDERS.md#per-provider-request-parameters)).
+
+### Thinking mode (thinking) · advanced
+Switch, **default off**. Lets the model reason before it answers.
+
+Off is the default because current models (DeepSeek V4, Gemini 3, …) think by default, and for line-by-line manga translation that buys very little: replies take noticeably longer and burn several times the tokens, so each chapter costs more. Turn it on only if a provider's non-thinking output is visibly worse.
+
+The request field differs per provider, so the engine maps it: DeepSeek `thinking: {"type": "disabled"}`, OpenAI/Gemini/Groq `reasoning_effort`, Qwen `enable_thinking`, OpenRouter `reasoning: {"effort": "none"}`. Some models can't be turned off at all, only turned down — OpenAI's o-series and Groq's GPT-OSS drop to their lowest effort, Gemini 3 to *minimal* — and the self-hosted presets (Sakura, Custom) are sent no extra field, because an unknown endpoint may reject an unknown field. Full table in [PROVIDERS.md](PROVIDERS.md#per-provider-request-parameters).
+
 ---
 
 ## Text removal

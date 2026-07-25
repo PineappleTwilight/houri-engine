@@ -77,7 +77,7 @@ val config = EngineConfig(
     ocr        = OcrConfig(minProb = 0.5f),               // 丟低信心 OCR
     inpainter  = InpainterConfig(method = "aot"),        // "boxfill"（快速）| "aot"（AI）
     render     = RenderConfig(orientation = TextOrientation.AUTO),
-    translator = TranslatorConfig(model = "deepseek-chat", temperature = 0.3),
+    translator = TranslatorConfig(model = "deepseek-v4-flash", temperature = 0.3),
 )
 Yakuyomi.create(models, alphabet, apiKey, config)
 ```

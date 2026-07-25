@@ -12,7 +12,7 @@ from paths import ROOT, OUT, SANDBOX_PAGE as IMG  # 集中路徑，見 paths.py
 OCR_JSON = os.path.join(OUT, "ocr_results.json")
 
 API_BASE = "https://api.deepseek.com/chat/completions"
-MODEL = "deepseek-chat"
+MODEL = "deepseek-v4-flash"  # 舊名 deepseek-chat 於 2026-07-24 15:59 UTC 退役（相容 shim 一併移除）
 TO_LANG = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)"
 TEMPERATURE = 0.3
 
@@ -57,8 +57,10 @@ def read_key():
 
 
 def call_deepseek(key, messages):
+    # thinking:disabled ＝對齊引擎預設（TranslatorConfig.thinking=false → LlmProviders.requestParams）。
+    # v4 兩顆模型都**預設思考**（慢又貴、逐行照翻沒好處），不關就跟裝置端跑的不是同一件事。
     body = json.dumps({"model": MODEL, "messages": messages, "temperature": TEMPERATURE,
-                       "stream": False}).encode("utf-8")
+                       "thinking": {"type": "disabled"}, "stream": False}).encode("utf-8")
     req = urllib.request.Request(API_BASE, data=body, headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=120) as r:

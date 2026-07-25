@@ -112,15 +112,33 @@ class LlmTranslator(
     private fun msg(role: String, content: String) =
         JSONObject().put("role", role).put("content", content)
 
+    /**
+     * 映射層回傳的值 → JSON 可放的值。純量原樣，Map 遞迴成 [JSONObject]
+     *（巢狀物件的欄位確實存在，如 DeepSeek `thinking:{type:disabled}`、OpenRouter `reasoning:{effort:none}`）。
+     */
+    private fun toJson(v: Any): Any = when (v) {
+        is Map<*, *> -> JSONObject().apply {
+            v.forEach { (k, value) -> if (k != null && value != null) put(k.toString(), toJson(value)) }
+        }
+        else -> v
+    }
+
     /** 回傳 (回應內容, token 用量)——per-call、不寫實例欄位（跨頁併發安全）。usage 缺欄/代理不回＝null。 */
     private suspend fun request(messages: JSONArray): Pair<String, Usage?> = withContext(Dispatchers.IO) {
-        val body = JSONObject()
-            .put("model", cfg.model)
+        // 退役 model 名稱遷移（見 LlmProviders.RETIRED_MODELS）：2026-07-24 DeepSeek 砍掉 deepseek-chat /
+        // deepseek-reasoner，舊設定送出去會 400。這裡就地換名 ⇒ 存著舊名稱的使用者不用手動改設定。
+        // 只認 provider id（custom/sakura 的同名模型不動）；除 model 外請求其餘欄位一字不動。
+        val model = LlmProviders.migrateModel(cfg.provider, cfg.model)
+        // 其餘欄位（temperature、思考開關…）交給 per-provider/per-model 的相容映射（[ParamRule]）決定「送不送 /
+        // 送什麼 / clamp 到哪」——各家能吃的欄位不一致（OpenAI reasoning 模型連 temperature 都拒收），
+        // 照單全送就是 400。model/messages/stream 是每家共通的三件、固定組。
+        val json = JSONObject()
+            .put("model", model)
             .put("messages", messages)
-            .put("temperature", cfg.temperature)
             .put("stream", false)
-            .toString()
-            .toRequestBody("application/json".toMediaType())
+        LlmProviders.requestParams(cfg.provider, model, cfg.thinking, cfg.temperature)
+            .forEach { (k, v) -> json.put(k, toJson(v)) }
+        val body = json.toString().toRequestBody("application/json".toMediaType())
         val req = Request.Builder()
             .url(cfg.apiBase)
             .addHeader("Authorization", "Bearer $apiKey")
@@ -128,7 +146,10 @@ class LlmTranslator(
             .build()
         client.newCall(req).execute().use { resp ->
             val text = resp.body.string() // okhttp5：body 非空
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code}")
+            // ★帶上 provider 的 error body：這串會經 TranslateResult.error → Pipeline → PageTranslator
+            //   落進每章的 .yakuyomi_errors.txt，400 的真正原因（例如 model 退役的「Model Not Exist」、
+            //   402 餘額不足、401 key 錯）直接看得到，不再只有一個沒資訊的 "HTTP 400"。截 300 字免灌爆 log。
+            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} ${text.take(300)}")
             val obj = JSONObject(text)
             // 擷取 token 用量（非串流＝整包 usage 都在 body；缺欄/代理不回＝null、由呼叫端當未知）。
             val usage = obj.optJSONObject("usage")?.let { u ->

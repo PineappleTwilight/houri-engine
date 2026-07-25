@@ -6,7 +6,7 @@
 
 ## 所有供應商共用一條聊天路徑
 
-每個支援的供應商都講 OpenAI chat-completions 形狀（`POST {base}`，body `{ model, messages, temperature }`，`Authorization: Bearer <key>`）。`LlmTranslator` 是唯一的請求 builder；換供應商只動 `apiBase`、`model`、金鑰，其餘不變。Google Gemini 也納入了——聊天指向它的 OpenAI 相容端點即可，不必另寫 code；只有「列模型」走它的 native 端點，因為 compat 路徑沒有 `/models`。
+每個支援的供應商都講 OpenAI chat-completions 形狀（`POST {base}`，body `{ model, messages, stream }`，`Authorization: Bearer <key>`）。`LlmTranslator` 是唯一的請求 builder；換供應商只動 `apiBase`、`model`、金鑰，其餘不變。這三個欄位以外的（`temperature`、思考開關）走一層相容映射——因為「OpenAI 相容」不等於「吃一樣的欄位」（見下）。Google Gemini 也納入了——聊天指向它的 OpenAI 相容端點即可，不必另寫 code；只有「列模型」走它的 native 端點，因為 compat 路徑沒有 `/models`。
 
 這是刻意的。Yakuyomi 鎖定的供應商，正是 manga-image-translator 的 LLM translator——OpenAI、DeepSeek、Gemini、Groq、custom_openai、Sakura、Qwen——全部 OpenAI 相容。m-i-t 也支援的非 LLM 機器翻譯（DeepL、彩雲、有道、百度、Papago）沒有 chat/prompt 協定，不在範圍內。
 
@@ -26,6 +26,36 @@
 | 自訂（OpenAI 相容） | 你的 base | 你的 base + `/v1/models` | LM Studio、SiliconFlow、任何相容端點 |
 
 其中兩個是 `baseEditable`（Sakura、自訂）：使用者填 base URL，引擎據此推導聊天與列模型的 URL（`LlmProviders.chatUrlOf` / `modelsUrlOf`）。
+
+## 各家 request 參數對照
+
+各家只在 `model` / `messages` / `stream` 上一致，其餘全是分歧——這家必填的欄位，換一家就是 400，**同一家不同世代的模型規則還會變**。`LlmProviders.PARAM_RULES` 就是一張 `ParamRule` 資料表（`provider → [規則]`，由上而下第一個命中 `modelPattern` 者勝、`null` pattern 放最後當 fallback）；`LlmProviders.requestParams(provider, model, thinking, temperature)` 是純函式、回傳這次要附加的 body 欄位，`LlmTranslator` 只負責塞進 JSON。要加一家供應商或一個特例模型＝加一列資料，不動邏輯。
+
+| 供應商／模型 | 思考關（預設） | 思考開 | `temperature` | 備註 |
+|---|---|---|---|---|
+| DeepSeek | `thinking: {"type":"disabled"}` | －（該家預設就思考） | 送 | v4-flash / v4-pro 都預設思考；思考模式下取樣參數「收下但無效」（[文件](https://api-docs.deepseek.com/guides/thinking_mode/)） |
+| OpenAI · o 系列（`o1`、`o3`、`o4-mini`、`codex-mini`） | `reasoning_effort: "low"` | － | **不送** | 推理模型拒收 `temperature`、`top_p`、`max_tokens`…；長度上限欄位是 `max_completion_tokens`；`o1-mini` 沒有 `reasoning_effort`；關不掉、只能降檔（[文件](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning)） |
+| OpenAI · GPT-5 系列 | `"none"`（5.1 以後）、`"minimal"`（初代 gpt-5/-mini/-nano）、`"low"`（gpt-5-codex） | － | **不送** | `gpt-5-pro` 只吃 `high`，所以什麼都不送 |
+| OpenAI · `gpt-5*-chat`、`gpt-4o`、`gpt-4.1`… | － | － | 送 | 非推理模型：送 `reasoning_effort` 反而 400 |
+| Gemini（OpenAI 相容） | `reasoning_effort: "none"`（2.5 系）、`"minimal"`（3.x，含預設的 `gemini-3.6-flash`） | － | 送 | `none` 只有 2.5 系吃；3.x 只能最小化、關不掉（[文件](https://ai.google.dev/gemini-api/docs/openai)） |
+| Groq | `reasoning_effort: "none"`（Qwen 系）、`"low"`（GPT-OSS，含預設的 `openai/gpt-oss-120b`） | － | 送 | GPT-OSS 只吃 low/medium/high，`low` 是最接近關掉的檔；Llama 系收到這欄位直接 400（[文件](https://console.groq.com/docs/reasoning)） |
+| Qwen（DashScope compat） | `enable_thinking: false` | `enable_thinking: false` | 送 | DashScope 對「思考模型 + 非串流」除非顯式 false 否則直接 400，而引擎從不串流（[文件](https://www.alibabacloud.com/help/en/model-studio/deep-thinking)） |
+| OpenRouter | `reasoning: {"effort":"none"}` | － | 送 | `effort: none` ＝完全關閉推理；未支援的參數預設會被忽略，所以任何模型都安全（[文件](https://openrouter.ai/docs/use-cases/reasoning-tokens)） |
+| Sakura、自訂、未知 | － | － | 送 | 自架端點不加任何額外欄位：未知欄位可能就是 400 |
+
+「－」＝不送欄位、用該家自己的預設。`ParamRule` 另外帶 `maxTokensField`（`max_tokens` vs `max_completion_tokens`）；引擎目前不設輸出上限、沒送這欄，映射先備著。`LlmParamsTest` 把這張表釘住（o 系列不帶 `temperature`、DeepSeek 送關思考、自架什麼都不加…）。
+
+## 已退役的 model id
+
+供應商會下架模型名稱，存在設定裡的舊 id 就此永久失敗。`LlmProviders.RETIRED_MODELS`（依 provider id）在送出請求前就地換名，使用者不必去改一個自己沒選過的設定：
+
+| 供應商 | 退役 id | 換成 | 原因 |
+|---|---|---|---|
+| DeepSeek | `deepseek-chat`、`deepseek-reasoner` | `deepseek-v4-flash` | 2026-07-24 移除且不留相容 shim——舊名稱一律 400「Model Not Exist」 |
+| Gemini | `gemini-2.0-flash`、`gemini-2.0-flash-001` | `gemini-3.6-flash` | 2026-06-01 停役（[deprecations](https://ai.google.dev/gemini-api/docs/deprecations)） |
+| Gemini | `gemini-2.0-flash-lite`、`gemini-2.0-flash-lite-001` | `gemini-3.5-flash-lite` | 同批停役；維持 lite 級距，價位／延遲不變 |
+
+這張表**只收真的已經死掉的 id**。只是被標 deprecated、但還在服務的（Groq 的 `llama-3.3-70b-versatile` 可用到 2026-08-16 停役日）不動它：偷偷換掉使用者選的可用模型，比讓他看到停役公告更糟。這種情況只動預設值（Groq 預設已改成 Groq 自己點名的 production 替代 `openai/gpt-oss-120b`；另一個建議 `qwen/qwen3.6-27b` 只是 preview）。`LlmParamsTest` 會檢查「沒有任何預設模型本身是退役 id」。
 
 ## 撈取模型清單
 

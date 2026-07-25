@@ -30,6 +30,15 @@ LLM 翻成的語言。預設台灣繁體中文。預設帶一組日翻中的 few
 ### LLM 溫度（temperature）· 進階
 預設 0.3。值域 0.0–1.0。丟給 LLM 的取樣溫度。低（往 0）＝更一致、更貼字直譯；高（往 1）＝更靈活但可能偏離原意。多數人不用動。
 
+不是每個模型都吃這個參數：OpenAI 的推理模型（o 系列、GPT-5 系列）收到 `temperature` 會直接回 HTTP 400，DeepSeek 則是思考模式下收下但無效——所以引擎會依服務商與模型決定這次要不要送（見 [PROVIDERS.md](PROVIDERS_zh.md#各家-request-參數對照)）。
+
+### 思考模式（thinking）· 進階
+開關，**預設關**。讓模型先思考再回答。
+
+預設關是因為現在的新模型（DeepSeek V4、Gemini 3…）**預設就會思考**，而逐行翻漫畫這種任務從思考拿到的好處很小：回應明顯變慢、token 用量數倍，整話成本跟著上去。除非某家不思考的譯文明顯變差，否則不用開。
+
+各家的欄位形狀不同，引擎會自動對應：DeepSeek `thinking: {"type": "disabled"}`、OpenAI／Gemini／Groq 用 `reasoning_effort`、Qwen 用 `enable_thinking`、OpenRouter 用 `reasoning: {"effort": "none"}`。有些模型根本關不掉、只能調低——OpenAI o 系列與 Groq 的 GPT-OSS 只能降到最低檔、Gemini 3 只能到 *minimal*——自架的預設（Sakura、自訂）則一律不加欄位，因為未知端點可能拒收未知欄位。完整對照見 [PROVIDERS.md](PROVIDERS_zh.md#各家-request-參數對照)。
+
 ---
 
 ## 去字

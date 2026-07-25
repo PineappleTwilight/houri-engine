@@ -82,7 +82,9 @@ private const val DEFAULT_SAMPLE_TARGET =
 data class TranslatorConfig(
     val provider: String = "deepseek",                                  // 〔設定〕config.translator
     val targetLang: String = "CHT",                                     // 〔設定〕config.target_lang
-    val model: String = "deepseek-chat",                                // 〔設定〕
+    // 預設同 LlmProviders 的 deepseek 那筆。舊名 deepseek-chat 於 2026-07-24 15:59 UTC 退役（送出去會 400）
+    // → 改為其對應的 deepseek-v4-flash；存著舊名的既有設定由 LlmProviders.migrateModel 就地換名。
+    val model: String = "deepseek-v4-flash",                            // 〔設定〕
     val apiBase: String = "https://api.deepseek.com/chat/completions",  // 〔設定〕custom_openai 用
     // ⚠️ toLangName / fromLangName 預設被 fork :domain 的 TranslationPreferences.DEFAULT_TARGET_LANG /
     //   DEFAULT_SOURCE_LANG 鏡像（:domain 不能 import 引擎）。改這兩個請同步改那邊，否則 few-shot 判斷會 drift。
@@ -90,7 +92,18 @@ data class TranslatorConfig(
     val fromLangName: String = "Japanese",          // 〔設定〕來源語言標註（空白＝讓 LLM 自己判）
     val sampleSource: String = DEFAULT_SAMPLE_SOURCE, // 〔設定〕few-shot 原文（空白＝不放範例）
     val sampleTarget: String = DEFAULT_SAMPLE_TARGET, // 〔設定〕few-shot 譯文（要跟 toLangName 同語言）
+    // 〔設定〕**取樣溫度**。★不是每家/每個模型都吃：OpenAI 的 reasoning 模型（o 系列、gpt-5 系列）**拒收**
+    //   temperature（送了 400）、DeepSeek 思考模式下則是「收下但無效」⇒ 由 LlmProviders.requestParams 決定
+    //   這次請求送不送、以及 clamp 到該家的合法範圍（見 [ParamRule]）。
     val temperature: Double = 0.3,
+    // 〔設定〕**思考模式（reasoning）**，預設 **關**。
+    //   為什麼預設關：各家新世代模型（DeepSeek v4 系、Gemini 3 系…）**預設就會思考**——對「逐行照翻」這種
+    //   結構化任務多花數秒與數倍 token 卻沒明顯品質提升 ⇒ 關掉＝復刻舊 deepseek-chat 的非思考行為（快又便宜）。
+    //   開＝允許模型思考：**回應更慢、token 更多、費用更高**。
+    //   欄位形狀 per-provider（thinking / reasoning_effort / enable_thinking / reasoning），映射表見 [ParamRule]；
+    //   ★不是每家都能關（OpenAI o 系列只能降到最低檔、Gemini 3.x 只能 minimal、Groq 的 GPT-OSS 關不掉、
+    //   自架的 custom/sakura 一律不送欄位）。
+    val thinking: Boolean = false,
     // 跨頁批次翻譯（對映 m-i-t --batch-size / --batch-concurrent；§2 翻譯批次策略、§10 並發旋鈕）。
     // ★ 現況：引擎端**無消費者**——原本讀這兩欄的 BatchTranslator 已移除（跨頁併發改由 fork 的 PageTranslator
     //   以 Semaphore(pipelineDepth) 負責、不吃這裡）。保留＝§4 第一層「config schema 照搬上游」（上游調參 ⇒
