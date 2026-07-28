@@ -4,8 +4,11 @@
 
 repo   = https://github.com/zyddnys/manga-image-translator
 branch = main
-commit = efdc229de8aa0f3d4051ad97664adc62dd5ac605
-date   = 2026-07-01
+commit = 95227a2  # 2026-07-28 查核：自 efdc229 起 4 個 commit 全為本機 offline MT
+                  # （M2M100 走 HuggingFace + CUDA/ROCm、NLLB 修正），watched paths 僅
+                  # config.py 加兩個 m2m100_hf enum 值；chatgpt.py / 偵測 / OCR / 去字
+                  # 零變更 ⇒ 判定無需 port（我們走雲端 LLM，CUDA/ROCm 對 Android 無意義）。
+date   = 2026-07-28
 
 # watched paths（最新 layout）：
 #   偵測 = manga_translator/detection/default.py (+ default_utils/)  ← DBNet（m-i-t 的 default 偵測器）
