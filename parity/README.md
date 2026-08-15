@@ -103,6 +103,17 @@ Speed claims (e.g. "~3.6× on ARM") are **device numbers and cannot be verified 
 - `seg_validate.py` — inspect the detector's `seg` stroke mask at thresholds.
 - `emit_grouping_fixture.py` — generate the Kotlin grouping test fixture (see below).
 
+**Night-read rebuild (dark-mode prototype)**
+- `nightread.py <page> [-o dir]` — single page end-to-end: DBNet detection → three-zone masks
+  (bubbles / gutters / scene) → composed dark reading page. Design red lines (scene is never
+  inverted; bubbles = dark fill + bright text), tunable constants and the three fixes
+  (bubble component area cap / frameless-page downgrade / panel-aware gutters) are all in the
+  file header. Outputs to `out/nightread/`: `<name>_final.png` + `_cmp.png` (triptych:
+  original | result | mask viz) + per-mask PNGs / regions json.
+- `nightread_batch.py [names…]` — run a page set (default: the 11 sandbox test pages), print
+  the white-area table, write `nightread_stats.json`. Bare names like `demo01` resolve against
+  the sandbox test dir.
+
 ---
 
 ## The cross-language grouping test

@@ -95,6 +95,14 @@ python3 parity/ocr_parity.py     # 印出「逐行 exact match = N/30 = xx.x%」
 - `seg_validate.py`——在不同閾值下檢視偵測器的 `seg` 筆畫遮罩。
 - `emit_grouping_fixture.py`——產生 Kotlin 分組測試 fixture（見下）。
 
+**夜讀重繪（暗色模式原型）**
+- `nightread.py <頁圖> [-o 夾]`——單頁一條龍：DBNet 偵測 → 三分區遮罩（氣泡/留白/畫面）→
+  合成暗色閱讀頁。設計紅線（畫面絕不反相、氣泡＝深底亮字）、可調常數與三個修法
+  （氣泡元件面積上限 / 無框頁型降級 / 留白格框感知）全在檔頭。輸出到 `out/nightread/`：
+  `<頁名>_final.png` + `_cmp.png`（三聯：原圖｜成品｜遮罩視覺化）+ 各遮罩/regions json。
+- `nightread_batch.py [頁名…]`——批次跑一組頁（預設 sandbox 11 張測試頁）、印白面積表、
+  落 `nightread_stats.json`。頁名直接寫 `demo01` 這種（自動在 sandbox test 夾找）。
+
 ---
 
 ## 跨語言分組測試
