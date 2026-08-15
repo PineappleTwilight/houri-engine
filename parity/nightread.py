@@ -28,6 +28,18 @@
          或「深入頁內且包住線稿」（小洞內墨密度 ≥ DEEP_INK_RATIO）＝白包畫，
          皆改判畫面（D2 壓暗、不填深）。校準：真留白網絡 coreDeep 0.00–0.08，
          問題格（ch34_006 老人格 0.58 / ch34_010 第1格 0.40 / demo06 教堂 0.91）。
+  修法4  純白背景填黑＋前景白描邊（貼紙式立體化）——「不承載調子的純白背景」
+         （修法3 的格內白元件；frameless 頁則是 ≥WHITE_TH 的大面積背景白元件）
+         不再只壓暗：背景 W 填 BG、格內容照 D2、dilate(F,STROKE_OBJ)∩W 畫白
+         描邊把前景從黑底抬出來（與氣泡「深底亮字」同語彙）。figure/ground
+         分離靠連通性：被墨線封閉的白（臉/衣服）不與 W 連通、天然保留。
+         安全網（sticker_metrics，分離可疑 ⇒ 整顆退回上輪壓暗降級）：
+         figFrac（前景佔比過低＝整格都被當背景，如 demo05 合格紙、demo02
+         人群格）、thinFrac（W 細碎佔比過高＝鬍鬚型交界，前景白已連進背景，
+         如 ch34_006 白鬍老人格）、textOn（語意證據＝文字以 tight bbox 真的
+         壓在該元件上才算；eaten 超標或小元件須有證據才填黑——40px 窗版
+         textCov 只留給漏併氣泡閘，防鄰格文字湊假證據吃掉前景白，
+         如 ch34_010 披肩）。校準見 STICKER_* 常數行內註記。
 
 偵測路徑＝export_dbnet_ncnn.build_model（m-i-t TextDetection @ .upstream-ref、
 detect-20241225.ckpt，paths.fetch 自動下載+驗 sha256）torch eager 前向 ＋
@@ -89,6 +101,52 @@ DEEP_INK_DEEP = 0.5             # 規則B：厚芯深入比例 ≥ 此
 DEEP_INK_RATIO = 0.02           #        且小洞內墨/元件面積 ≥ 此 ⇒ 白包畫
 HOLE_MAX_FRAC = 0.01            # 「小洞」上限（整頁佔比；大洞＝整格，不算包線稿）
 INK_DARK_TH = 128               # 洞內「墨」灰階上限
+# 修法4：純白背景填黑＋前景白描邊（貼紙式）
+STROKE_OBJ_FRAC = 0.0035        # 描邊半徑（× min(W,H)，clamp 下二行）
+STROKE_OBJ_MIN, STROKE_OBJ_MAX = 4, 7
+STROKE_OBJ_V = 220              # 描邊亮度（略低於 INK＝與氣泡字位準區分）
+STICKER_MIN_FRAC = 0.01         # frameless 背景白元件最小整頁佔比（大面積才算背景）
+FIG_NOISE_AREA = 40             # F 小噪點面積門檻（px）：不描邊、整顆併入背景填深
+FIG_NOISE_CLOSE = 11            # 噪點「在 W 內」判定：comp 閉運算核（覆蓋到的孤點才吞）
+# 修法4 安全網（figure/ground 分離可疑 ⇒ 該元件退回上輪壓暗降級）
+STICKER_FIG_MIN = 0.10          # 前景佔 bbox 比例下限（過低＝整格都被當背景）
+STICKER_FIG_MAX = 0.85          # 上限（過高＝根本沒分出背景）
+STICKER_THIN_R = 4              # W 細碎判定半徑（距離變換 ≤ R ＝細白絲）
+STICKER_THIN_MAX = 0.45         # W 細碎佔比上限（整體細碎＝背景根本破碎）
+STICKER_CHROMA_MAX = 6.0        # 元件平均彩度（max−min 通道）上限：淡彩水彩底
+                                # 灰階會 ≥235 但不是「純白」，整顆不進候選（彩頁不毀）
+                                # （校準：demo04 淡彩 2.5–15.4、demo05 11.7/18.3、
+                                #   純黑白頁全 ≤2.0；demo04 最低那顆 2.5 另由 textCov 擋）
+STICKER_EATEN_R = 5             # 「疑似被吃前景白」判定：細白（dist ≤ R）…
+STICKER_EATEN_DENS = 0.35       # …且局部墨密度（blur 15×15，墨＝<WHITE_TH）≥ 此
+                                # ＝密集筆畫縫隙白（白鬍/髮絲 vs 花窗速寫都長這樣）
+STICKER_EATEN_MAX = 0.06        # eaten 佔 W 比例軟上限：超標＝可能有白色前景物連進
+                                # 背景（ch34_006 白鬍老人格 0.073）…
+STICKER_TEXT_BG_MIN = 0.10      # …除非文字確實壓在這片白上（textOn）≥ 此＝作者把它
+                                # 當背景寫字的語意證據（demo06 教堂 0.167 / 金髮女孩格
+                                # 0.228 手寫字直接落在背景白 ⇒ 放行；老人格 0.000、
+                                # ch34_010 披肩 0.023 ⇒ 無證據）
+STICKER_TEXTON_PAD = 8          # textOn 的文字 bbox 外擴（語意證據要「真的壓在元件上」
+                                # ⇒ 只容 bbox 抖動的小 pad；BUBBLE_PAD 40px 窗會把鄰格
+                                # 文字掃進相鄰白元件湊假證據——ch34_010 披肩 pad40=0.207
+                                # vs pad8=0.023、demo06 教堂 pad40=0.232 vs pad8=0.167）
+STICKER_SMALL_AREA = 0.02       # 「小元件」整頁佔比門檻：小於此的白元件必須有 textOn
+                                # 語意證據才可填黑（真正的格背景白都大：正當 ACCEPT 最小
+                                # ch34_006 天空 0.035；ch34_010 披肩衣料 0.0105 ⇒ 退回。
+                                # eaten 軟上限對平滑衣料白這型前景是盲區，面積補上）
+STICKER_EATEN_HARD = 0.30       # eaten 硬上限：細碎過半＝分離無意義，一律退回
+STICKER_TEXT_MAX = 0.55         # 文字窗（region bbox+BUBBLE_PAD）蓋住 W 的比例上限：
+                                # 過高＝這顆白其實是漏併的氣泡，交還壓暗、不當背景
+                                # （此閘保留 40px 窗：量的是「字＋周邊白」的氣泡構形；
+                                #   換 tight 值會讓 demo02/03/04 的漏併氣泡掉下 0.55）
+# 修法4 區域級保護（_sticker_protect：accept 後的第二道網，逐團不填不描、留 D2）
+STICKER_NECK_R = 8              # 窄頸半徑：附屬白＝只能經寬 < 2R 縫隙抵達的 W（白鬍/
+                                # 髮絲經筆畫縫隙連進背景就是這型；geodesic 重建切下）
+STICKER_CORE_MIN = 0.03         # 開放背景核最小佔比（× W 面積）：erode 後殘核 ≥ 此
+                                # 才當背景種子（白臉額頭的小殘核不算背景）
+STICKER_PROTECT_EATEN_MIN = 0.002  # 附屬白連通團含 eaten ≥ max(100px, 此×W面積) 才保護
+                                # （乾淨格的窄框縫也是附屬白、但無 eaten ⇒ 照填）
+STICKER_PROTECT_DILATE = 6      # 保護團外擴（px）：蓋住鬍鬚邊緣的過渡帶
 
 _model = None
 _dbnet_utils = None
@@ -277,6 +335,228 @@ def build_bubble_mask(g, regions, seg, lab, stats, excluded_ids):
     return bubble, merged, rejected
 
 
+# ── 修法4：純白背景填黑＋前景白描邊（貼紙式）────────────────────────
+
+def _comp_window(g, lab, stats, i, margin):
+    """元件 bbox 外擴 margin 的工作窗：回傳 (x0,y0,x1,y1, sub_g, comp_bool)。"""
+    H, W_ = g.shape
+    x, y, cw, ch = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
+                    stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
+    x0, y0 = max(0, x - margin), max(0, y - margin)
+    x1, y1 = min(W_, x + cw + margin), min(H, y + ch + margin)
+    return x0, y0, x1, y1, g[y0:y1, x0:x1], (lab[y0:y1, x0:x1] == i)
+
+
+def _sticker_eaten(sub, comp):
+    """「疑似被吃前景白」遮罩：細白（dist ≤ EATEN_R）且局部墨密度 ≥ EATEN_DENS。
+
+    白鬍/髮絲這類前景白透過筆畫縫隙連進背景 W 時，就長這個樣（密集筆畫的
+    縫隙白）；背景密細節（教堂花窗速寫）也會命中——兩者統計上分不開，
+    後續一律走區域級保護（不填黑、留 D2），見 _sticker_protect。
+    """
+    dist = cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 5)
+    dens = cv2.blur((sub < WHITE_TH).astype(np.float32), (15, 15))
+    return (comp & (dist <= STICKER_EATEN_R) & (dens >= STICKER_EATEN_DENS))
+
+
+def _sticker_protect(eaten, comp):
+    """區域級保護遮罩＝「窄頸附屬白 ∧ 含 eaten」（真 figure/ground 分離）。
+
+    開放背景核＝erode(W, NECK_R) 後的大殘核（≥ CORE_MIN × W；白臉額頭殘核小、
+    不算背景）；由核作 3×3 遮罩膨脹的 geodesic 重建（小核不會跳過 ≥1px 墨線）
+    → 重建到不了的 W ＝只能經寬 < 2×NECK_R 窄縫抵達的「物件附屬白」（白鬍臉
+    整片，含不算 eaten 的寬白叢——之前純形態學聚團蓋不住的就是這塊）。
+    附屬白連通區含 eaten 夠多才保護（乾淨格的窄框縫無 eaten ⇒ 照填）。
+    半解析度重建（數百次 3×3 迭代，省 4 倍）。
+    """
+    area = max(int(comp.sum()), 1)
+    h, w = comp.shape
+    hh, hw = max(1, h // 2), max(1, w // 2)
+    comp_h = cv2.resize(comp.astype(np.uint8), (hw, hh), interpolation=cv2.INTER_NEAREST)
+    eaten_h = cv2.resize(eaten.astype(np.uint8), (hw, hh), interpolation=cv2.INTER_NEAREST)
+    r = max(2, STICKER_NECK_R // 2)
+    ke = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)
+    core = cv2.erode(comp_h, ke)
+    nn, ll, ss, _ = cv2.connectedComponentsWithStats(core, 8)
+    area_h = max(int(comp_h.sum()), 1)
+    seed = np.zeros_like(comp_h)
+    for j in range(1, nn):
+        if ss[j, cv2.CC_STAT_AREA] >= STICKER_CORE_MIN * area_h:
+            seed[ll == j] = 1
+    if not seed.any():                                  # 沒有開放背景核＝全窄碎
+        return np.ones((h, w), bool)                    # 全保護（極端保守）
+    k3 = np.ones((3, 3), np.uint8)
+    recon, prev = seed, -1
+    for _ in range(4000):
+        recon = cv2.dilate(recon, k3) & comp_h
+        cnt = int(cv2.countNonZero(recon))
+        if cnt == prev:
+            break
+        prev = cnt
+    appendage = (comp_h > 0) & (recon == 0)
+    nn, ll, _, _ = cv2.connectedComponentsWithStats(appendage.astype(np.uint8), 8)
+    need = max(100, STICKER_PROTECT_EATEN_MIN * area) / 4.0   # 半解析度像素數 ÷4
+    protect_h = np.zeros_like(comp_h)
+    for j in range(1, nn):
+        blob = ll == j
+        if int(eaten_h[blob].sum()) >= need:
+            protect_h[blob] = 1
+    if not protect_h.any():
+        return np.zeros((h, w), bool)
+    protect = cv2.resize(protect_h, (w, h), interpolation=cv2.INTER_NEAREST)
+    kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * STICKER_PROTECT_DILATE + 1,) * 2)
+    return cv2.dilate(protect, kd) > 0
+
+
+def sticker_metrics(g, img_bgr, lab, stats, i, text_rects, text_rects_on):
+    """單顆白背景元件的 figure/ground 診斷（修法4 安全網用）。
+
+    在元件 bbox（外擴 8px）內量：
+      figFrac ＝前景佔比（暗像素 ∪ 被 W 封閉的白＝臉/衣服）；
+      thinFrac＝W 細碎佔比（距離變換 ≤ STICKER_THIN_R；整體破碎會爆高）；
+      chroma  ＝W 平均彩度（max−min 通道）：淡彩水彩底非「純白」的鐵證；
+      eaten   ＝疑似被吃前景白佔 W 比例（_sticker_eaten）；
+      protect ＝區域級保護區佔 W 比例（審計/報表用，實際遮罩 paint 時重算）；
+      textCov ＝文字窗（bbox+BUBBLE_PAD）蓋住 W 的比例（過高＝漏併的氣泡）；
+      textOn  ＝tight 文字 bbox（+STICKER_TEXTON_PAD）∩ W 的比例＝文字「真的
+                壓在這個白元件上」的語意證據（TEXT_BG_MIN 放行只認這個；40px
+                窗會把鄰格文字掃進相鄰元件湊假證據，ch34_010 披肩案）；
+      rough   ＝周長²/(4π·面積)（圓=1；輪廓破碎度，審計參考）。
+    """
+    H, W_ = g.shape
+    x0, y0, x1, y1, sub, comp = _comp_window(g, lab, stats, i, 8)
+    comp_u8 = comp.astype(np.uint8)
+    area = max(int(comp.sum()), 1)
+
+    ff = np.pad(comp_u8, 1)                             # 零邊框 → 外部一定連通
+    mk = np.zeros((ff.shape[0] + 2, ff.shape[1] + 2), np.uint8)
+    cv2.floodFill(ff, mk, (0, 0), 2)
+    enclosed = ff[1:-1, 1:-1] == 0                      # 非 W 且外部到不了＝被 W 封閉
+    fig = (sub < WHITE_TH) | enclosed
+    fig_frac = float(fig.mean())
+
+    dist = cv2.distanceTransform(comp_u8, cv2.DIST_L2, 5)
+    thin_frac = float(((dist <= STICKER_THIN_R) & comp).sum() / area)
+
+    sub_c = img_bgr[y0:y1, x0:x1].astype(np.int16)
+    chroma = float((sub_c.max(axis=2) - sub_c.min(axis=2))[comp].mean())
+
+    eaten = _sticker_eaten(sub, comp)
+    eaten_frac = float(eaten.sum() / area)
+    protect_frac = float((_sticker_protect(eaten, comp) & comp).sum() / area)
+
+    tmask = np.zeros((H, W_), np.uint8)
+    for rx0, ry0, rx1, ry1 in text_rects:
+        cv2.rectangle(tmask, (rx0, ry0), (rx1, ry1), 1, -1)
+    text_cov = float(tmask[y0:y1, x0:x1][comp].mean()) if area else 0.0
+
+    tmask_on = np.zeros((H, W_), np.uint8)
+    for rx0, ry0, rx1, ry1 in text_rects_on:
+        cv2.rectangle(tmask_on, (rx0, ry0), (rx1, ry1), 1, -1)
+    text_on = float(tmask_on[y0:y1, x0:x1][comp].mean()) if area else 0.0
+
+    cnts, _ = cv2.findContours(comp_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    perim = float(sum(cv2.arcLength(c, True) for c in cnts))
+    rough = perim * perim / (4.0 * np.pi * area)
+
+    bx, by = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+    return {"comp": int(i),
+            "bbox": [bx, by, bx + int(stats[i, cv2.CC_STAT_WIDTH]),
+                     by + int(stats[i, cv2.CC_STAT_HEIGHT])],
+            "areaFrac": round(area / g.size, 4), "figFrac": round(fig_frac, 3),
+            "thinFrac": round(thin_frac, 3), "chroma": round(chroma, 1),
+            "eatenFrac": round(eaten_frac, 4), "protectFrac": round(protect_frac, 4),
+            "textCov": round(text_cov, 3), "textOn": round(text_on, 3),
+            "rough": round(rough, 1)}
+
+
+def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regions):
+    """挑修法4 目標元件並過安全網。回傳 (accept_ids, audit)。
+
+    目標＝「不承載調子的純白背景」：有框頁＝修法3 的格內白（panel_ids）；
+    frameless 頁＝貼頁邊白元件（修法3 只在乎有框頁的 gutter/panel 之分，這裡
+    兩類都收）中整頁佔比 ≥ STICKER_MIN_FRAC 的大面積背景。
+    安全網（任一不過＝不進 accept ⇒ 該元件維持上輪行為：有框頁 panelwhite＝
+    D2 壓暗；frameless＝背景保留，絕不毀畫面）：
+      chroma  > CHROMA_MAX ＝淡彩/彩頁底（灰階 ≥235 但非純白）→ 不動；
+      textCov > TEXT_MAX   ＝其實是漏併的氣泡（40px 窗量氣泡構形）；
+      figFrac 出界 / thinFrac 過高 ＝ 沒分出前景 或 背景本身破碎；
+      eaten   > EATEN_HARD ＝細碎過半、分離無意義，一律退回；
+      eaten   > EATEN_MAX 且 textOn < TEXT_BG_MIN ＝疑有前景白連進背景、又無
+              「作者把它當背景寫字」的語意證據（ch34_006 白鬍老人格）→ 退回；
+              textOn ≥ TEXT_BG_MIN 放行（demo06 教堂速寫底 0.167）；
+      areaFrac < SMALL_AREA 且 textOn < TEXT_BG_MIN ＝小元件又無文字語意證據
+              → 退回（真格背景白都大；平滑的前景衣料白 eaten 量不到，
+              ch34_010 右下格披肩 0.0105/textOn 0.023 走這條退回）。
+    語意證據一律用 textOn（tight bbox+TEXTON_PAD）：文字要「真的壓在這個白
+    元件上」才算數；textCov 的 40px 窗會把鄰格文字掃進相鄰元件湊假證據。
+    eaten 沒爆但局部聚團（白鬍臉這型）＝ paint_sticker 的區域級保護處理
+    （該團塊不填黑、留 D2），不整顆退回——見 _sticker_protect 常數註記。
+    """
+    H, W_ = g.shape
+    def _rects(pad):
+        return [(max(0, r["bbox"][0] - pad), max(0, r["bbox"][1] - pad),
+                 min(W_ - 1, r["bbox"][2] + pad), min(H - 1, r["bbox"][3] + pad))
+                for r in regions]
+    text_rects = _rects(BUBBLE_PAD)            # textCov：漏併氣泡閘（窗語意）
+    text_rects_on = _rects(STICKER_TEXTON_PAD)  # textOn：語意證據（壓在元件上）
+    if frameless:
+        cand = {i for i in (gutter_ids | panel_ids)
+                if stats[i, cv2.CC_STAT_AREA] >= STICKER_MIN_FRAC * g.size}
+    else:
+        cand = set(panel_ids)
+    accept, audit = set(), []
+    for i in sorted(cand):
+        met = sticker_metrics(g, img_bgr, lab, stats, i, text_rects, text_rects_on)
+        ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
+              and met["thinFrac"] <= STICKER_THIN_MAX
+              and met["chroma"] <= STICKER_CHROMA_MAX
+              and met["textCov"] <= STICKER_TEXT_MAX
+              and met["eatenFrac"] <= STICKER_EATEN_HARD
+              and (met["eatenFrac"] <= STICKER_EATEN_MAX
+                   or met["textOn"] >= STICKER_TEXT_BG_MIN)
+              and (met["areaFrac"] >= STICKER_SMALL_AREA
+                   or met["textOn"] >= STICKER_TEXT_BG_MIN))
+        met["accept"] = bool(ok)
+        audit.append(met)
+        if ok:
+            accept.add(i)
+    return accept, audit
+
+
+def paint_sticker(out, g, lab, stats, accept, bubble):
+    """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
+    eaten 聚團區域級保護（不填黑、原樣留 D2）。
+
+    F＝bbox 內非白（< WHITE_TH）且非氣泡的內容（墨線/調子/SFX）；被墨線封閉
+    的白（臉/衣服）不與 W 連通、照 D2 保留，其輪廓墨線屬 F ⇒ 描邊自然沿輪廓。
+    小噪點（面積 < FIG_NOISE_AREA 且被 comp 閉運算覆蓋＝孤懸 W 中）不描邊、
+    直接併入背景填深；氣泡輪廓由 paint_bubbles 自己描，不在此重複。
+    保護區（_sticker_protect：白鬍臉/密集髮絲/花窗速寫這型）整團不填不描，
+    維持 D2 壓暗 ⇒ 前景白物件連進背景也吃不掉（ch34_006 白鬍老人格）。
+    """
+    H, W_ = g.shape
+    r = int(np.clip(round(STROKE_OBJ_FRAC * min(H, W_)), STROKE_OBJ_MIN, STROKE_OBJ_MAX))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FIG_NOISE_CLOSE,) * 2)
+    for i in sorted(accept):
+        x0, y0, x1, y1, sub, comp = _comp_window(g, lab, stats, i, r + 2)
+        f_raw = ((sub < WHITE_TH) & ~bubble[y0:y1, x0:x1]).astype(np.uint8)
+        nn, ll, ss, _ = cv2.connectedComponentsWithStats(f_raw, 8)
+        keep = np.zeros(nn, bool)
+        if nn > 1:
+            keep[1:] = ss[1:, cv2.CC_STAT_AREA] >= FIG_NOISE_AREA
+        f_main = keep[ll]                               # 清完噪點的前景（描邊來源）
+        comp_closed = cv2.morphologyEx(comp.astype(np.uint8), cv2.MORPH_CLOSE, kc) > 0
+        noise = (ll > 0) & ~keep[ll] & comp_closed      # 孤懸 W 內的小噪點 → 併入背景
+        protect = _sticker_protect(_sticker_eaten(sub, comp), comp)
+        band = (cv2.dilate(f_main.astype(np.uint8), k) > 0) & comp & ~protect
+        o = out[y0:y1, x0:x1]
+        o[(comp | noise) & ~protect] = BG
+        o[band] = STROKE_OBJ_V
+    return out
+
+
 # ── 合成（畫面 D2 / 留白 / 氣泡）────────────────────────────────────
 
 def lut_rolloff(floor=DIM_FLOOR, ceil=DIM_CEIL, gpow=ROLLOFF_G):
@@ -341,11 +621,13 @@ def paint_bubbles(out, g, bubble, seg, text_pad=2):
     return out
 
 
-def compose(g, gutter, bubble, seg, frameless):
-    """整頁合成：D2 畫面 →（有框頁才）留白填深 → 氣泡重繪。回傳 uint8。"""
+def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=()):
+    """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     if not frameless:                                   # 修法2：無框頁背景不填深
         out = paint_gutter(out, g, gutter)
+    if sticker:                                         # 修法4：純白背景填黑＋前景白描邊
+        out = paint_sticker(out, g, lab, stats, sticker, bubble)
     out = paint_bubbles(out, g, bubble, seg)
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -376,11 +658,15 @@ def _hcat(cols, sep_w=6, sep_v=128):
     return row
 
 
-def mask_viz(img_bgr, gutter, panel_scene, bubble, seg, regions):
-    """遮罩視覺化：留白=黃、修法3改判畫面的格內白=橘、氣泡=綠、筆畫=紅、區域框=洋紅。"""
+def mask_viz(img_bgr, gutter, panel_scene, bubble, seg, regions, sticker_mask=None):
+    """遮罩視覺化：留白=黃、修法3格內白(降級)=橘、修法4貼紙背景=藍、氣泡=綠、
+    筆畫=紅、區域框=洋紅。"""
     viz = img_bgr.copy()
-    for m, col in ((gutter, (0, 200, 200)), (panel_scene, (0, 128, 255)),
-                   (bubble, (0, 160, 0))):
+    layers = [(gutter, (0, 200, 200)), (panel_scene, (0, 128, 255)),
+              (bubble, (0, 160, 0))]
+    if sticker_mask is not None:
+        layers.append((sticker_mask, (255, 120, 40)))
+    for m, col in layers:
         viz[m] = (viz[m] * 0.5 + np.array(col) * 0.5).astype(np.uint8)
     viz[seg] = (0, 0, 255)
     for r in regions:
@@ -401,11 +687,16 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     lines, regions, seg = detect(img)
     frameless, hk, vk = page_is_frameless(g)
     lab, stats, gutter_ids, panel_ids = classify_white_components(g)
-    gutter = np.isin(lab, sorted(gutter_ids)) if gutter_ids else np.zeros((H, W), bool)
-    panel_scene = np.isin(lab, sorted(panel_ids)) if panel_ids else np.zeros((H, W), bool)
     bubble, merged, rejected = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids)
-    final = compose(g, gutter, bubble, seg, frameless)
+    sticker, audit = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
+                                  frameless, regions)
+    gutter_show = gutter_ids - sticker if frameless else gutter_ids
+    gutter = np.isin(lab, sorted(gutter_show)) if gutter_show else np.zeros((H, W), bool)
+    panel_show = panel_ids - sticker
+    panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
+    sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
+    final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
@@ -416,6 +707,7 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
             "detector": "DBNet (m-i-t default @ .upstream-ref, detect-20241225.ckpt) "
                         "torch eager; text_th=0.5 box_th=0.7 unclip=2.3; "
                         "regions=mit_grouping.merge_bboxes_text_region",
+            "sticker": audit,                          # 修法4 逐元件審計（含安全網量測）
             "lines": [{"quad": t.pts.tolist(), "score": round(float(t.prob), 4)}
                       for t in lines],
             "regions": regions,
@@ -430,8 +722,8 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     cols = []
     for im, t in ((img, f"{name} original"),
                   (final, f"night rebuild ({'FRAMELESS: bubbles only' if frameless else 'framed'})"),
-                  (mask_viz(img, gutter, panel_scene, bubble, seg, regions),
-                   "masks: gutter=y panelwhite=o bubble=g seg=r")):
+                  (mask_viz(img, gutter, panel_scene, bubble, seg, regions, sticker_mask),
+                   "masks: gutter=y panelwhite=o sticker=b bubble=g seg=r")):
         s = col_w / im.shape[1]
         im2 = cv2.resize(im, (col_w, int(im.shape[0] * s)), interpolation=cv2.INTER_AREA)
         cols.append(_label(im2, t, bar_h=46, scale=0.8))
@@ -441,13 +733,23 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
           "regions": len(regions), "whiteBefore": round(wb, 4), "whiteAfter": round(wa, 4),
           "gutterFrac": round(float(gutter.mean()), 4),
           "panelWhiteFrac": round(float(panel_scene.mean()), 4),
+          "stickerFrac": round(float(sticker_mask.mean()), 4),
+          "stickerComps": len(sticker), "stickerFallback": len(audit) - len(sticker),
+          "stickerAudit": audit,
           "bubbleFrac": round(float(bubble.mean()), 4),
           "bubbleCompsMerged": len(merged), "bubbleCompsRejected": len(rejected),
           "cmp": f"{pref}_cmp.png"}
     print(f"[{name}] {st['pageType']}  regions={st['regions']}  "
           f"white {wb:.3f}->{wa:.3f}  gutter={st['gutterFrac']:.3f}  "
-          f"panelWhite={st['panelWhiteFrac']:.3f}  bubble={st['bubbleFrac']:.3f}  "
+          f"panelWhite={st['panelWhiteFrac']:.3f}  sticker={st['stickerFrac']:.3f}"
+          f"({len(sticker)}/{len(audit)})  bubble={st['bubbleFrac']:.3f}  "
           f"comps merged/rejected={len(merged)}/{len(rejected)}", flush=True)
+    for a in audit:
+        print(f"    sticker comp={a['comp']:4d} bbox={a['bbox']} area={a['areaFrac']:.3f} "
+              f"fig={a['figFrac']:.3f} thin={a['thinFrac']:.3f} chroma={a['chroma']:5.1f} "
+              f"eaten={a['eatenFrac']:.4f} protect={a['protectFrac']:.4f} "
+              f"textCov={a['textCov']:.3f} textOn={a['textOn']:.3f} rough={a['rough']:6.1f} "
+              f"-> {'ACCEPT' if a['accept'] else 'fallback'}", flush=True)
     return st
 
 
