@@ -103,8 +103,13 @@ object LlmProviders {
         ),
         LlmProvider(
             "qwen", "通義千問 Qwen",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+            // **國際版端點**（dashscope-intl＝新加坡；2026-08-25 驗活、無 key 回 401 invalid_api_key）。
+            // 原本用的 dashscope.aliyuncs.com 是**中國大陸**端點——本 app 受眾多在國際版 console
+            // （alibabacloud.com）開 key，打大陸端點必 401。大陸 key 使用者請改走「自訂」provider 填
+            // https://dashscope.aliyuncs.com/compatible-mode/v1。官方新推的 {WorkspaceId}.*.maas 專屬
+            // 網域因含個人 workspace id 無法當 preset；官方明言舊網域 remains fully functional。
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
             ModelSource.OPENAI, "qwen-plus",
         ),
         LlmProvider(
@@ -166,6 +171,19 @@ object LlmProviders {
             "gemini-2.0-flash-lite" to "gemini-3.5-flash-lite",
             "gemini-2.0-flash-lite-001" to "gemini-3.5-flash-lite",
         ),
+        // ── 2026-08-25 五家全面稽核（DeepSeek/OpenAI/Gemini/Qwen/OpenRouter 官方 deprecation 頁逐一核過）──
+        // 收表判準補充：**除了「已停役」，還要「使用者可能存著」**——本 app 2026-06-09 首發，凡停役日早於
+        // 首發的 id（Gemini 全部 preview 系、Qwen 2026-01-30 前各批、OpenAI o1-mini/o1-preview 等）不可能
+        // 出現在我們的「撈模型」清單裡 ⇒ 不收（手輸古 id 屬極端例外；mixtral 例外是因 m-i-t 文件教人輸它）。
+        // 【到期看板：日期到了收下一波】
+        //   2026-08-31  OpenRouter moonshotai/kimi-k2.5（官方無指定替代、到期後從 /models 消失即 400）
+        //   2026-10-10  Qwen qwen3 大批（qwen3-32b/-coder-plus/-max-preview…→ 官方指 qwen3.6-flash/3.7-plus/3.7-max）
+        //   2026-10-23  OpenAI 大批（gpt-4/gpt-4-turbo/gpt-3.5-turbo/o1/o3-mini/o4-mini/gpt-4.1-nano → gpt-5.6-sol/terra/luna）
+        //   2026-12-11  OpenAI 快照批（gpt-5/-mini/-nano/-pro 2025-08-07 快照、o3/o3-pro → gpt-5.6 系）
+        //   2027-05-07  Gemini gemini-3.1-flash-lite → gemini-3.5-flash-lite（我們的 lite 遷移目標已直指 3.5，無鏈風險）
+        // 預設 model 全數現役：deepseek-v4-flash（2026-07-31 GA）/ gpt-4o-mini（不在任何停役名單）/
+        // gemini-3.6-flash（stable）/ openai/gpt-oss-120b（production）/ qwen-plus（穩定別名）/
+        // openrouter deepseek/deepseek-v4-flash（expiration_date:null）。
         // Groq 三波停役（2026-07-17 / 2026-08-16）全數到期後收錄（2026-08-25）。替代照官方 deprecations 頁
         // 建議、並維持原本的大小/價位級距（8b-instant → 20b、其餘 → 120b）。migrateModel 在 PARAM_RULES
         // 比對之前跑 ⇒ 遷移目標自動命中既有的 gpt-oss 規則（reasoning_effort=low），不用另加參數列。
@@ -242,6 +260,8 @@ object LlmProviders {
         // Gemini（走 OpenAI 相容端點）：思考走 reasoning_effort，compat 層自動映射到 thinkingBudget(2.5 系)／
         // thinking_level(3.x)。**none 只有 2.5 系吃**；3.x 最低檔是 minimal（關不掉、只能最小化）。
         // 2.0 系不是思考模型（且 2026-06-01 已停役）→ 什麼都不送。
+        // temperature：官方 changelog 2026-07-21 對「最新 Gemini 模型」標 deprecated，但 compat 層明文
+        // silently ignore 不支援的參數 ⇒ 照送無妨（同 DeepSeek v4 的立場）；若日後開始報錯再加 temperature=false 規則。
         // https://ai.google.dev/gemini-api/docs/openai
         "gemini" to listOf(
             ParamRule(Regex("^gemini-2\\.5"), thinkingOff = mapOf("reasoning_effort" to "none")),
@@ -263,8 +283,10 @@ object LlmProviders {
         // ⇒ **兩種狀態都送 false**（非串流下本來就拿不到思考，寧可保證跑得動）。
         // qwen-plus/max/flash/turbo 預設關、Qwen3.5+ 預設開，統一顯式關掉最穩。
         // https://www.alibabacloud.com/help/en/model-studio/deep-thinking
+        // temperature：DashScope 官方明文「Range: [0, 2). Do not set to 0.」——兩端都不合法 ⇒ clamp 到 (0,2) 內。
         "qwen" to listOf(
             ParamRule(
+                temperatureRange = 0.01..1.99,
                 thinkingOff = mapOf("enable_thinking" to false),
                 thinkingOn = mapOf("enable_thinking" to false),
             ),

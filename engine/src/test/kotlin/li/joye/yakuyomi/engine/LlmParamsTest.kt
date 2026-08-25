@@ -147,6 +147,15 @@ class LlmParamsTest {
         assertEquals("llama-3.3-70b-versatile", LlmProviders.migrateModel("custom", "llama-3.3-70b-versatile"))
     }
 
+    @Test fun qwenTemperatureClampsInsideOpenInterval() {
+        // DashScope 官方：「Range: [0, 2). Do not set to 0.」——0 與 2 都不合法，送了 400。
+        assertEquals(0.01, params("qwen", "qwen-plus", temp = 0.0)["temperature"])
+        assertEquals(1.99, params("qwen", "qwen-plus", temp = 2.0)["temperature"])
+        assertEquals(0.3, params("qwen", "qwen-plus", temp = 0.3)["temperature"])
+        // 其他家不受影響（OpenAI 相容主流 0–2 含兩端）
+        assertEquals(0.0, params("deepseek", "deepseek-v4-flash", temp = 0.0)["temperature"])
+    }
+
     @Test fun groqMigrationTargetsHitTheGptOssParamRule() {
         // migrateModel 在 PARAM_RULES 之前跑 ⇒ 遷移後的 id 要命中 gpt-oss 規則（thinkingOff=low），
         // 否則遷移救回了 model、卻送錯參數又 400。
