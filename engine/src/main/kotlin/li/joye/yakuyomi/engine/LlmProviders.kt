@@ -95,9 +95,9 @@ object LlmProviders {
             "groq", "Groq",
             "https://api.groq.com/openai/v1/chat/completions",
             "https://api.groq.com/openai/v1/models",
-            // 舊預設 llama-3.3-70b-versatile 已被 Groq 標 deprecated（shutdown 2026-08-16）→ 換成 Groq 自己
-            // 點名的替代、且在 models 頁列為 **production** 的 openai/gpt-oss-120b（另一個建議 qwen/qwen3.6-27b
-            // 只是 preview「evaluation only」，不當預設）。舊 id **還能用到停役日** ⇒ 不做名稱遷移（見 [RETIRED_MODELS]）。
+            // 舊預設 llama-3.3-70b-versatile 於 2026-08-16 **停役**→ 換成 Groq 自己點名的替代、且在 models 頁
+            // 列為 **production** 的 openai/gpt-oss-120b（另一個建議 qwen/qwen3.6-27b 只是 preview
+            // 「evaluation only」，不當預設）。停役日已過 ⇒ 舊 id 的自動遷移見 [RETIRED_MODELS]（2026-08-25 收錄）。
             // https://console.groq.com/docs/deprecations ／ https://console.groq.com/docs/models
             ModelSource.OPENAI, "openai/gpt-oss-120b",
         ),
@@ -148,8 +148,8 @@ object LlmProviders {
      * **只認 provider id**：custom / sakura / 自架端點上的同名模型不動（那是別人的命名空間，可能真的存在）。
      *
      * **只收「已停役＝送出去會報錯」的名稱，不收「deprecated 但還能用」的**——後者硬換掉等於偷偷改使用者
-     * 選的模型（例：Groq 的 `llama-3.3-70b-versatile` 標了 deprecated，但官方寫明「Model remains fully
-     * functional during this period」、停役日 2026-08-16 ⇒ 只改預設、**不**遷移；等真的停役再進這張表）。
+     * 選的模型（例：Groq 的 `llama-3.3-70b-versatile` 在 deprecated 期間官方寫明「Model remains fully
+     * functional during this period」⇒ 當時只改預設、不遷移；2026-08-16 真的停役後才進表，見下）。
      */
     private val RETIRED_MODELS: Map<String, Map<String, String>> = mapOf(
         "deepseek" to mapOf(
@@ -165,6 +165,19 @@ object LlmProviders {
             "gemini-2.0-flash-001" to "gemini-3.6-flash",
             "gemini-2.0-flash-lite" to "gemini-3.5-flash-lite",
             "gemini-2.0-flash-lite-001" to "gemini-3.5-flash-lite",
+        ),
+        // Groq 三波停役（2026-07-17 / 2026-08-16）全數到期後收錄（2026-08-25）。替代照官方 deprecations 頁
+        // 建議、並維持原本的大小/價位級距（8b-instant → 20b、其餘 → 120b）。migrateModel 在 PARAM_RULES
+        // 比對之前跑 ⇒ 遷移目標自動命中既有的 gpt-oss 規則（reasoning_effort=low），不用另加參數列。
+        // mixtral-8x7b-32768 停役更早（m-i-t 也是 2026-08 才修它的預設，PR #1166）：使用者若照 m-i-t 文件
+        // 手輸過就會存著它 → 一併遷移；級距對齊 m-i-t 的選擇（→ gpt-oss-20b）。
+        // https://console.groq.com/docs/deprecations
+        "groq" to mapOf(
+            "llama-3.3-70b-versatile" to "openai/gpt-oss-120b",
+            "llama-3.1-8b-instant" to "openai/gpt-oss-20b",
+            "qwen/qwen3-32b" to "openai/gpt-oss-120b",
+            "meta-llama/llama-4-scout-17b-16e-instruct" to "openai/gpt-oss-120b",
+            "mixtral-8x7b-32768" to "openai/gpt-oss-20b",
         ),
     )
 

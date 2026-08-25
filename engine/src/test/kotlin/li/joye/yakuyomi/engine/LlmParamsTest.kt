@@ -135,12 +135,23 @@ class LlmParamsTest {
         assertEquals("gemini-2.0-flash", LlmProviders.migrateModel("custom", "gemini-2.0-flash"))
     }
 
-    @Test fun deprecatedButWorkingModelsAreNotMigrated() {
-        // Groq 的 llama 只是 deprecated（2026-08-16 才停役、期間仍完全可用）→ 不該偷換使用者選的模型
-        assertEquals(
-            "llama-3.3-70b-versatile",
-            LlmProviders.migrateModel("groq", "llama-3.3-70b-versatile"),
-        )
+    @Test fun retiredGroqIdsMigrateToLiveOnes() {
+        // 2026-08-16 停役日過後收錄（deprecated 期間刻意不遷移＝不偷換使用者選的模型，見 RETIRED_MODELS 註解）。
+        // 替代維持大小/價位級距：8b-instant → 20b、70b/32b/scout → 120b；mixtral 對齊 m-i-t PR #1166 → 20b。
+        assertEquals("openai/gpt-oss-120b", LlmProviders.migrateModel("groq", "llama-3.3-70b-versatile"))
+        assertEquals("openai/gpt-oss-20b", LlmProviders.migrateModel("groq", "llama-3.1-8b-instant"))
+        assertEquals("openai/gpt-oss-120b", LlmProviders.migrateModel("groq", "qwen/qwen3-32b"))
+        assertEquals("openai/gpt-oss-20b", LlmProviders.migrateModel("groq", "mixtral-8x7b-32768"))
+        // 現役的不能亂動；別家（custom/自架）的同名 model 不受影響
+        assertEquals("openai/gpt-oss-120b", LlmProviders.migrateModel("groq", "openai/gpt-oss-120b"))
+        assertEquals("llama-3.3-70b-versatile", LlmProviders.migrateModel("custom", "llama-3.3-70b-versatile"))
+    }
+
+    @Test fun groqMigrationTargetsHitTheGptOssParamRule() {
+        // migrateModel 在 PARAM_RULES 之前跑 ⇒ 遷移後的 id 要命中 gpt-oss 規則（thinkingOff=low），
+        // 否則遷移救回了 model、卻送錯參數又 400。
+        assertEquals("low", params("groq", LlmProviders.migrateModel("groq", "llama-3.3-70b-versatile"))["reasoning_effort"])
+        assertEquals("low", params("groq", LlmProviders.migrateModel("groq", "llama-3.1-8b-instant"))["reasoning_effort"])
     }
 
     @Test fun defaultModelsHitTheIntendedRule() {
