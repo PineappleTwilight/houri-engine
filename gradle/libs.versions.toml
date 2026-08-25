@@ -5,6 +5,11 @@ coreKtx = "1.13.1"
 appcompat = "1.7.0"
 lifecycle = "2.8.7"
 coroutines = "1.11.0"
+# ORT 刻意釘 1.20.0（2026-08-25 稽核 1.21–1.29 後拍板，見 memory ort-pin-1.20）：升級對我們零效能收益
+# （ARM int8 加速全在 SME/SME2 線，SD8G3 無 SME；我們的 U8U8/U8S8 QGEMM kernel 九版沒動）、
+# 代價 arm64 .so +11~14.5MB（1.24.1 起 WebGPU EP 焊死在 AAR）＋ 1.29.0 起 telemetry 預設開
+# （ContentProvider 自啟動+INTERNET 權限，與本專案無 telemetry 承諾衝突）。16KB page 對齊 1.20.0
+# 實測已達標、舊 opset 相容官方保證。再評估時機＝1.30（PR #31146 SVE i8mm int8 QGEMM 首次碰我們熱路徑）。
 onnxruntime = "1.20.0"
 okhttp = "5.3.2"
 
