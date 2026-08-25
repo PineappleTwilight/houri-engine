@@ -126,6 +126,13 @@ STICKER_TEXT_BG_MIN = 0.10      # …除非文字確實壓在這片白上（text
                                 # 當背景寫字的語意證據（demo06 教堂 0.167 / 金髮女孩格
                                 # 0.228 手寫字直接落在背景白 ⇒ 放行；老人格 0.000、
                                 # ch34_010 披肩 0.023 ⇒ 無證據）
+# 修法5：閉合格背景擢升（貼框白元件 → sticker 候選）
+FRAME_HUG_DILATE = 5            # 元件外擴後與格線遮罩的交集算「貼框」
+FRAME_HUG_THICK = 3.0           # 格線名目厚度（px）：交集數 → 貼框長度的除數
+FRAME_HUG_MIN = 0.25            # 貼框長度 / bbox 周長 下限（背景沿格框跑；前景白衣只點狀碰框）
+FRAME_HUG_STRONG = 0.40         # 強貼框：背景證據足夠強 → 走放寬門（見 sticker_plan 兩級制）
+PROMOTED_TEXTON_MAX = 0.30      # 強貼框仍拒的文字覆蓋上限：真有大量文字壓在上面＝旁白框，
+                                # 填黑會把字變描邊糊 → 留灰（demo06 教堂 textOn 0.167 是可接受上界的參照）
 STICKER_TEXTON_PAD = 8          # textOn 的文字 bbox 外擴（語意證據要「真的壓在元件上」
                                 # ⇒ 只容 bbox 抖動的小 pad；BUBBLE_PAD 40px 窗會把鄰格
                                 # 文字掃進相鄰白元件湊假證據——ch34_010 披肩 pad40=0.207
@@ -227,17 +234,21 @@ def detect(img_bgr):
 
 # ── 遮罩：白元件分類（修法2/3）＋氣泡（修法1）───────────────────────
 
-def page_is_frameless(g):
-    """修法2：長直格框線存在性。回傳 (frameless, h_px_per_k, v_px_per_k)。
-
-    暗像素對「長水平/垂直線」形態學開運算＝只留貼直的長線（格框）；
-    無框/白背景頁（demo04/05 型）兩向都近零。
-    """
+def frame_line_mask(g):
+    """長直格框線遮罩：暗像素對「長水平/垂直線」形態學開運算＝只留貼直的長線（格框）。
+    回傳 (lh, lv) 兩個 0/1 uint8。修法2 的頁型判別與修法5 的貼框擢升共用。"""
     H, W = g.shape
     dark = (g < FRAME_DARK_TH).astype(np.uint8)
     L = max(60, min(W, H) // FRAME_LINE_L_DIV)
     lh = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (L, 1)))
     lv = cv2.morphologyEx(dark, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, L)))
+    return lh, lv
+
+
+def page_is_frameless(g):
+    """修法2：長直格框線存在性。回傳 (frameless, h_px_per_k, v_px_per_k)。
+    無框/白背景頁（demo04/05 型）兩向都近零。"""
+    lh, lv = frame_line_mask(g)
     hk, vk = 1000.0 * lh.mean(), 1000.0 * lv.mean()
     frameless = not (min(hk, vk) >= FRAME_MIN_EACH and hk + vk >= FRAME_MIN_SUM)
     return frameless, hk, vk
@@ -503,20 +514,60 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
     if frameless:
         cand = {i for i in (gutter_ids | panel_ids)
                 if stats[i, cv2.CC_STAT_AREA] >= STICKER_MIN_FRAC * g.size}
+        hug = {}
     else:
         cand = set(panel_ids)
+        # 修法5：閉合格背景擢升——未列管（非 gutter 非 panel）的大白元件，若「貼格線長度 /
+        # bbox 周長」夠高＝背景沿格框跑（閉合格內的天空/空白背景被格線封住、永遠進不了
+        # 修法3 的 gutter/panel 分類），擢升進候選、照走下面同一套安全網。前景白（臉/白衣）
+        # 是獨立元件、只點狀碰框 → hug 低、天然不擢升。ch34_014 型（22% 頁面積）的主修。
+        lh, lv = frame_line_mask(g)
+        frame = (lh | lv).astype(np.uint8)
+        kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FRAME_HUG_DILATE * 2 + 1,) * 2)
+        hug = {}
+        min_area = GUTTER_MIN_AREA_FRAC * g.size
+        listed = gutter_ids | panel_ids
+        for i in range(1, stats.shape[0]):
+            if i in listed or stats[i, cv2.CC_STAT_AREA] < min_area:
+                continue
+            x, y, w_, h_ = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
+                            stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
+            pad = FRAME_HUG_DILATE + 1
+            x0, y0 = max(0, x - pad), max(0, y - pad)
+            x1, y1 = min(g.shape[1], x + w_ + pad), min(g.shape[0], y + h_ + pad)
+            comp = (lab[y0:y1, x0:x1] == i).astype(np.uint8)
+            contact = int((cv2.dilate(comp, kd) & frame[y0:y1, x0:x1]).sum())
+            hug_len = contact / FRAME_HUG_THICK
+            frac = hug_len / max(1.0, 2.0 * (w_ + h_))
+            hug[i] = round(float(frac), 3)
+            if frac >= FRAME_HUG_MIN:
+                cand.add(i)
     accept, audit = set(), []
     for i in sorted(cand):
         met = sticker_metrics(g, img_bgr, lab, stats, i, text_rects, text_rects_on)
-        ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
-              and met["thinFrac"] <= STICKER_THIN_MAX
-              and met["chroma"] <= STICKER_CHROMA_MAX
-              and met["textCov"] <= STICKER_TEXT_MAX
-              and met["eatenFrac"] <= STICKER_EATEN_HARD
-              and (met["eatenFrac"] <= STICKER_EATEN_MAX
-                   or met["textOn"] >= STICKER_TEXT_BG_MIN)
-              and (met["areaFrac"] >= STICKER_SMALL_AREA
-                   or met["textOn"] >= STICKER_TEXT_BG_MIN))
+        if i in hug:
+            met["frameHug"] = hug[i]
+        if hug.get(i, 0.0) >= FRAME_HUG_STRONG:
+            # 修法5 兩級制——強貼框（背景證據極強）走放寬門：
+            # · 跳過 textCov（pad40 窗對大背景是鄰泡污染；真文字壓上用 textOn 擋）
+            # · 跳過 eaten 中段門與小面積門（eaten 聚團交給 paint_sticker 的
+            #   _sticker_protect 區域級保護＝白鬍/髮絲局部不填、其餘照填）
+            # · 保留 fig/thin/chroma/eatenHARD 四道硬底線
+            ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
+                  and met["thinFrac"] <= STICKER_THIN_MAX
+                  and met["chroma"] <= STICKER_CHROMA_MAX
+                  and met["eatenFrac"] <= STICKER_EATEN_HARD
+                  and met["textOn"] <= PROMOTED_TEXTON_MAX)
+        else:
+            ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
+                  and met["thinFrac"] <= STICKER_THIN_MAX
+                  and met["chroma"] <= STICKER_CHROMA_MAX
+                  and met["textCov"] <= STICKER_TEXT_MAX
+                  and met["eatenFrac"] <= STICKER_EATEN_HARD
+                  and (met["eatenFrac"] <= STICKER_EATEN_MAX
+                       or met["textOn"] >= STICKER_TEXT_BG_MIN)
+                  and (met["areaFrac"] >= STICKER_SMALL_AREA
+                       or met["textOn"] >= STICKER_TEXT_BG_MIN))
         met["accept"] = bool(ok)
         audit.append(met)
         if ok:
@@ -603,7 +654,7 @@ SCENE_CURVES = {
     "lin8": lambda: lut_linear(8),   # 極暗保護：OLED 黑碎顧慮的最小抬升（8 遠小於舊 30）
     "knee": lambda: lut_knee(),
 }
-SCENE_CURVE = os.environ.get("NIGHTREAD_CURVE", "d2")
+SCENE_CURVE = os.environ.get("NIGHTREAD_CURVE", "lin8")  # 2026-08-25 使用者目檢拍板 lin 系（黑實、對比大）
 
 
 def lut_scene():
