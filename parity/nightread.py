@@ -566,6 +566,50 @@ def lut_rolloff(floor=DIM_FLOOR, ceil=DIM_CEIL, gpow=ROLLOFF_G):
     return np.clip(floor + (ceil - floor) * np.power(x, gpow), 0, 255).astype(np.uint8)
 
 
+# ── 畫面曲線變體（2026-08-25 起：「只換白、不抬黑」實驗，NIGHTREAD_CURVE 選）──
+# 使用者對 D2 的回饋＝「說不出的怪」：floor=30 全域抬黑 + g=0.55 凹曲線把暗部抬得特別兇
+# （原墨 26 → 61），整頁發灰=「濁」。以下變體共同原則：黑保持黑（或近黑）、白仍壓 140，
+# 動態範圍 110 → ~140。全部嚴格單調（保序鐵則不動）。
+KNEE_X = 64        # knee 變體：此值以下完全保真（墨線原樣）
+KNEE_END_SLOPE = 0.15  # 尾端斜率（紙白附近壓平）
+
+def lut_linear(floor=0, ceil=DIM_CEIL):
+    """全線性：y = floor + (ceil-floor)·x/255。黑→floor、白→ceil，相對關係完全保留。"""
+    x = np.arange(256, dtype=np.float32) / 255.0
+    return np.clip(floor + (ceil - floor) * x, 0, 255).astype(np.uint8)
+
+
+def lut_knee(knee=KNEE_X, ceil=DIM_CEIL, end_slope=KNEE_END_SLOPE):
+    """暗部保真 + 高光滾降：x ≤ knee 恆等（墨線一階不動＝對比最大化）；knee 以上
+    monotone cubic Hermite (knee,knee,斜率1) → (255,ceil,斜率 end_slope)。
+    單調性（Fritsch–Carlson）：割線 (ceil-knee)/(255-knee)=0.398，兩端斜率 1、0.15
+    皆 ≤ 3×割線 ⇒ 全段單調。網點是抖點非平滑漸層，中段壓縮不致 banding。"""
+    x = np.arange(256, dtype=np.float32)
+    y = x.copy()
+    t = np.clip((x - knee) / (255.0 - knee), 0.0, 1.0)
+    h00 = 2 * t**3 - 3 * t**2 + 1
+    h10 = t**3 - 2 * t**2 + t
+    h01 = -2 * t**3 + 3 * t**2
+    h11 = t**3 - t**2
+    span = 255.0 - knee
+    hy = h00 * knee + h10 * span * 1.0 + h01 * ceil + h11 * span * end_slope
+    y = np.where(x > knee, hy, y)
+    return np.clip(y, 0, 255).astype(np.uint8)
+
+
+SCENE_CURVES = {
+    "d2":   lambda: lut_rolloff(),
+    "lin":  lambda: lut_linear(0),
+    "lin8": lambda: lut_linear(8),   # 極暗保護：OLED 黑碎顧慮的最小抬升（8 遠小於舊 30）
+    "knee": lambda: lut_knee(),
+}
+SCENE_CURVE = os.environ.get("NIGHTREAD_CURVE", "d2")
+
+
+def lut_scene():
+    return SCENE_CURVES[SCENE_CURVE]()
+
+
 def ink_line_mask(g, seg=None, bh_ksize=7, bh_gain=45.0, dark_lo=40, dark_hi=185):
     """軟性墨線遮罩 0..1：blackhat（細暗線構）×暗度權重 ∪ DBNet seg。
     實心黑塊內部為 0（只認邊緣細線 ⇒ 增亮不掉大塊黑的對比）。"""
@@ -590,8 +634,8 @@ def ink_glow(dimmed, ink_soft, strength=GLOW_STRENGTH, cap=GLOW_CAP, bg_thr=95, 
 
 
 def scene_final(g, seg):
-    """畫面區最終處理＝D2：rolloff LUT + 自適應墨線增亮。"""
-    return ink_glow(lut_rolloff()[g], ink_line_mask(g, seg))
+    """畫面區最終處理：場景曲線 LUT（NIGHTREAD_CURVE 選、預設 d2）+ 自適應墨線增亮。"""
+    return ink_glow(lut_scene()[g], ink_line_mask(g, seg))
 
 
 def ink_alpha(g, gain):
