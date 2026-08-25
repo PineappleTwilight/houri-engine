@@ -20,7 +20,7 @@ This is deliberate. The providers Yakuyomi targets are exactly manga-image-trans
 | OpenAI | api.openai.com | `/v1/models` | |
 | Google Gemini | …/v1beta/openai/ | `/v1beta/models` (native) | chat via OpenAI-compat endpoint; list via native |
 | Groq | api.groq.com | `/v1/models` | fast, free tier |
-| Qwen (通義千問) | dashscope…/compatible-mode | `/v1/models` | Alibaba |
+| Qwen (通義千問) | dashscope-intl…/compatible-mode | `/v1/models` | Alibaba Model Studio (international); mainland-China keys: use Custom with dashscope.aliyuncs.com |
 | OpenRouter | openrouter.ai | `/v1/models` (public) | one key, hundreds of models, list auto-updates |
 | Sakura (self-hosted) | your base | your base + `/v1/models` | JP→ZH-specialised LLM |
 | Custom (OpenAI-compatible) | your base | your base + `/v1/models` | LM Studio, SiliconFlow, any compatible endpoint |

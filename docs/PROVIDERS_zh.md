@@ -20,7 +20,7 @@
 | OpenAI | api.openai.com | `/v1/models` | |
 | Google Gemini | …/v1beta/openai/ | `/v1beta/models`（native） | 聊天走 OpenAI-compat 端點；列模型走 native |
 | Groq | api.groq.com | `/v1/models` | 快、有免費額度 |
-| 通義千問 Qwen | dashscope…/compatible-mode | `/v1/models` | 阿里 |
+| 通義千問 Qwen | dashscope-intl…/compatible-mode | `/v1/models` | 阿里 Model Studio 國際版；大陸 key 請用「自訂」填 dashscope.aliyuncs.com |
 | OpenRouter | openrouter.ai | `/v1/models`（公開） | 一把 key 通吃上百模型、清單自動更新 |
 | Sakura（自架） | 你的 base | 你的 base + `/v1/models` | 日→中專精 LLM |
 | 自訂（OpenAI 相容） | 你的 base | 你的 base + `/v1/models` | LM Studio、SiliconFlow、任何相容端點 |
