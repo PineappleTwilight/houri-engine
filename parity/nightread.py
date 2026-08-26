@@ -162,8 +162,11 @@ HARMONIZE_COLLAR_INK = 0.30     # 亮島外環細墨密度上限：鬍鬚/密集
 # 像素層無界 → 唯一安全解＝gutter 填色避開大型人物墨結構周圍，人物旁留灰暈）：
 AURA_MIN_INK_AREA = 2500        # 「大型人物墨」門檻（px）；格線/氣泡輪廓先排除不算
 AURA_R = 30                     # 灰暈半徑：距人物墨此距離內的留白不填
-AURA_FRAME_EXEMPT = 45          # 距格線此範圍內的留白豁免灰暈（正常格間留白照填）
-AURA_BORDER_EXEMPT = 60         # 距頁邊此範圍內的留白豁免灰暈
+AURA_FRAME_EXEMPT = 45          # 距格線此範圍內的留白豁免灰暈（正常格間留白照填；hard 模式用）
+AURA_BORDER_EXEMPT = 60         # 距頁邊此範圍內的留白豁免灰暈（hard 模式用）
+AURA_MODE = os.environ.get("NIGHTREAD_AURA", "hard")  # hard=二值+豁免帶；glow=距離場漸層（跟隨輪廓）
+AURA_GLOW_R0 = 8                # glow：距人物墨 ≤R0 全保留場景調
+AURA_GLOW_R1 = 42               # glow：≥R1 全 BG；中間線性淡入（距離場＝天然跟隨輪廓、無鋸齒）
 STICKER_TEXTON_PAD = 8          # textOn 的文字 bbox 外擴（語意證據要「真的壓在元件上」
                                 # ⇒ 只容 bbox 抖動的小 pad；BUBBLE_PAD 40px 窗會把鄰格
                                 # 文字掃進相鄰白元件湊假證據——ch34_010 披肩 pad40=0.207
@@ -814,6 +817,21 @@ def paint_gutter(out, g, gutter, frame=None, bubble=None):
         if n > 1:
             big[1:] = st[1:, cv2.CC_STAT_AREA] >= AURA_MIN_INK_AREA
         figm = big[lb]
+        if figm.any() and AURA_MODE == "glow":
+            # 發光式灰暈：距離場漸層——人物輪廓旁保留場景調、隨距離淡入 BG。距離場天然
+            # 跟隨輪廓（等距線＝輪廓偏移）⇒ 無鋸齒；不需豁免帶（b18 的代價在漸層下只剩
+            # 一圈柔光）。fill 本身不縮，改在最後把 gutter 區的值做 lerp。
+            dist = cv2.distanceTransform((~figm).astype(np.uint8), cv2.DIST_L2, 5)
+            alpha = np.clip((dist - AURA_GLOW_R0) / float(AURA_GLOW_R1 - AURA_GLOW_R0), 0.0, 1.0)
+            scene_g = out.copy()                     # 進來時＝場景曲線後的值
+            out_f = out
+            m = fill
+            out_f[m] = scene_g[m] * (1.0 - alpha[m]) + np.float32(BG) * alpha[m]
+            k = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
+            band = (cv2.dilate(fill.astype(np.uint8), k) > 0) & ~fill
+            a2 = ink_alpha(g, 1.6)
+            out_f[band] = np.maximum(out_f[band], BG + a2[band] * (INK - BG))
+            return out_f
         if figm.any():
             ka = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (AURA_R * 2 + 1,) * 2)
             aura = cv2.dilate(figm.astype(np.uint8), ka) > 0
