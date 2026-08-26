@@ -133,6 +133,15 @@ FRAME_HUG_MIN = 0.25            # 貼框長度 / bbox 周長 下限（背景沿�
 FRAME_HUG_STRONG = 0.40         # 強貼框：背景證據足夠強 → 走放寬門（見 sticker_plan 兩級制）
 PROMOTED_TEXTON_MAX = 0.30      # 強貼框仍拒的文字覆蓋上限：真有大量文字壓在上面＝旁白框，
                                 # 填黑會把字變描邊糊 → 留灰（demo06 教堂 textOn 0.167 是可接受上界的參照）
+# 批1（2026-08-26 使用者拍板「先大片白、複雜區塊第二批」）：
+CORE_NECK_R = 12                # 寬域核心：開運算半徑（切斷臉/白衣連進背景的線稿缺口窄頸）
+CORE_RECOVER_R = 9              # 核心確定後往墨線邊回收的測地半徑（貼線稿、免留白圈）
+FAINT_OF_F_MAX = 0.62           # F 像素中淡色(>FAINT_G)佔比上限：群眾/建築淡速寫背景 → 推遲批2
+FAINT_G = 160
+# 偽泡（開口氣泡/字壓背景救回）：
+PB_COV_MAX = 0.85               # 氣泡遮罩蓋率低於此的 text region 才啟動偽泡
+PB_NECK_R = 5                   # 偽泡輕切頸（擋下巴縫這類小缺口；泡內行間白不受影響）
+PB_GROW_FRAC = 0.60             # 生長距離上限＝max(text bbox 邊) × 此值
 STICKER_TEXTON_PAD = 8          # textOn 的文字 bbox 外擴（語意證據要「真的壓在元件上」
                                 # ⇒ 只容 bbox 抖動的小 pad；BUBBLE_PAD 40px 窗會把鄰格
                                 # 文字掃進相鄰白元件湊假證據——ch34_010 披肩 pad40=0.207
@@ -542,7 +551,7 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
             hug[i] = round(float(frac), 3)
             if frac >= FRAME_HUG_MIN:
                 cand.add(i)
-    accept, audit = set(), []
+    accept, audit, promoted = set(), [], set()
     for i in sorted(cand):
         met = sticker_metrics(g, img_bgr, lab, stats, i, text_rects, text_rects_on)
         if i in hug:
@@ -550,14 +559,23 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
         if hug.get(i, 0.0) >= FRAME_HUG_STRONG:
             # 修法5 兩級制——強貼框（背景證據極強）走放寬門：
             # · 跳過 textCov（pad40 窗對大背景是鄰泡污染；真文字壓上用 textOn 擋）
-            # · 跳過 eaten 中段門與小面積門（eaten 聚團交給 paint_sticker 的
-            #   _sticker_protect 區域級保護＝白鬍/髮絲局部不填、其餘照填）
+            # · 跳過 eaten 中段門與小面積門（窄頸類危險交給批1 核心填色的幾何保護）
             # · 保留 fig/thin/chroma/eatenHARD 四道硬底線
+            # · 批1 淡色門：F 像素中淡色佔比高＝群眾/建築淡速寫背景，填黑會變漂浮碎片
+            #   → 推遲批2（ch34_014 底格群眾實測 faintOfF 高、中排乾淨背景低）
+            x_, y_, w2, h2 = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
+                              stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
+            sub_g = g[y_:y_ + h2, x_:x_ + w2]
+            fpx = sub_g[sub_g < WHITE_TH]
+            met["faintOfF"] = round(float((fpx > FAINT_G).mean()), 3) if fpx.size else 0.0
             ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
                   and met["thinFrac"] <= STICKER_THIN_MAX
                   and met["chroma"] <= STICKER_CHROMA_MAX
                   and met["eatenFrac"] <= STICKER_EATEN_HARD
-                  and met["textOn"] <= PROMOTED_TEXTON_MAX)
+                  and met["textOn"] <= PROMOTED_TEXTON_MAX
+                  and met["faintOfF"] <= FAINT_OF_F_MAX)
+            if ok:
+                promoted.add(i)
         else:
             ok = (STICKER_FIG_MIN <= met["figFrac"] <= STICKER_FIG_MAX
                   and met["thinFrac"] <= STICKER_THIN_MAX
@@ -572,10 +590,39 @@ def sticker_plan(g, img_bgr, lab, stats, gutter_ids, panel_ids, frameless, regio
         audit.append(met)
         if ok:
             accept.add(i)
-    return accept, audit
+    return accept, audit, promoted
 
 
-def paint_sticker(out, g, lab, stats, accept, bubble):
+def geodesic_grow(seed, within, iters, step=5):
+    """測地生長：seed 在 within 內反覆 3×3 膨脹 iters 次（≈ 距離 px）。step 批次化省時。"""
+    k = np.ones((3, 3), np.uint8)
+    cur = (seed & within).astype(np.uint8)
+    w8 = within.astype(np.uint8)
+    done = 0
+    while done < iters:
+        n = min(step, iters - done)
+        cur = cv2.dilate(cur, k, iterations=n) & w8
+        done += n
+    return cur > 0
+
+
+def broad_core_fill(comp, seeds, neck_r=CORE_NECK_R, recover_r=CORE_RECOVER_R):
+    """批1 核心填色：comp（白元件）先開運算切窄頸 → 只留寬闊區；由 seeds 所在的
+    寬闊連通塊出發（臉/白衣經細縫連入背景 → 在頸口被切開、到不了）；最後往墨線邊
+    做小半徑測地回收（貼合線稿、不留白圈）。回傳實際要填的遮罩。"""
+    ku = comp.astype(np.uint8)
+    ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * neck_r + 1,) * 2)
+    core = cv2.morphologyEx(ku, cv2.MORPH_OPEN, ko)
+    n, lb = cv2.connectedComponents(core, 8)
+    ids = np.unique(lb[seeds & (core > 0)])
+    ids = ids[ids > 0]
+    if ids.size == 0:
+        return np.zeros_like(comp, bool)
+    filled = np.isin(lb, ids)
+    return geodesic_grow(filled, comp, recover_r, step=3)
+
+
+def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None):
     """修法4 合成：W 填深、前景描白邊（dilate(F, r) ∩ W）、W 內孤立小噪點吞掉、
     eaten 聚團區域級保護（不填黑、原樣留 D2）。
 
@@ -592,18 +639,29 @@ def paint_sticker(out, g, lab, stats, accept, bubble):
     kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FIG_NOISE_CLOSE,) * 2)
     for i in sorted(accept):
         x0, y0, x1, y1, sub, comp = _comp_window(g, lab, stats, i, r + 2)
+        if i in core_ids and frame is not None:
+            # 批1 核心填色（擢升元件）：只填「從格框種子出發、不擠過窄頸」的寬闊區。
+            # 臉/白衣即使因線稿缺口與背景同元件，也在頸口被切斷 ⇒ 幾何保護、非門檻保護。
+            fr = frame[y0:y1, x0:x1] > 0
+            kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FRAME_HUG_DILATE * 2 + 1,) * 2)
+            seeds = (cv2.dilate(fr.astype(np.uint8), kd) > 0) & comp
+            fill = broad_core_fill(comp, seeds)
+            if not fill.any():
+                continue
+        else:
+            fill = comp
         f_raw = ((sub < WHITE_TH) & ~bubble[y0:y1, x0:x1]).astype(np.uint8)
         nn, ll, ss, _ = cv2.connectedComponentsWithStats(f_raw, 8)
         keep = np.zeros(nn, bool)
         if nn > 1:
             keep[1:] = ss[1:, cv2.CC_STAT_AREA] >= FIG_NOISE_AREA
         f_main = keep[ll]                               # 清完噪點的前景（描邊來源）
-        comp_closed = cv2.morphologyEx(comp.astype(np.uint8), cv2.MORPH_CLOSE, kc) > 0
-        noise = (ll > 0) & ~keep[ll] & comp_closed      # 孤懸 W 內的小噪點 → 併入背景
+        fill_closed = cv2.morphologyEx(fill.astype(np.uint8), cv2.MORPH_CLOSE, kc) > 0
+        noise = (ll > 0) & ~keep[ll] & fill_closed      # 孤懸填色區內的小噪點 → 併入背景
         protect = _sticker_protect(_sticker_eaten(sub, comp), comp)
-        band = (cv2.dilate(f_main.astype(np.uint8), k) > 0) & comp & ~protect
+        band = (cv2.dilate(f_main.astype(np.uint8), k) > 0) & fill & ~protect
         o = out[y0:y1, x0:x1]
-        o[(comp | noise) & ~protect] = BG
+        o[(fill | noise) & ~protect] = BG
         o[band] = STROKE_OBJ_V
     return out
 
@@ -716,14 +774,52 @@ def paint_bubbles(out, g, bubble, seg, text_pad=2):
     return out
 
 
-def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=()):
+def build_pseudo_bubbles(g, regions, bubble):
+    """偽泡（demo02 型救回）：氣泡遮罩蓋率 < PB_COV_MAX 的 text region（開口氣泡＝泡內白
+    流出去與留白/背景連通而被氣泡遮罩拒收；或字直接寫在背景/留白上），從「字底下的白」
+    出發在輕切頸後的白域內測地生長（距離上限＝bbox 尺度）→ 得到泡狀填色遮罩，交
+    paint_bubbles 同工法（填深＋亮字＋描邊）。輕切頸擋下巴縫這類小缺口，免得長進臉。"""
+    H, W_ = g.shape
+    white = (g >= WHITE_TH)
+    ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * PB_NECK_R + 1,) * 2)
+    w_cut = cv2.morphologyEx(white.astype(np.uint8), cv2.MORPH_OPEN, ko)
+    w_cut = geodesic_grow(w_cut > 0, white, PB_NECK_R, step=3)   # 回收切掉的邊緣
+    pb = np.zeros((H, W_), bool)
+    for r_ in regions:
+        x0, y0, x1, y1 = r_["bbox"]
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(W_, x1), min(H, y1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        win = bubble[y0:y1, x0:x1]
+        if win.size == 0 or win.mean() >= PB_COV_MAX:
+            continue
+        cap = int(PB_GROW_FRAC * max(x1 - x0, y1 - y0))
+        pad = cap + PB_NECK_R + 2
+        wx0, wy0 = max(0, x0 - pad), max(0, y0 - pad)
+        wx1, wy1 = min(W_, x1 + pad), min(H, y1 + pad)
+        seed = np.zeros((wy1 - wy0, wx1 - wx0), bool)
+        seed[y0 - wy0:y1 - wy0, x0 - wx0:x1 - wx0] = True
+        grown = geodesic_grow(seed & w_cut[wy0:wy1, wx0:wx1],
+                              w_cut[wy0:wy1, wx0:wx1], cap)
+        pb[wy0:wy1, wx0:wx1] |= grown
+    return pb & ~bubble
+
+
+def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
+            core_ids=(), frame=None, regions=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     if not frameless:                                   # 修法2：無框頁背景不填深
         out = paint_gutter(out, g, gutter)
     if sticker:                                         # 修法4：純白背景填黑＋前景白描邊
-        out = paint_sticker(out, g, lab, stats, sticker, bubble)
+        out = paint_sticker(out, g, lab, stats, sticker, bubble,
+                            core_ids=core_ids, frame=frame)
     out = paint_bubbles(out, g, bubble, seg)
+    if regions is not None:                             # 偽泡：開口泡/字壓背景/字壓留白救回
+        pb = build_pseudo_bubbles(g, regions, bubble)
+        if pb.any():
+            out = paint_bubbles(out, g, pb, seg)
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -784,14 +880,16 @@ def run_page(page_path, outdir=OUT_DEFAULT, col_w=1000):
     lab, stats, gutter_ids, panel_ids = classify_white_components(g)
     bubble, merged, rejected = build_bubble_mask(
         g, regions, seg, lab, stats, gutter_ids | panel_ids)
-    sticker, audit = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
-                                  frameless, regions)
+    sticker, audit, promoted = sticker_plan(g, img, lab, stats, gutter_ids, panel_ids,
+                                            frameless, regions)
     gutter_show = gutter_ids - sticker if frameless else gutter_ids
     gutter = np.isin(lab, sorted(gutter_show)) if gutter_show else np.zeros((H, W), bool)
     panel_show = panel_ids - sticker
     panel_scene = np.isin(lab, sorted(panel_show)) if panel_show else np.zeros((H, W), bool)
     sticker_mask = np.isin(lab, sorted(sticker)) if sticker else np.zeros((H, W), bool)
-    final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker)
+    lhm, lvm = frame_line_mask(g)
+    final = compose(g, gutter, bubble, seg, frameless, lab, stats, sticker,
+                    core_ids=promoted, frame=(lhm | lvm), regions=regions)
 
     pref = os.path.join(outdir, name)
     with open(f"{pref}_regions.json", "w", encoding="utf-8") as f:
