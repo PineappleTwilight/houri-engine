@@ -140,8 +140,30 @@ FAINT_OF_F_MAX = 0.62           # F 像素中淡色(>FAINT_G)佔比上限：群�
 FAINT_G = 160
 # 偽泡（開口氣泡/字壓背景救回）：
 PB_COV_MAX = 0.85               # 氣泡遮罩蓋率低於此的 text region 才啟動偽泡
-PB_NECK_R = 5                   # 偽泡輕切頸（擋下巴縫這類小缺口；泡內行間白不受影響）
-PB_GROW_FRAC = 0.60             # 生長距離上限＝max(text bbox 邊) × 此值
+PB_NECK_R = 7                   # 偽泡切頸（擋下巴縫/泡尾缺口；泡內行間白不受影響）
+PB_GROW_FRAC = 0.35             # 生長距離上限＝max(text bbox 邊) × 此值
+                                # ⚠️ 0.60 時 ch34_010 左下開口泡長進相連的外套白、把手塗黑（真凶
+                                # 是偽泡非貼紙——驗屍 2026-08-26）；收緊後 demo02 大字框仍蓋滿
+# 批1.5（2026-08-26 使用者兩案）：
+# 手/外套漏填（ch34_010 左下案）：測地/直線比——背景從格框「直直就到」（比≈1）、
+# 衣料/皮膚要繞過人物墨線障礙才到（比高）。人物殼 closing 版已證蓋不住寬開衣料白、廢棄。
+GEO_RATIO_MAX = 1.6             # 測地距離 ≤ 直線距離×此 才視為背景
+GEO_SLACK = 40                  # 加法餘裕（px）：近框處比值不穩定的緩衝
+# 人頭一致化（demo02 案）：元件級指標已證不可分（feat 被鄰墨污染、ringDark 與正常頁衣料
+# 重疊）→ 改構圖層「暗區地圖」：粗尺度上暗色主導的帶（群眾帶/已填格）內，小白元件一律
+# 填深+內緣亮。主角臉防護＝面積上限＋暗區要求（臉大、通常也不在暗帶）。
+HARMONIZE_ZONE_CELL = 16        # 暗區地圖降採樣尺度
+HARMONIZE_ZONE_DARK = 0.45      # 粗胞暗(<60)佔比 ≥ 此 ⇒ 暗區
+HARMONIZE_IN_ZONE = 0.6         # 亮島落在暗區內的比例下限
+HARMONIZE_AREA_MAX = 0.004      # 亮島整頁佔比上限（群眾人頭尺度；主角臉更大 → 排除）
+HARMONIZE_COLLAR_INK = 0.30     # 亮島外環細墨密度上限：鬍鬚/密集髮絲（ch34_006）高 → 排除；
+                                # 空白人頭只有單條輪廓線、低 → 放行
+# 留白填深的人物灰暈（ch34_010 左下案＝出血式無框特寫：外套白與頁白連續且輪廓開放，
+# 像素層無界 → 唯一安全解＝gutter 填色避開大型人物墨結構周圍，人物旁留灰暈）：
+AURA_MIN_INK_AREA = 2500        # 「大型人物墨」門檻（px）；格線/氣泡輪廓先排除不算
+AURA_R = 30                     # 灰暈半徑：距人物墨此距離內的留白不填
+AURA_FRAME_EXEMPT = 45          # 距格線此範圍內的留白豁免灰暈（正常格間留白照填）
+AURA_BORDER_EXEMPT = 60         # 距頁邊此範圍內的留白豁免灰暈
 STICKER_TEXTON_PAD = 8          # textOn 的文字 bbox 外擴（語意證據要「真的壓在元件上」
                                 # ⇒ 只容 bbox 抖動的小 pad；BUBBLE_PAD 40px 窗會把鄰格
                                 # 文字掃進相鄰白元件湊假證據——ch34_010 披肩 pad40=0.207
@@ -646,6 +668,26 @@ def paint_sticker(out, g, lab, stats, accept, bubble, core_ids=(), frame=None):
             kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (FRAME_HUG_DILATE * 2 + 1,) * 2)
             seeds = (cv2.dilate(fr.astype(np.uint8), kd) > 0) & comp
             fill = broad_core_fill(comp, seeds)
+            if fill.any():
+                # 批1.5 測地比刪填：geo＝從格框種子在白域內走的距離；euc＝到格線的直線距離。
+                # 背景 geo≈euc；衣料/皮膚要繞過人物墨線/氣泡障礙才到 → geo≫euc → 刪。
+                # （人物殼 closing 版蓋不住寬開的外套白、已廢棄。）
+                geo = np.full(comp.shape, np.float32(1e9))
+                cur = (seeds & comp)
+                k3 = np.ones((3, 3), np.uint8)
+                d, STEP = 0, 6
+                geo[cur] = 0
+                while cur.any() and d < 4000:
+                    grown = (cv2.dilate(cur.astype(np.uint8), k3, iterations=STEP) > 0) & comp
+                    new_px = grown & (geo == 1e9)
+                    d += STEP
+                    if not new_px.any():
+                        break
+                    geo[new_px] = d
+                    cur = grown
+                fr8 = (~fr).astype(np.uint8)
+                euc = cv2.distanceTransform(fr8, cv2.DIST_L2, 3)
+                fill = fill & (geo <= GEO_RATIO_MAX * euc + GEO_SLACK)
             if not fill.any():
                 continue
         else:
@@ -752,11 +794,40 @@ def ink_alpha(g, gain):
     return np.clip((1.0 - g.astype(np.float32) / 255.0) * gain, 0.0, 1.0)
 
 
-def paint_gutter(out, g, gutter):
-    """留白填深 + 格框描亮：外擴 STROKE 的 band 內原本是墨線（格框）的像素轉亮。"""
-    out[gutter] = BG
+def paint_gutter(out, g, gutter, frame=None, bubble=None):
+    """留白填深 + 格框描亮 + 人物灰暈。
+
+    灰暈（批1.5，ch34_010 左下案）：出血式無框特寫的人物白衣與頁白連續且輪廓開放 →
+    修法3 正確判 gutter、但整顆塗掉會吞掉衣料/手。像素層無界 ⇒ 安全解＝**避開大型
+    人物墨結構周圍 AURA_R 的白不填**（格線/氣泡輪廓排除不算人物）。代價＝人物旁一圈
+    灰暈（失敗方向＝不夠暗，合紅線）；封閉輪廓的一般留白離人物墨遠、不受影響。"""
+    fill = gutter.copy()
+    if frame is not None:
+        ink = (g < WHITE_TH).astype(np.uint8)
+        k7 = np.ones((15, 15), np.uint8)
+        excl = cv2.dilate(frame.astype(np.uint8), k7) > 0
+        if bubble is not None:
+            excl |= cv2.dilate(bubble.astype(np.uint8), k7) > 0
+        ink[excl] = 0
+        n, lb, st, _ = cv2.connectedComponentsWithStats(ink, 8)
+        big = np.zeros(n, bool)
+        if n > 1:
+            big[1:] = st[1:, cv2.CC_STAT_AREA] >= AURA_MIN_INK_AREA
+        figm = big[lb]
+        if figm.any():
+            ka = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (AURA_R * 2 + 1,) * 2)
+            aura = cv2.dilate(figm.astype(np.uint8), ka) > 0
+            # 灰暈只管「深入無框區」：距格線/頁邊近的留白＝正常格間留白，豁免（否則
+            # 出血人物碰個邊就吃掉整條 margin，全站 +5~10pt 亮區，b18 實測教訓）
+            fd = cv2.distanceTransform((frame == 0).astype(np.uint8), cv2.DIST_L2, 3)
+            H2, W2 = g.shape
+            yy, xx = np.mgrid[0:H2, 0:W2]
+            bd = np.minimum(np.minimum(yy, H2 - 1 - yy), np.minimum(xx, W2 - 1 - xx))
+            aura &= (fd > AURA_FRAME_EXEMPT) & (bd > AURA_BORDER_EXEMPT)
+            fill = fill & ~aura
+    out[fill] = BG
     k = np.ones((STROKE * 2 + 1,) * 2, np.uint8)
-    band = (cv2.dilate(gutter.astype(np.uint8), k) > 0) & ~gutter
+    band = (cv2.dilate(fill.astype(np.uint8), k) > 0) & ~fill
     a = ink_alpha(g, 1.6)
     out[band] = np.maximum(out[band], BG + a[band] * (INK - BG))
     return out
@@ -806,12 +877,51 @@ def build_pseudo_bubbles(g, regions, bubble):
     return pb & ~bubble
 
 
+def harmonize_enclosed_whites(out, g, lab, stats, skip_mask):
+    """批1.5 人頭一致化（demo02 案，構圖層）：暗區地圖內的「殘餘亮島」→ 填深＋內緣描亮。
+    亮島＝白(原圖)∧仍亮(成品)∧非已處理——**不是**白元件：群眾人頭白常與背景白同元件、
+    背景被偽泡塗過後元件級 skip 會整顆跳過（b15/b16 失效原因），殘餘亮島把已塗部分
+    切掉後獨立評估。防護：面積上限（主角臉大）＋外環細墨密度（鬍鬚/密髮 → 排除）。"""
+    H, W_ = g.shape
+    dark = (out < 60).astype(np.float32)
+    ch, cw = max(1, H // HARMONIZE_ZONE_CELL), max(1, W_ // HARMONIZE_ZONE_CELL)
+    coarse = cv2.resize(dark, (cw, ch), interpolation=cv2.INTER_AREA)
+    coarse = cv2.GaussianBlur(coarse, (0, 0), 2.0)
+    zone = cv2.resize((coarse >= HARMONIZE_ZONE_DARK).astype(np.uint8),
+                      (W_, H), interpolation=cv2.INTER_NEAREST) > 0
+    if not zone.any():
+        return out
+    resid = ((g >= WHITE_TH) & (out >= 110) & ~skip_mask).astype(np.uint8)
+    n, lb, st, _ = cv2.connectedComponentsWithStats(resid, 8)
+    kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    for i in range(1, n):
+        if st[i, cv2.CC_STAT_AREA] / g.size > HARMONIZE_AREA_MAX or st[i, cv2.CC_STAT_AREA] < 150:
+            continue
+        x, y, w2, h2 = st[i, :4]
+        x0, y0 = max(0, x - 8), max(0, y - 8)
+        x1, y1 = min(W_, x + w2 + 8), min(H, y + h2 + 8)
+        isl = lb[y0:y1, x0:x1] == i
+        if (zone[y0:y1, x0:x1] & isl).mean() < HARMONIZE_IN_ZONE:
+            continue
+        cu = isl.astype(np.uint8)
+        collar = (cv2.dilate(cu, kc) > 0) & ~isl
+        gw = g[y0:y1, x0:x1]
+        fine = (gw < 200) & (gw > 40)          # 細墨（鬍鬚/髮絲調子；排除純黑實塊）
+        if collar.any() and float(fine[collar].mean()) > HARMONIZE_COLLAR_INK:
+            continue
+        o = out[y0:y1, x0:x1]
+        o[isl] = BG
+        edge = isl & ~(cv2.erode(cu, np.ones((5, 5), np.uint8)) > 0)
+        o[edge] = np.maximum(o[edge], np.float32(STROKE_OBJ_V))
+    return out
+
+
 def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
             core_ids=(), frame=None, regions=None):
     """整頁合成：D2 畫面 →（有框頁才）留白填深 → 修法4 貼紙式背景 → 氣泡重繪。"""
     out = scene_final(g, seg).astype(np.float32)
     if not frameless:                                   # 修法2：無框頁背景不填深
-        out = paint_gutter(out, g, gutter)
+        out = paint_gutter(out, g, gutter, frame=frame, bubble=bubble)
     if sticker:                                         # 修法4：純白背景填黑＋前景白描邊
         out = paint_sticker(out, g, lab, stats, sticker, bubble,
                             core_ids=core_ids, frame=frame)
@@ -820,6 +930,11 @@ def compose(g, gutter, bubble, seg, frameless, lab=None, stats=None, sticker=(),
         pb = build_pseudo_bubbles(g, regions, bubble)
         if pb.any():
             out = paint_bubbles(out, g, pb, seg)
+        skip = bubble | pb | gutter
+    else:
+        skip = bubble | gutter
+    if lab is not None:                                 # 批1.5：浮在黑裡的空白人頭一致化
+        out = harmonize_enclosed_whites(out, g, lab, stats, skip)
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
