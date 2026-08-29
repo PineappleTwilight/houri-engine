@@ -17,4 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "yakuyomi-engine"
 
 include(":engine")
-include(":app-sandbox")
+// include(":app-sandbox")  // disabled for composite build
