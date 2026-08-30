@@ -242,15 +242,38 @@ object Renderer {
         if (rotate) canvas.restore()
     }
 
+    /**
+     * Wraps text: CJK wraps char-by-char (with line-start kinsoku rule); Latin text only breaks
+     * at whitespace so words are never split mid-word (no "hanging letters"). A single word that
+     * is wider than the box is unavoidably split. '\n' forces a hard break.
+     */
     private fun wrapCjk(text: String, paint: Paint, maxW: Float): List<String> {
         val lines = ArrayList<String>()
         val cur = StringBuilder()
+        var lastSpaceIdx = -1 // index in cur right after the last whitespace (safe break point)
         for (ch in text) {
-            if (ch == '\n') { lines.add(cur.toString()); cur.clear(); continue }
-            if (cur.isNotEmpty() && paint.measureText(cur.toString() + ch) > maxW && ch !in NO_START) {
-                lines.add(cur.toString()); cur.clear()  // 行頭禁則：禁則字不另起行
+            if (ch == '\n') {
+                lines.add(cur.toString()); cur.clear(); lastSpaceIdx = -1
+                continue
+            }
+            if (cur.isNotEmpty()) {
+                val w = paint.measureText(cur.toString() + ch)
+                // Kinsoku: forbidden start chars (closing punctuation etc.) never start a new line,
+                // even if it slightly overflows.
+                if (w > maxW && ch !in NO_START) {
+                    if (lastSpaceIdx > 0) {
+                        // Break after the last word boundary so whole words stay together.
+                        lines.add(cur.substring(0, lastSpaceIdx))
+                        cur.delete(0, lastSpaceIdx)
+                        lastSpaceIdx = -1
+                    } else {
+                        // No whitespace to break at (CJK or a single over-long word) -> break in place.
+                        lines.add(cur.toString()); cur.clear()
+                    }
+                }
             }
             cur.append(ch)
+            if (ch.isWhitespace()) lastSpaceIdx = cur.length // break point right after this space
         }
         if (cur.isNotEmpty()) lines.add(cur.toString())
         return lines
