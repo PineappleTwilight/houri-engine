@@ -16,9 +16,10 @@ android {
         minSdk = 26
         consumerProguardFiles("consumer-rules.pro")
 
-        // NCNN 原生後端（P1 去字 + P2 偵測）：只出 arm64（ncnn 預編庫即 arm64-v8a Vulkan 版）
+        // NCNN 原生後端（P1 去字 + P2 偵測）：arm64-v8a 用客製 20260718 預編庫、
+        // armeabi-v7a 用官方 20260526 android-vulkan 預編庫（皆 Vulkan+OpenMP+threads）。
         ndk {
-            abiFilters += "arm64-v8a"
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
         externalNativeBuild {
             cmake {
