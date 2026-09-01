@@ -4,8 +4,22 @@
 #include <android/log.h>
 #include <cstring>
 #include "net.h"
+#include "cpu.h"
 
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "yakuyomi_ncnn", __VA_ARGS__)
+
+// JNI_OnLoad：載入 .so 時執行一次。★ armeabi-v7a（32 位元）上把 OpenMP 執行緒數壓到 2：
+// 低階 4 核 v7a SoC 上 NCNN 預設按核心數開 OpenMP（4），`__kmp_invoke_microtask` 在
+// 32 位元 libomp 下會 SIGSEGV（真機 tombstone：thread=DefaultDispatch、pc=__kmp_invoke_microtask）。
+// 2 緒＝1 master + 1 helper，保住平行加速又避開 oversubscription 崩潰帶。arm64 不動（客製 build 穩）。
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
+#if defined(__ANDROID__) && defined(__arm__)
+    ncnn::set_omp_num_threads(2);
+    ncnn::set_omp_dynamic(0);
+    LOGW("yakuyomi_ncnn armv7: omp threads capped to 2");
+#endif
+    return JNI_VERSION_1_6;
+}
 
 // 載入 pnnx 轉出的 .param/.bin，回 native handle（ncnn::Net*，純 CPU）；0=失敗。
 // （GPU/Vulkan 已移除：NCNN Vulkan 實測算不對 AOT-GAN，見 memory ncnn-vulkan-fp16。）
