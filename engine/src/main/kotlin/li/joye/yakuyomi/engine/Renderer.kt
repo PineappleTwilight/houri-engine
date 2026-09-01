@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -62,16 +63,43 @@ object Renderer {
             } else {
                 x0 = region.x0; y0 = region.y0; x1 = region.x1; y1 = region.y1
             }
-            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, region.onArt)
-            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, region.onArt)
+            // 譯文字級錨定原文高度：短譯文不脹到 fontSizeMax、長譯文不縮到小於原文太多（保持「翻譯前後字一樣大」）。
+            val originalSize = originalFontSize(region)
+            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize)
+            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize)
             if (rotate) canvas.restore()
         }
         return out
     }
 
-    /** 文字色 (fill, outline)：auto＝取去字後背景亮度（暗底白字、亮底黑字，對齊 parity auto_colors）；mono＝黑字白邊。 */
+    /**
+     * 估計區域原文的字級（px）：對每行取 min(行框寬,高)＝文字筆畫厚度（直/橫書皆然），再取中位數。
+     * 這是排版「譯文要和原文一樣大」的錨點：短譯文（如英文短句 vs 長日文）不再放大到填滿整個氣泡。
+     */
+    private fun originalFontSize(region: TextRegion): Int {
+        val thicknesses = ArrayList<Float>()
+        for (line in region.lines) {
+            val q = line.quad
+            if (q.size < 4) continue
+            fun mid(a: Pt, b: Pt) = Pt(((a.x + b.x) / 2f).toInt().toFloat(), ((a.y + b.y) / 2f).toInt().toFloat())
+            val hx = mid(q[0], q[1]).x - mid(q[2], q[3]).x
+            val hy = mid(q[0], q[1]).y - mid(q[2], q[3]).y
+            val wx = mid(q[1], q[2]).x - mid(q[3], q[0]).x
+            val wy = mid(q[1], q[2]).y - mid(q[3], q[0]).y
+            val h = hypot(hx.toDouble(), hy.toDouble()).toFloat()
+            val w = hypot(wx.toDouble(), wy.toDouble()).toFloat()
+            thicknesses.add(minOf(h, w))
+        }
+        if (thicknesses.isEmpty()) return 0
+        thicknesses.sort()
+        return thicknesses[thicknesses.size / 2].roundToInt()
+    }
+
+    /** 文字色 (fill, outline)：auto＝取去字後背景亮度（暗底白字、亮底黑字，對齊 parity auto_colors）；mono＝黑字白邊；其他＝固定色。 */
     private fun textColors(page: Bitmap, r: TextRegion, cfg: RenderConfig): Pair<Int, Int> {
         if (cfg.colorMode == "mono") return Color.BLACK to Color.WHITE
+        // 使用者指定固定文字色（預設純黑）：outline 仍依背景亮度判黑/白，確保任何底色都讀得到。
+        if (cfg.colorMode != "auto") return cfg.fixedTextColor to (if (bgLuminance(page, r.x0, r.y0, r.x1, r.y1) < cfg.bgDark) Color.WHITE else Color.BLACK)
         // 壓在畫面上(lama 重建的 busy 背景)：一律黑字+粗白邊。白邊把字框出來，任何雜亂背景都讀得到（對齊 m-i-t 做法）。
         if (r.onArt) return Color.BLACK to Color.WHITE
         val lum = bgLuminance(page, r.x0, r.y0, r.x1, r.y1)
@@ -102,15 +130,17 @@ object Renderer {
         o in 0x3040..0x30FF || o in 0x4E00..0x9FFF || o in 0x3400..0x4DBF || o in 0xFF00..0xFFEF
     }
 
-    /** 直排：欄右→左、格上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 格。每格＝1 字或 1 個縱中橫短串。 */
-    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false) {
+/** 直排：欄右→左、格上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 格。每格＝1 字或 1 個縱中橫短串。 */
+    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
         val cells = toVerticalCells(chars, cfg.tateChuYoko)  // 切格：一般字一格、短 ASCII 串併成一個縱中橫格
         val bw = (x1 - x0) * cfg.expandW         // 寬：放大後的文字框寬
         val colRoom = (y1 - y0) * cfg.expandH    // 直欄可用高（從文字框頂往下）
         var size = cfg.fontSizeMin
-        var s = min(colRoom.toInt(), cfg.fontSizeMax)
+        // 起點錨定原文字級：譯文不該比原文大；長譯文仍會往下縮到 fit。
+        val cap = if (originalSize > 0) minOf(cfg.fontSizeMax, originalSize) else cfg.fontSizeMax
+        var s = min(colRoom.toInt(), cap)
         while (s >= cfg.fontSizeMin) {
             val lh = s * 1.05f; val cw = s * 1.1f
             val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
@@ -202,12 +232,14 @@ object Renderer {
     }
 
     /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。 */
-    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false) {
+    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
         val bw = (x1 - x0) * cfg.expandW
         val rowRoom = (y1 - y0) * cfg.expandH
         var size = cfg.fontSizeMin
         var lines = listOf(text)
-        var s = min(rowRoom.toInt(), cfg.fontSizeMax)
+        // 起點錨定原文字級：譯文不該比原文大；長譯文仍會往下縮到 fit。
+        val cap = if (originalSize > 0) minOf(cfg.fontSizeMax, originalSize) else cfg.fontSizeMax
+        var s = min(rowRoom.toInt(), cap)
         while (s >= cfg.fontSizeMin) {
             fill.textSize = s.toFloat()
             val ls = wrapCjk(text, fill, (bw - cfg.rowTrim * s).coerceAtLeast(s.toFloat())) // 每行少 rowTrim 字（橫向字數）

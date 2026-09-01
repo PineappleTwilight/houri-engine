@@ -137,8 +137,10 @@ data class RenderConfig(
     val colTrim: Int = 3,        // 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
     val rowTrim: Int = 3,        // 橫排每行少放幾字（colTrim 的橫排對映：行變短、列變多→字級自動縮）
     val fontScale: Float = 0.85f, // 算好字級後整體縮放（<1＝更小、更 fit 格子、留邊距）
-    // 文字顏色：auto＝取去字後背景亮度判黑/白字（最穩、白底黑字/黑底白字）；mono＝一律黑字白邊
+    // 文字顏色：auto＝取去字後背景亮度判黑/白字（最穩、白底黑字/黑底白字）；mono＝一律黑字白邊；
+    // 其他＝使用者指定的固定文字色（ARGB，如 0xFF000000 純黑；outline 維持依背景亮度判黑/白，確保任何底色都讀得到）。
     val colorMode: String = "auto",
+    val fixedTextColor: Int = 0xFF000000.toInt(), // 〔設定〕colorMode=固定色時的譯文字色（預設純黑）
     val bgDark: Int = 110,       // auto：去字後背景平均亮度 < 此值＝暗底 → 白字
     // 縱中橫（tate-chu-yoko）：直排時把連續短 ASCII 串（2–4 字的數字/字母/!?）併成一格水平並排（年齡「20」、年份「2020」、「!?」不再上下堆疊歪頭讀）。
     // §4 第三層知情偏離：m-i-t/parity 逐字畫、無此邏輯；只影響直排內 ASCII 短串，CJK 不變。預設開、可關回逐字。
