@@ -61,7 +61,7 @@ add_library(ncnn STATIC IMPORTED)
 set_target_properties(ncnn PROPERTIES
   INTERFACE_COMPILE_OPTIONS "-fno-rtti;-fno-exceptions"
   INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include/ncnn"
-  INTERFACE_LINK_LIBRARIES "-fopenmp;-static-openmp;Threads::Threads;\$<LINK_ONLY:dl>;\$<LINK_ONLY:glslang::glslang>;\$<LINK_ONLY:glslang::SPIRV>;android;jnigraphics;log"
+  INTERFACE_LINK_LIBRARIES "Threads::Threads;pthread;\$<LINK_ONLY:dl>;\$<LINK_ONLY:glslang::glslang>;\$<LINK_ONLY:glslang::SPIRV>;android;jnigraphics;log"
   INTERFACE_POSITION_INDEPENDENT_CODE "ON"
 )
 

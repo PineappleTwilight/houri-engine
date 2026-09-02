@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.22.1)
 project(yakuyomi_ncnn)
 set(CMAKE_CXX_STANDARD 17)
 
-# ncnn is vendored as prebuilt static libs, one directory per Android ABI:
-# arm64-v8a is the custom 20260718 build, armeabi-v7a is the official
-# 20260526 android-vulkan prebuilt (same options: Vulkan, OpenMP, threads).
+# ncnn is vendored as prebuilt static libs, one directory per Android ABI.
+# Both ABIs are custom 20260526 builds with NCNN_SIMPLEOMP=ON (pthread-based
+# OpenMP, no libomp __kmp_abort_process crash paths) + Vulkan + OpenMP:
+# arm64-v8a was built 20260718, armeabi-v7a 20260901 (NDK r28, same flags).
 if(NOT DEFINED ANDROID_ABI)
     set(ANDROID_ABI arm64-v8a)
 endif()
