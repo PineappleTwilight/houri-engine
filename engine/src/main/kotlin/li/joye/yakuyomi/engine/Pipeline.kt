@@ -113,7 +113,7 @@ class Pipeline(
         val inpaintJob = async {
             val t0 = System.currentTimeMillis()
             EngineTrace.log("pipe.inpaint.enter regions=${textRegions.size}")
-            val r = inpainter.inpaint(page, textRegions, detection.textMask)
+            val r = inpainter.inpaint(page, textRegions, detection.textMask, cfg.render)
             EngineTrace.log("pipe.inpaint.exit")
             inpaintMs = System.currentTimeMillis() - t0
             r

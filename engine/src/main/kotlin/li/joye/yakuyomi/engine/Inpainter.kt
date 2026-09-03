@@ -34,12 +34,12 @@ class Inpainter(
         check(ncnnHandle != 0L) { "NCNN AOT 模型載入失敗：$modelPath" }
     }
 
-    suspend fun inpaint(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Bitmap = coroutineScope {
+    suspend fun inpaint(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap, render: RenderConfig = RenderConfig()): Bitmap = coroutineScope {
         val w = page.width
         val h = page.height
         val result = page.copy(Bitmap.Config.ARGB_8888, true)
-        // seg 細筆畫遮罩 ∩ 保留區 bbox（外擴 bboxPad）再膨脹：只動筆畫、限制在翻譯過的區（SFX/未譯留原圖，§11）。
-        val maskPx = buildSegMask(regions, textMask, w, h)
+        // 遮罩＝翻譯區的「擴展後文字框」整塊（見 buildSegMask）：新譯文（尤其直式框旋轉 90° 的長 LTR 文）落點都要有乾淨背景。
+        val maskPx = buildSegMask(regions, textMask, w, h, render)
 
         if (cfg.method == "boxfill") {
             // 逐區平塗背景色：白泡乾淨無殘留、忙碌區是平色塊（要品質用 aot）。
@@ -82,33 +82,41 @@ class Inpainter(
         }
     }
 
-    /** 去字遮罩 Bitmap（白＝要去字）。給重繪素材/視覺化用；與 inpaint 同一份 seg 細遮罩。 */
-    fun buildMask(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap): Bitmap {
+    /** 去字遮罩 Bitmap（白＝要去字）。給重繪素材/視覺化用；與 inpaint 同一份遮罩。 */
+    fun buildMask(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap, render: RenderConfig = RenderConfig()): Bitmap {
         val w = page.width; val h = page.height
-        val maskPx = buildSegMask(regions, textMask, w, h)
+        val maskPx = buildSegMask(regions, textMask, w, h, render)
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(maskPx, 0, w, 0, 0, w, h) }
     }
 
     /**
-     * seg 細遮罩＝seg 細筆畫 ∩ 已保留區的「區域 bbox 矩形（外擴 bboxPad）」（allow），再膨脹。回傳 ARGB 像素（白＝要去字）。
-     * ★ 用 bbox 矩形(非緊的文字行框)＝涵蓋漢字旁的注音假名；pad 再外擴涵蓋貼 bbox 邊界的假名（桌面 auto_diag.py 實證）。
+     * 去字遮罩＝「擴展後文字框」整塊（白＝要去字）。區框依 Renderer 的 expandW/expandH 外擴
+     * （直式框長短軸對調、配合 drawHorizontal 的 90° 旋轉），再膨脹 maskDilate。
+     * ★ 從「seg 細筆畫 ∩ 框」改成整框：新譯文會畫滿擴展框（直式框的長 LTR 文尤其如此），
+     * 只有整框重建過，譯文落點才有乾淨背景（壓畫面的字不再蓋在沒去字的原稿上）。
+     * SFX/未譯區（OCR 原文空白）不在 regions 內 → 照舊不動。
      */
-    private fun buildSegMask(regions: List<TextRegion>, textMask: Bitmap, w: Int, h: Int): IntArray {
+    private fun buildSegMask(regions: List<TextRegion>, textMask: Bitmap, w: Int, h: Int, render: RenderConfig): IntArray {
         val pad = cfg.bboxPad
         val allow = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         Canvas(allow).apply {
             drawColor(Color.BLACK)
             val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
-            for (region in regions) drawRect(region.x0 - pad, region.y0 - pad, region.x1 + pad, region.y1 + pad, p)
+            for (region in regions) {
+                val halfW = (region.x1 - region.x0) / 2f
+                val halfH = (region.y1 - region.y0) / 2f
+                // 與 drawHorizontal 相同的直式判定：長軸當排版寬、短軸當列高。
+                val portrait = (region.y1 - region.y0) * 0.9f > (region.x1 - region.x0)
+                val expW = if (portrait) render.expandH else render.expandW
+                val expH = if (portrait) render.expandW else render.expandH
+                val dx = halfW * (expW - 1f) + pad
+                val dy = halfH * (expH - 1f) + pad
+                drawRect(region.x0 - dx, region.y0 - dy, region.x1 + dx, region.y1 + dy, p)
+            }
         }
         val mask = IntArray(w * h)
         allow.getPixels(mask, 0, w, 0, 0, w, h)
         allow.recycle()
-        val seg = IntArray(w * h)
-        textMask.getPixels(seg, 0, w, 0, 0, w, h)
-        for (i in mask.indices) {
-            mask[i] = if ((mask[i] and 0xFF) > 127 && (seg[i] and 0xFF) > 127) Color.WHITE else Color.BLACK
-        }
         dilate(mask, w, h, (cfg.maskDilate / 2f).roundToInt().coerceAtLeast(1))
         return mask
     }

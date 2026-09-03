@@ -231,10 +231,13 @@ object Renderer {
         canvas.restore()
     }
 
-    /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。 */
+    /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。直式原文的狹長框改旋轉 90° 排版，讓譯文沿長軸填滿（不再縮成一條直排柱）。 */
     private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
-        val bw = (x1 - x0) * cfg.expandW
-        val rowRoom = (y1 - y0) * cfg.expandH
+        val portrait = (y1 - y0) * 0.9f > (x1 - x0)
+        val wrapW = if (portrait) (y1 - y0) else (x1 - x0)
+        val roomH = if (portrait) (x1 - x0) else (y1 - y0)
+        val bw = wrapW * cfg.expandW
+        val rowRoom = roomH * cfg.expandH
         var size = cfg.fontSizeMin
         var lines = listOf(text)
         // 起點錨定原文字級：譯文不該比原文大；長譯文仍會往下縮到 fit。
@@ -252,6 +255,11 @@ object Renderer {
         stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
         lines = wrapCjk(text, fill, (bw - cfg.rowTrim * size).coerceAtLeast(size.toFloat()))  // 縮小後重排（含 rowTrim）
         val lh = size * 1.18f
+        if (portrait) {
+            // 直式框：繞框心旋轉 90°（順時針），譯文沿長軸橫排、由上往下讀，填滿氣泡長邊。
+            canvas.save()
+            canvas.rotate(90f, (x0 + x1) / 2f, (y0 + y1) / 2f)
+        }
         val tcx = (x0 + x1) / 2f
         var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT  // 垂直置中於框
         for (ln in lines) {
@@ -260,6 +268,7 @@ object Renderer {
             canvas.drawText(ln, tx, baseline, fill)
             baseline += lh
         }
+        if (portrait) canvas.restore()
     }
 
     private fun drawCharVertical(canvas: Canvas, ch: Char, cx: Float, cyc: Float, fill: Paint, stroke: Paint, border: Boolean) {
