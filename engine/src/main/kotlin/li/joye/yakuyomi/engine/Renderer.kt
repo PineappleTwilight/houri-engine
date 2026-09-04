@@ -231,9 +231,10 @@ object Renderer {
         canvas.restore()
     }
 
-    /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。直式原文的狹長框改旋轉 90° 排版，讓譯文沿長軸填滿（不再縮成一條直排柱）。 */
+    /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。直式原文的狹長框改旋轉 90° 排版，讓譯文沿長軸填滿（不再縮成一條直排柱）。壓在畫面上的自由文字（onArt）一律不轉：跟著偵測方向排，避免水平原文被轉成側躺。 */
     private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
-        val portrait = (y1 - y0) * 0.9f > (x1 - x0)
+        // 90° 旋轉只服務「直式原文的狹長氣泡」；自由文字（無氣泡、壓在畫面上）保持偵測到的方向。
+        val portrait = !onArt && (y1 - y0) * 0.9f > (x1 - x0)
         val wrapW = if (portrait) (y1 - y0) else (x1 - x0)
         val roomH = if (portrait) (x1 - x0) else (y1 - y0)
         val bw = wrapW * cfg.expandW
