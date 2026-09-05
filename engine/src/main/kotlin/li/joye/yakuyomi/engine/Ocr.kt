@@ -106,21 +106,21 @@ class Ocr(
         line.direction = if (isV) "v" else "h"
         val strip = transformedRegion(page, ordered, isV, cfg.textHeight, bicubic) ?: return
         if (cfg.ignoreBubble in 1..50 && isIgnore(strip, cfg.ignoreBubble)) {
-            strip.recycle()  // 彩色/非氣泡 SFX 類文字 → 跳過
+            strip.recycle()  // Colored / non-bubble SFX text -> skip
             return
         }
         try {
             stripToTensor(strip).use { input ->
                 session.run(mapOf(inputName to input)).use { res ->
                     val logits = res.get(OUT_LOGITS).orElseThrow {
-                        IllegalStateException("缺輸出 $OUT_LOGITS")
+                        IllegalStateException("Missing output $OUT_LOGITS")
                     } as OnnxTensor
                     val (text, prob) = ctcDecode(logits)
-                    if (prob >= cfg.minProb) line.text = text  // 低信心誤讀 → 丟
+                    if (prob >= cfg.minProb) line.text = text  // Low-confidence misread -> discard
                 }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "OCR 單行失敗：${t.message}")
+            Log.w(TAG, "OCR single-line failed: ${t.message}")
         } finally {
             strip.recycle()
         }
@@ -139,6 +139,7 @@ class Ocr(
     }
 
     /** Aligned with generic.py:sort_pnts — return sorted 4 points and whether vertical. */
+    private fun sortPnts(quad: List<Pt>): Pair<List<Pt>, Boolean> {
         val n = quad.size
         var best0 = 0
         var best1 = 0
@@ -313,7 +314,7 @@ class Ocr(
         val amount = 1.6f
         val k0 = 0.3434f
         val k1 = 0.2428f
-        val k2 = 0.0855f // Gaussian σ≈1.2 正規化 5-tap（中心/±1/±2）
+        val k2 = 0.0855f // Gaussian sigma~1.2 normalized 5-tap (center/ +-1/ +-2)
         for (shift in intArrayOf(16, 8, 0)) { // R, G, B each sharpened (text mostly grayscale, but colored SFX also handled)
             val ch = FloatArray(n)
             for (i in 0 until n) ch[i] = ((px[i] shr shift) and 0xFF).toFloat()

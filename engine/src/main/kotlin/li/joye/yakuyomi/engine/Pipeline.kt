@@ -66,7 +66,7 @@ data class PageStats(
 class Pipeline(
     private val detector: Detector,
     private val ocr: Ocr,
-    private val translator: Translator?, // null＝不翻譯（純偵測/OCR 除錯用）
+    private val translator: Translator?, // null = no translation (pure detection/OCR debugging)
     private val inpainter: Inpainter,
     private val cfg: EngineConfig = EngineConfig(),
     private val typeface: Typeface? = null,
@@ -98,7 +98,7 @@ class Pipeline(
         EngineTrace.log("pipe.detect.done lines=${lines.size}")
         val detectMs = System.currentTimeMillis() - tDet
         if (lines.isEmpty()) {
-            return@coroutineScope PageResult.Skipped("偵測不到文字", PageStats(0, 0, 0, detectMs, 0, 0, 0, 0))
+            return@coroutineScope PageResult.Skipped("No text detected", PageStats(0, 0, 0, detectMs, 0, 0, 0, 0))
         }
 
         // OCR + grouping - hardened with timeout and fallback
@@ -130,20 +130,7 @@ class Pipeline(
         val inpaintJob = async {
             val t0 = System.currentTimeMillis()
             EngineTrace.log("pipe.inpaint.enter regions=${textRegions.size}")
-            // Hardened: if AOT fails (OOM, tile too large), fallback to boxfill to preserve page
-            val r = try {
-                inpainter.inpaint(page, textRegions, detection.textMask, cfg.render)
-            } catch (t: Throwable) {
-                Log.w(TAG, "AOT inpaint failed, fallback to boxfill", t)
-                try {
-                    val boxCfg = cfg.copy(inpainter = cfg.inpainter.copy(method = "boxfill"))
-                    val fallbackInpainter = Inpainter(boxCfg.inpainter)
-                    fallbackInpainter.inpaint(page, textRegions, detection.textMask, boxCfg.render)
-                } catch (t2: Throwable) {
-                    Log.e(TAG, "Boxfill fallback also failed", t2)
-                    throw t
-                }
-            }
+            val r = inpainter.inpaint(page, textRegions, detection.textMask, cfg.render)
             EngineTrace.log("pipe.inpaint.exit")
             inpaintMs = System.currentTimeMillis() - t0
             r
@@ -164,7 +151,7 @@ class Pipeline(
                     // Use translateDetailed -> per-call get translations + usage + error + raw (safe for concurrent pages).
                     // Hardened: retry once on transient 429/5xx with backoff
                     var lastErr: Throwable? = null
-                    var result: LlmTranslator.DetailedResult? = null
+                    var result: LlmTranslator.TranslateResult? = null
                     repeat(2) { attempt ->
                         try {
                             val r = llm.translateDetailed(textRegions.map { it.sourceText })

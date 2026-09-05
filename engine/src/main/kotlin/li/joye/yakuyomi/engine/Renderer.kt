@@ -50,9 +50,9 @@ object Renderer {
                 TextOrientation.VERTICAL -> true
                 TextOrientation.HORIZONTAL -> false
             }
-            // 斜框：繞區域中心旋轉畫布、用去傾斜框排版。
-            // 旋轉方向經 PCA 量測對齊 m-i-t 樣本：region 正角＝文字右端下斜。
-            // Android Canvas 正角＝順時針（y 朝下）＝右端下斜 → 直接 +angle（parity 用 PIL、正角逆時針故取 -angle）。
+            // Skewed box: rotate canvas around region center, typeset in de-skewed box.
+            // Rotation direction measured via PCA to align with m-i-t samples: positive angle = text right end slopes down.
+            // Android Canvas positive angle = clockwise (y down) = right end slopes down -> directly +angle (parity uses PIL, positive is counter-clockwise so uses -angle).
             val rotate = abs(region.angle) >= 1f
             val x0: Float; val y0: Float; val x1: Float; val y1: Float
             if (rotate) {
@@ -62,7 +62,7 @@ object Renderer {
             } else {
                 x0 = region.x0; y0 = region.y0; x1 = region.x1; y1 = region.y1
             }
-            // 譯文字級錨定原文高度：短譯文不脹到 fontSizeMax、長譯文不縮到小於原文太多（保持「翻譯前後字一樣大」）。
+            // Translation font size anchored to original height: short translations do not inflate to fontSizeMax, long ones do not shrink far below original (keep "same size before/after translation").
             val originalSize = originalFontSize(region)
             if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize)
             else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize)
@@ -185,9 +185,9 @@ object Renderer {
                 var j = i + 1
                 while (j < n && isTcyChar(chars[j])) j++
                 if (j - i in 2..MAX_TCY) {
-                    cells.add(chars.substring(i, j))                       // 一個縱中橫格
+                    cells.add(chars.substring(i, j))                       // One tate-chu-yoko cell
                 } else {
-                    for (k in i until j) cells.add(chars[k].toString())   // 單字或過長：逐字（維持原行為）
+                    for (k in i until j) cells.add(chars[k].toString())   // Single char or too long: char-by-char (keep original behavior)
                 }
                 i = j
             } else {
@@ -201,6 +201,7 @@ object Renderer {
         c in '0'..'9' || c in 'A'..'Z' || c in 'a'..'z' || c == '!' || c == '?'
 
     /** Vertical column split + line-start kinsoku: forbidden start chars (single punctuation) should not start a column, merge back to previous column (max +2 to avoid explosion). */
+    private fun splitColumnsV(cells: List<String>, cpc: Int): List<List<String>> {
         val cols = ArrayList<List<String>>()
         var i = 0
         val n = cells.size
@@ -229,10 +230,10 @@ object Renderer {
         canvas.restore()
     }
 
-    /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。直式原文的狹長框改旋轉 90° 排版，讓譯文沿長軸填滿（不再縮成一條直排柱）。壓在畫面上的自由文字（onArt）一律不轉：跟著偵測方向排，避免水平原文被轉成側躺。 */
+    /** Horizontal: rows top->bottom, chars left->right, top-aligned; size fills enlarged text box. Portrait narrow box from vertical source is rotated 90 degrees so translation fills along long axis (no longer shrunk into a vertical pillar). Free-floating text on art (onArt) never rotates: follow detection direction to avoid horizontal source turned sideways. */
     private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
-        // 對於非CJK英文，即使是直式原文的狹長氣泡也不應無條件旋轉 — 保持水平可讀性。
-        // 只有當氣泡極度狹長（高寬比>2.5）且非onArt時才考慮旋轉，否則保持水平排版避免破壞文字框。
+        // For non-CJK English, even a tall narrow bubble from vertical source should not unconditionally rotate — keep horizontal readability.
+        // Only consider rotation when bubble is extremely tall (aspect >2.5) and not onArt, otherwise keep horizontal to avoid breaking text box.
         val aspect = if ((x1 - x0) > 1f) (y1 - y0) / (x1 - x0) else 1f
         val portrait = !onArt && aspect > 2.5f && !isCjk(text)
         val wrapW = if (portrait) (y1 - y0) else (x1 - x0)
@@ -245,7 +246,7 @@ object Renderer {
         var s = min(rowRoom.toInt(), cap)
         while (s >= cfg.fontSizeMin) {
             fill.textSize = s.toFloat()
-            // 窄框保護：rowTrim 對窄框不應過度扣除，否則可用寬度過小導致單詞級 mid-word 斷裂
+            // Narrow-box protection: rowTrim should not over-deduct for narrow boxes, otherwise usable width becomes too small and causes mid-word breakage
             val trimW = if (bw < s * 8) cfg.rowTrim * s * 0.3f else cfg.rowTrim * s
             val ls = wrapCjk(text, fill, (bw - trimW).coerceAtLeast(s * 2f))
             val maxW = ls.maxOfOrNull { fill.measureText(it) } ?: 0f
@@ -259,12 +260,12 @@ object Renderer {
         lines = wrapCjk(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f))
         val lh = size * 1.18f
         if (portrait) {
-            // 直式框：繞框心旋轉 90°（順時針），譯文沿長軸橫排、由上往下讀，填滿氣泡長邊。
+            // Portrait box: rotate 90 degrees around center (clockwise), translation laid horizontally along long axis, top-to-bottom, fills bubble length.
             canvas.save()
             canvas.rotate(90f, (x0 + x1) / 2f, (y0 + y1) / 2f)
         }
         val tcx = (x0 + x1) / 2f
-        var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT  // 垂直置中於框
+        var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT  // Vertically centered in box
         for (ln in lines) {
             val tx = tcx - fill.measureText(ln) / 2f
             if (cfg.fontBorder) canvas.drawText(ln, tx, baseline, stroke)
@@ -324,9 +325,9 @@ object Renderer {
     }
 
     private const val ASCENT = 0.82f
-    private const val STROKE_RATIO = 0.10f  // 描邊寬＝字級×此比例（隨字級縮放）
-    private const val MAX_TCY = 4  // 縱中橫一格最多併幾個 ASCII（涵蓋 2 位數年齡、4 位數年份；更長退回逐字避免壓太扁）
+    private const val STROKE_RATIO = 0.10f  // Stroke width = font size * this ratio (scales with size)
+    private const val MAX_TCY = 4  // Max ASCII chars merged into one tate-chu-yoko cell (covers 2-digit age, 4-digit year; longer falls back to char-by-char to avoid over-compression)
     private const val ROTATE_CHARS = "ー－—―‐~〜～…‥（）()「」『』【】〔〕［］｛｝〈〉《》＜＞<>｜|：;"
-    // 行頭禁則：不可置於欄/行開頭（收尾標點、小假名）→ 併回前一欄/行（kinsoku）
+    // Line-start kinsoku: must not appear at column/line start (closing punctuation, small kana) -> merge back to previous column/line (kinsoku)
     private const val NO_START = "、。，．：；！？”’）〕】｝」』》〉…‥ーゝゞヽヾ々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ"
 }

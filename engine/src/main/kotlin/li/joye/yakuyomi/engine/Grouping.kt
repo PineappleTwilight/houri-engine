@@ -133,7 +133,7 @@ object Grouping {
         a: GQuad, b: GQuad,
         ratio: Float = 1.9f,
         discardConnectionGap: Float = 2f,
-        charGapTolerance: Float = 1f,       // m-i-t merge_bboxes 傳入值
+        charGapTolerance: Float = 1f,       // m-i-t merge_bboxes passed value
         charGapTolerance2: Float = 3f,
         fontSizeRatioTol: Float = 2f,
         aspectRatioTol: Float = 1.3f,
@@ -313,6 +313,7 @@ private class GQuad(val line: TextLine) {
 }
 
 /** sort_pnts: determine vertical/horizontal by long edge vector and order 4 points as [top-left, top-right, bottom-right, bottom-left]. Aligned with generic.py:sort_pnts. */
+private fun sortPnts(quad: List<Pt>): Pair<List<Pt>, Boolean> {
     val n = quad.size
     val norms = FloatArray(n * n)
     for (i in 0 until n) for (j in 0 until n) {

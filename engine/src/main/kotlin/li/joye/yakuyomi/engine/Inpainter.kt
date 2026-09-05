@@ -23,7 +23,7 @@ class Inpainter(
 ) : AutoCloseable {
 
     private var ncnnHandle: Long = 0L
-    /** 實際生效的後端；無 adb 時由呼叫端寫進 log/圖確認。 */
+    /** Actual backend in effect; without adb caller verifies via log/image. */
     val ep: String = "NCNN-CPU"
 
     init {

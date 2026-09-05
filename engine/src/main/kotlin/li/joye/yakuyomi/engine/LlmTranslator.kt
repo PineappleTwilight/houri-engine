@@ -199,8 +199,8 @@ class LlmTranslator(
 
     companion object {
         private const val TAG = "LlmTranslator"
-        // 寬鬆解析：DeepSeek 偶爾吐格式變體（實測 <|1>| 管線跑到 > 後面、或 <|1>）。
-        // 只認「<、可選|、數字、一串 |/>、譯文」⇒ 容 <|1|> / <|1>| / <|1>，非決定性格式錯不再整頁失敗。
+        // Lenient parsing: DeepSeek occasionally emits format variants (observed <|1>| pipeline runs past >, or <|1>).
+        // Only match "<, optional |, digits, sequence |/>, translation" => accept <|1|> / <|1>| / <|1>, non-deterministic format errors no longer fail whole page.
         private val LINE_RE = Regex("""^<\|?(\d+)\s*[|>]+\s*(.*)$""")
         private val THINK_RE = Regex("""(</think>)?<think>.*?</think>""", RegexOption.DOT_MATCHES_ALL)
 
