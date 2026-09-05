@@ -236,6 +236,8 @@ class Pipeline(
             }
         }
         // Failed regions (not in kept) -> revert translation to source = re-paste OCR Japanese after inpaint (TextRegion has no equals override -> HashSet uses identity).
+        val keptSet = kept.toHashSet()
+        textRegions.forEach { if (it !in keptSet) it.translatedText = it.sourceText }
 
         // Wait for inpaint to complete (mostly already overlapped with translation)
         EngineTrace.log("pipe.inpaint.await")
