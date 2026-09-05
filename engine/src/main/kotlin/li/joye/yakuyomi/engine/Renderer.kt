@@ -147,20 +147,35 @@ object Renderer {
             s--
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // Overall shrink, more fit
+        // Emergency fit: if even min size overflows width, try shrinking below min down to 7 px rather than
+        // overflowing the bubble. This only triggers for very long translations in a tiny box.
+        var cpc = maxOf(1, (colRoom / (size * 1.05f)).toInt() - cfg.colTrim)
+        var columns = splitColumnsV(cells, cpc)
+        var cwTry = size * 1.1f
+        if (columns.size * cwTry > bw) {
+            for (emergency in (size - 1) downTo 7) {
+                val lhE = emergency * 1.05f; val cwE = emergency * 1.1f
+                val cpcE = maxOf(1, (colRoom / lhE).toInt() - cfg.colTrim)
+                val colsE = splitColumnsV(cells, cpcE)
+                if (colsE.size * cwE <= bw) {
+                    size = emergency
+                    break
+                }
+            }
+        }
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
         stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // Outline scales with font size; onArt uses thicker outline
         val lh = size * 1.05f; val cw = size * 1.1f
-        val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
-        val columns = splitColumnsV(cells, cpc)       // Kinsoku: columns should not start with forbidden starting chars
-        val cols = columns.size
+        cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
+        val columnsFinal = splitColumnsV(cells, cpc)
+        val cols = columnsFinal.size
         val tcx = (x0 + x1) / 2f                  // Position: horizontally centered at text box center
         val rightCx = tcx + cols * cw / 2f - cw / 2f
-        val blockH = columns.maxOf { it.size } * lh // Vertically centered: use longest column cell count as block height, centered in box
-        val startCy = (y0 + y1) / 2f - blockH / 2f
+        val blockH = columnsFinal.maxOf { it.size } * lh // Vertically centered: use longest column cell count as block height, centered in box
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
             var cy = startCy
-            for (cell in columns[col]) {
+            for (cell in columnsFinal[col]) {
                 if (cell.length == 1) {
                     drawCharVertical(canvas, cell[0], cx, cy + lh / 2f, fill, stroke, cfg.fontBorder)
                 } else {
@@ -258,7 +273,23 @@ object Renderer {
         stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))
         val finalTrim = if (bw < size * 8f) cfg.rowTrim * size * 0.3f else cfg.rowTrim * size.toFloat()
         lines = wrapCjk(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f))
-        val lh = size * 1.18f
+        var lh = size * 1.18f
+        if (lines.size * lh > rowRoom || lines.any { fill.measureText(it) > bw }) {
+            for (emergency in (size - 1) downTo 7) {
+                fill.textSize = emergency.toFloat()
+                val trimE = if (bw < emergency * 8f) cfg.rowTrim * emergency * 0.3f else cfg.rowTrim * emergency.toFloat()
+                val cand = wrapCjk(text, fill, (bw - trimE).coerceAtLeast(emergency * 2f))
+                val maxW = cand.maxOfOrNull { fill.measureText(it) } ?: 0f
+                if (cand.size * emergency * 1.18f <= rowRoom && maxW <= bw) {
+                    size = emergency
+                    lines = cand
+                    lh = size * 1.18f
+                    fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
+                    stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))
+                    break
+                }
+            }
+        }
         if (portrait) {
             // Portrait box: rotate 90 degrees around center (clockwise), translation laid horizontally along long axis, top-to-bottom, fills bubble length.
             canvas.save()

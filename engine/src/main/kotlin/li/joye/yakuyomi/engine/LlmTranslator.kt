@@ -167,8 +167,16 @@ class LlmTranslator(
                     val usage = obj.optJSONObject("usage")?.let { u ->
                         Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
                     }
-                    val content = obj.getJSONArray("choices").getJSONObject(0)
-                        .getJSONObject("message").getString("content")
+                    val msgObj = obj.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                    var content = msgObj.optString("content", "")
+                    if (content.isBlank()) content = msgObj.optString("reasoning_content", "")
+                    if (content.isBlank()) content = msgObj.optString("reasoning", "")
+                    // Strip markdown fences that some providers wrap around the translation block
+                    content = content.trim()
+                        .removePrefix("```")
+                        .removeSuffix("```")
+                        .trim()
+                    if (content.isBlank()) throw RuntimeException("Empty content from provider")
                     return@withContext content to usage
                 }
             } catch (t: Throwable) {
@@ -188,11 +196,16 @@ class LlmTranslator(
     }
 
     private fun parse(raw: String): Map<Int, String> {
-        val cleaned = THINK_RE.replace(raw, "")
+        var cleaned = THINK_RE.replace(raw, "")
+        cleaned = cleaned.replace(Regex("```[a-z]*"), "").replace("```", "")
         val map = HashMap<Int, String>()
         for (line in cleaned.lineSequence()) {
-            val m = LINE_RE.find(line.trim()) ?: continue
-            map[m.groupValues[1].toInt()] = m.groupValues[2].trim()
+            val t = line.trim()
+            if (t.isEmpty()) continue
+            val m = LINE_RE.find(t) ?: continue
+            val id = m.groupValues[1].toIntOrNull() ?: continue
+            if (id <= 0 || id > 500) continue
+            map[id] = m.groupValues[2].trim()
         }
         return map
     }

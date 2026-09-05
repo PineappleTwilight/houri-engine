@@ -71,10 +71,22 @@ class Detector(
         // db ch0 = raw logits -> sigmoid -> prob (ctd out0 already sigmoid, DBNet not); grid = rectangle inW x inH
         val prob = FloatArray(area)
         for (i in 0 until area) prob[i] = 1f / (1f + exp(-db[i]))
-        val lines = linesFromProbMap(
+        var lines = linesFromProbMap(
             prob, inW, inH, pre.ratio, page.width, page.height,
             cfg.dbBinThreshold, cfg.dbBoxThreshold, cfg.dbUnclipRatio,
         )
+        if (lines.isEmpty() && cfg.dbBoxThreshold > 0.55f) {
+            val retry = linesFromProbMap(
+                prob, inW, inH, pre.ratio, page.width, page.height,
+                (cfg.dbBinThreshold - 0.05f).coerceAtLeast(0.35f),
+                (cfg.dbBoxThreshold - 0.15f).coerceAtLeast(0.5f),
+                cfg.dbUnclipRatio,
+            )
+            if (retry.isNotEmpty()) {
+                Log.i(TAG, "Detector fallback rescued ${retry.size} lines (relaxed thresholds)")
+                lines = retry
+            }
+        }
         // mask (already sigmoid) -> original-size stroke mask. mask space ratio = pre.ratio * mw/inW (half-res=ratio/2, full-res=ratio, dynamic).
         val textMask = segToMask(mask, mw, mh, pre.ratio * mw.toFloat() / inW, page.width, page.height)
         Log.i(TAG, "DBNet detected ${lines.size} lines (in ${inW}x$inH mask ${mw}x$mh)")

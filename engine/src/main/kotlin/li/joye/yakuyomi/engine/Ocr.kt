@@ -380,12 +380,17 @@ class Ocr(
 
     /** Greedy CTC (blank=0, collapse repeats) + average confidence, aligned with decode_ctc_top1. Returns (text, prob). */
     private fun ctcDecodeArr(arr: FloatArray, t: Int, d: Int): Pair<String, Float> {
+        if (dictionary.isEmpty() || t <= 0 || d <= 0) return "" to 0f
+        if (arr.size < t * d) return "" to 0f
+        if (d != dictionary.size) Log.w(TAG, "CTC dict size mismatch: logits d=$d vs dict ${dictionary.size}")
+        val dictSize = dictionary.size
         val sb = StringBuilder()
         var last = BLANK
         var logpSum = 0.0
         var nChars = 0
         for (ti in 0 until t) {
             val base = ti * d
+            if (base + d > arr.size) break
             var best = 0
             var bestV = arr[base]
             for (c in 1 until d) {
@@ -393,17 +398,20 @@ class Ocr(
                 if (v > bestV) { bestV = v; best = c }
             }
             if (best != last && best != BLANK) {
-                val ch = dictionary[best]
-                sb.append(if (ch == "<SP>") " " else ch)
-                // Top-1 log_softmax = bestV - logsumexp(row) = -ln(sum exp(x-bestV))
-                var s = 0.0
-                for (c in 0 until d) s += Math.exp((arr[base + c] - bestV).toDouble())
-                logpSum += -Math.log(s)
-                nChars++
+                if (best >= dictSize) {
+                    Log.w(TAG, "CTC best id $best out of dict bounds $dictSize, skipping")
+                } else {
+                    val ch = dictionary[best]
+                    sb.append(if (ch == "<SP>") " " else ch)
+                    var s = 0.0
+                    for (c in 0 until d) s += Math.exp((arr[base + c] - bestV).toDouble())
+                    logpSum += -Math.log(s)
+                    nChars++
+                }
             }
             last = best
         }
-        val prob = if (nChars > 0) Math.exp(logpSum / nChars).toFloat() else 0f
+        val prob = if (nChars > 0) Math.exp(logpSum / nChars).toFloat().coerceIn(0f, 1f) else 0f
         return sb.toString() to prob
     }
 

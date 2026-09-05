@@ -69,9 +69,17 @@ class Inpainter(
         regions.forEach { it.onArt = true }
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
-        // Hardened: if AOT fails, keep boxfill result instead of destroying original
         val aotResult = try { runWholeAot(page, maskBmp, w, h) } catch (t: Throwable) { Log.w(TAG, "AOT failed, keeping boxfill fallback", t); null }
-        aotResult?.let { compositePixels(result, maskPx, it) }
+        if (aotResult != null) {
+            compositePixels(result, maskPx, aotResult)
+        } else {
+            val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
+            val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
+            for (r in regions) {
+                val s = bgStats(px, tightPx, r, w, h)
+                flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
+            }
+        }
         maskBmp.recycle()
         result
     }

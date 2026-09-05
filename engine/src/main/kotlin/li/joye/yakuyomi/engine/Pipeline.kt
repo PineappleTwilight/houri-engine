@@ -146,46 +146,63 @@ class Pipeline(
             val tTr = System.currentTimeMillis()
             EngineTrace.log("pipe.translate.enter n=${textRegions.size}")
             val cht = try {
-                val llm = translator as? LlmTranslator
-                if (llm != null) {
-                    // Use translateDetailed -> per-call get translations + usage + error + raw (safe for concurrent pages).
-                    // Hardened: retry once on transient 429/5xx with backoff
-                    var lastErr: Throwable? = null
-                    var result: LlmTranslator.TranslateResult? = null
-                    repeat(2) { attempt ->
-                        try {
-                            val r = llm.translateDetailed(textRegions.map { it.sourceText })
-                            result = r
-                            return@repeat
-                        } catch (t: Throwable) {
-                            lastErr = t
-                            val msg = t.message ?: ""
-                            val isTransient = msg.contains("429") || msg.contains("503") || msg.contains("timeout", true)
-                            if (isTransient && attempt == 0) {
-                                kotlinx.coroutines.delay(800)
-                            } else throw t
+                // Dense pages (many bubbles or long text) hit provider token limits -> split into smaller
+                // requests. Each chunk keeps its own retry and token accounting, then merged in order.
+                val chunks = chunkByChars(textRegions, maxPerChunk = 22, maxCharsPerChunk = 2800)
+                val merged = mutableListOf<String>()
+                var anyError: String? = null
+                var anyRaw: String? = null
+                for (chunk in chunks) {
+                    val sources = chunk.map { it.sourceText }
+                    val llm = translator as? LlmTranslator
+                    val chunkTranslations: List<String> = if (llm != null) {
+                        var lastErr: Throwable? = null
+                        var result: LlmTranslator.TranslateResult? = null
+                        repeat(2) { attempt ->
+                            try {
+                                val r = llm.translateDetailed(sources)
+                                result = r
+                                return@repeat
+                            } catch (t: Throwable) {
+                                lastErr = t
+                                val msg = t.message ?: ""
+                                val isTransient = msg.contains("429") || msg.contains("503") || msg.contains("timeout", true)
+                                if (isTransient && attempt == 0) {
+                                    kotlinx.coroutines.delay(800)
+                                } else throw t
+                            }
                         }
-                    }
-                    val r = result ?: throw lastErr ?: IllegalStateException("translation failed")
-                    r.usage?.let { promptTok = it.promptTokens; completionTok = it.completionTokens }
-                    llmError = r.error
-                    llmRaw = r.raw
-                    r.translations
-                } else {
-                    // Hardened: also retry for plain Translator
-                    var lastErr: Throwable? = null
-                    var res: List<String>? = null
-                    repeat(2) { attempt ->
-                        try {
-                            res = translator.translate(textRegions.map { it.sourceText })
-                            return@repeat
-                        } catch (t: Throwable) {
-                            lastErr = t
-                            if (attempt == 0) kotlinx.coroutines.delay(500) else throw t
+                        val r = result ?: throw lastErr ?: IllegalStateException("translation failed")
+                        r.usage?.let { promptTok += it.promptTokens; completionTok += it.completionTokens }
+                        if (r.error != null) anyError = r.error
+                        if (r.raw != null) anyRaw = r.raw
+                        r.translations
+                    } else {
+                        var lastErr: Throwable? = null
+                        var res: List<String>? = null
+                        repeat(2) { attempt ->
+                            try {
+                                res = translator.translate(sources)
+                                return@repeat
+                            } catch (t: Throwable) {
+                                lastErr = t
+                                if (attempt == 0) kotlinx.coroutines.delay(500) else throw t
+                            }
                         }
+                        res ?: throw lastErr!!
                     }
-                    res ?: throw lastErr!!
+                    // Hallucination guard per chunk: drop absurd expansions (>4x source length and >60 chars)
+                    // and fall back to source for that region only — prevents a single bad line breaking layout.
+                    for (i in chunkTranslations.indices) {
+                        val src = sources.getOrNull(i) ?: ""
+                        var tr = chunkTranslations.getOrNull(i) ?: src
+                        if (tr.length > src.length * 4 + 20 && tr.length > 60) tr = src
+                        merged.add(tr)
+                    }
                 }
+                llmError = anyError
+                llmRaw = anyRaw
+                merged
             } catch (t: Throwable) {
                 Log.e(TAG, "Translation failed", t)
                 inpaintJob.cancelAndJoin() // Translation failed -> discard inpaint, keep original ( §11; native run cannot be interrupted, cancel actually waits then discards)
@@ -267,6 +284,29 @@ class Pipeline(
         EngineTrace.log("warmup.inpainter.enter")
         runCatching { inpainter.warmUp() }
         EngineTrace.log("warmup.done")
+    }
+
+    private fun chunkByChars(
+        regions: List<TextRegion>,
+        maxPerChunk: Int,
+        maxCharsPerChunk: Int,
+    ): List<List<TextRegion>> {
+        if (regions.size <= maxPerChunk && regions.sumOf { it.sourceText.length } <= maxCharsPerChunk) return listOf(regions)
+        val out = mutableListOf<List<TextRegion>>()
+        var cur = mutableListOf<TextRegion>()
+        var curChars = 0
+        for (r in regions) {
+            val len = r.sourceText.length
+            if (cur.isNotEmpty() && (cur.size >= maxPerChunk || curChars + len > maxCharsPerChunk)) {
+                out.add(cur)
+                cur = mutableListOf()
+                curChars = 0
+            }
+            cur.add(r)
+            curChars += len
+        }
+        if (cur.isNotEmpty()) out.add(cur)
+        return out
     }
 
     /** Release native ONNX sessions of detector/ocr/inpainter (see class lifecycle notes). */
