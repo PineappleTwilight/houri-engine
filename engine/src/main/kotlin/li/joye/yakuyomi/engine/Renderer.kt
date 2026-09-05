@@ -172,6 +172,7 @@ object Renderer {
         val tcx = (x0 + x1) / 2f                  // Position: horizontally centered at text box center
         val rightCx = tcx + cols * cw / 2f - cw / 2f
         val blockH = columnsFinal.maxOf { it.size } * lh // Vertically centered: use longest column cell count as block height, centered in box
+        val startCy = (y0 + y1) / 2f - blockH / 2f
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
             var cy = startCy
