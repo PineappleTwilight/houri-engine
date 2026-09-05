@@ -247,7 +247,7 @@ object Renderer {
         while (s >= cfg.fontSizeMin) {
             fill.textSize = s.toFloat()
             // Narrow-box protection: rowTrim should not over-deduct for narrow boxes, otherwise usable width becomes too small and causes mid-word breakage
-            val trimW = if (bw < s * 8) cfg.rowTrim * s * 0.3f else cfg.rowTrim * s
+            val trimW = if (bw < s * 8f) cfg.rowTrim * s * 0.3f else cfg.rowTrim * s.toFloat()
             val ls = wrapCjk(text, fill, (bw - trimW).coerceAtLeast(s * 2f))
             val maxW = ls.maxOfOrNull { fill.measureText(it) } ?: 0f
             if (ls.size * s * 1.18f <= rowRoom && maxW <= bw) { size = s; lines = ls; break }
@@ -256,7 +256,7 @@ object Renderer {
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
         stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))
-        val finalTrim = if (bw < size * 8) cfg.rowTrim * size * 0.3f else cfg.rowTrim * size
+        val finalTrim = if (bw < size * 8f) cfg.rowTrim * size * 0.3f else cfg.rowTrim * size.toFloat()
         lines = wrapCjk(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f))
         val lh = size * 1.18f
         if (portrait) {
