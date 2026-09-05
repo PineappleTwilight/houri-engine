@@ -7,12 +7,12 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * DBNet 文字行偵測器（m-i-t default detector，ResNet34+DB head；純 NCNN，產品 arm64 NCNN 必在）。
- * 讀對率贏退役的 comic-text-detector 1.6–2.5×（真機定案，見 memory dbnet-detector-ncnn）。
+ * DBNet text line detector (m-i-t default detector, ResNet34+DB head; pure NCNN, product arm64 NCNN required).
+ * 1.6-2.5x more correct reads than retired comic-text-detector (proven on device, see memory dbnet-detector-ncnn).
  *
- * ported from manga_translator/detection/default_utils/ @ d5a3eee
- *   db logits → sigmoid → 二值化 → 連通元件 → minAreaRect → unclip 膨脹 → 旋轉四邊形。
- * 參數由 [DetectorConfig] 提供（§5 第一層）。
+ * Ported from manga_translator/detection/default_utils/ @ d5a3eee
+ *   db logits -> sigmoid -> binarize -> connected components -> minAreaRect -> unclip expansion -> rotated quadrilateral.
+ * Parameters provided by [DetectorConfig] (§5 first layer).
  */
 class Detector(
     modelPath: String,
@@ -20,72 +20,86 @@ class Detector(
 ) : AutoCloseable {
 
     private var ncnnHandle: Long = 0L
-    /** 實際生效的後端；無 adb 時由呼叫端寫進 log/圖確認。 */
+    /** Actual backend in effect; when no adb, caller writes to log/image to confirm. */
     val ep: String = "NCNN-CPU"
 
     init {
-        check(modelPath.endsWith(".param")) { "偵測需 NCNN `.param` 模型：$modelPath" }
-        check(NcnnBackend.available) { "NCNN 原生庫未載入，無法偵測" }
+        check(modelPath.endsWith(".param")) { "Detection requires NCNN `.param` model: $modelPath" }
+        check(NcnnBackend.available) { "NCNN native library not loaded, cannot detect" }
         val bin = modelPath.removeSuffix(".param") + ".bin"
         ncnnHandle = NcnnBackend.createNet(modelPath, bin)
-        check(ncnnHandle != 0L) { "NCNN 偵測模型載入失敗：$modelPath" }
+        check(ncnnHandle != 0L) { "Failed to load NCNN detection model: $modelPath" }
         Log.i(TAG, "NCNN detector loaded $modelPath")
     }
 
     /**
-     * out0=db（2ch，ch0=raw logits→Kotlin 補 sigmoid）、out1=mask（1ch，半/全解析度平台不定、已 sigmoid）。
-     * 後處理＝[linesFromProbMap]（連通元件+minAreaRect+unclip；score=component-mean prob＝DB box_score_fast）。
+     * out0=db (2ch, ch0=raw logits -> Kotlin adds sigmoid), out1=mask (1ch, half/full-res varies by platform, already sigmoid).
+     * Post-processing = [linesFromProbMap] (connected components + minAreaRect + unclip; score=component-mean prob = DB box_score_fast).
      */
     fun detect(page: Bitmap): Detection {
-        val pre = ImageOps.detectorChwDbnet(page, cfg.dbnetInputSize, cfg.detectUnsharp)
+        // Hardened input validation - prevent destructive processing of invalid bitmaps
+        require(!page.isRecycled) { "Cannot detect on recycled bitmap" }
+        require(page.width in 32..8000 && page.height in 32..8000) { "Page size out of bounds ${page.width}x${page.height}" }
+        if (ncnnHandle == 0L) throw IllegalStateException("Detector native handle not initialized")
+        val pre = try {
+            ImageOps.detectorChwDbnet(page, cfg.dbnetInputSize, cfg.detectUnsharp)
+        } catch (t: Throwable) {
+            throw IllegalStateException("Failed to preprocess page for detection: ${t.message}", t)
+        }
         val inW = pre.w
         val inH = pre.h
+        require(inW in 32..2048 && inH in 32..2048) { "Preprocessed size out of bounds ${inW}x${inH}" }
         val area = inW * inH
+        require(area in 1..(2048 * 2048)) { "Area too large $area" }
         val db = FloatArray(2 * area)
-        // ★ mask 尺寸半/全解析平台不定（x86 半解析 inW/2×inH/2、arm64 實測全解析 inW×inH）→ 緩衝配全解析上限、實際尺寸由 rc 回。
+        // Mask size varies by platform (x86 half-res inW/2 x inH/2, arm64 full-res inW x inH) -> allocate full-res upper bound, actual size returned via rc.
         val mask = FloatArray(area)
-        val rc = NcnnBackend.detectDbnet(ncnnHandle, pre.chw, inW, inH, db, mask)
+        val rc = try {
+            NcnnBackend.detectDbnet(ncnnHandle, pre.chw, inW, inH, db, mask)
+        } catch (t: Throwable) {
+            throw IllegalStateException("NCNN DBNet forward failed: ${t.message}", t)
+        }
         check(rc > 0) {
             if (rc < 0) {
-                "DBNet 尺寸越界：實際 db.w=${(-rc) / 1000} mask.w=${(-rc) % 1000}（緩衝 db=2×${inW}×$inH、mask≤${inW}×$inH）"
+                "DBNet size mismatch: actual db.w=${(-rc) / 1000} mask.w=${(-rc) % 1000} (buffer db=2x${inW}x$inH, mask<=${inW}x$inH)"
             } else {
-                "NCNN DBNet forward 空輸出/失敗 rc=$rc"
+                "NCNN DBNet forward empty output/failed rc=$rc"
             }
         }
-        val mw = rc / 10000 // JNI 回 mask.w*10000+mask.h（實際 mask 尺寸，不假設半/全解析）
+        val mw = rc / 10000 // JNI returns mask.w*10000+mask.h (actual mask size, do not assume half/full res)
         val mh = rc % 10000
-        // db ch0 = raw logits → sigmoid → prob（ctd 的 out0 已 sigmoid、DBNet 沒有）；網格＝矩形 inW×inH
+        // db ch0 = raw logits -> sigmoid -> prob (ctd out0 already sigmoid, DBNet not); grid = rectangle inW x inH
         val prob = FloatArray(area)
         for (i in 0 until area) prob[i] = 1f / (1f + exp(-db[i]))
         val lines = linesFromProbMap(
             prob, inW, inH, pre.ratio, page.width, page.height,
             cfg.dbBinThreshold, cfg.dbBoxThreshold, cfg.dbUnclipRatio,
         )
-        // mask（已 sigmoid）→ 原圖尺寸筆畫遮罩。mask 空間 ratio = pre.ratio × mw/inW（半解析=ratio/2、全解析=ratio，動態）。
+        // mask (already sigmoid) -> original-size stroke mask. mask space ratio = pre.ratio * mw/inW (half-res=ratio/2, full-res=ratio, dynamic).
         val textMask = segToMask(mask, mw, mh, pre.ratio * mw.toFloat() / inW, page.width, page.height)
-        Log.i(TAG, "DBNet 偵測到 ${lines.size} 行（in ${inW}x$inH mask ${mw}x$mh）")
+        Log.i(TAG, "DBNet detected ${lines.size} lines (in ${inW}x$inH mask ${mw}x$mh)")
         return Detection(lines, textMask)
     }
 
     /**
-     * 暖機：對空白小圖跑一次偵測，讓 NCNN 偵測 session 的首次 lazy 初始化在單緒完成。
-     * 併發翻多頁前先呼叫一次（見 fork TranslationEngineService），避免多頁同時打進未初始化的 session → 原生 crash。
+     * Warmup: run detection once on a blank small image to complete first lazy initialization of NCNN detection session on a single thread.
+     * Call once before concurrent multi-page translation (see fork TranslationEngineService) to avoid multiple pages hitting uninitialized session simultaneously -> native crash.
      */
     fun warmUp() {
         val blank = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
         try {
             detect(blank).textMask.recycle()
         } catch (t: Throwable) {
-            Log.w(TAG, "偵測暖機失敗：${t.message}")
+            Log.w(TAG, "Detection warmup failed: ${t.message}")
         } finally {
             blank.recycle()
         }
     }
 
     /**
-     * seg 還原成原圖尺寸的二值文字遮罩。前處理＝圖貼左上、pad 右下（ImageOps.detectorChwDbnet），
-     * 故有效區＝seg[0:nh, 0:nw]（nw=round(origW*ratio)、nh=round(origH*ratio)）→ 縮回原圖 → 門檻。
-     * 對齊 parity/seg_validate.py（裁 pad → cv2.resize 雙線性 → >segThreshold）。
+     * Restore seg to original-size binary text mask. Preprocessing = image pasted top-left, pad bottom-right (ImageOps.detectorChwDbnet),
+     * so valid area = seg[0:nh, 0:nw] (nw=round(origW*ratio), nh=round(origH*ratio)) -> scale back to original -> threshold.
+     * Aligned with parity/seg_validate.py (crop pad -> cv2.resize bilinear -> >segThreshold).
      */
     private fun segToMask(
         s: FloatArray,
@@ -97,7 +111,7 @@ class Detector(
     ): Bitmap {
         val nw = (origW * ratio).roundToInt().coerceIn(1, srcW)
         val nh = (origH * ratio).roundToInt().coerceIn(1, srcH)
-        // 有效區轉灰階小圖
+        // Valid area to grayscale small image
         val gray = IntArray(nw * nh)
         for (y in 0 until nh) {
             val srow = y * srcW
@@ -108,11 +122,11 @@ class Detector(
             }
         }
         val small = Bitmap.createBitmap(gray, nw, nh, Bitmap.Config.ARGB_8888)
-        val scaled = Bitmap.createScaledBitmap(small, origW, origH, true) // 雙線性，比照 cv2.resize
-        // ★ createScaledBitmap 在「目標尺寸＝來源尺寸」時回傳同一物件（scaled === small）→ 不可先 recycle small，
-        //   否則等於把 scaled 也 recycle 掉、下面 getPixels 會崩（"getPixels on a recycled bitmap"）。
-        //   觸發條件：頁尺寸使 r=min(size/h,size/w)=1.0（如 720×1024、size=1024）→ nw,nh==origW,origH。
-        //   故：先 getPixels，再「只在 scaled 為不同物件時」recycle 它，最後一律 recycle small。
+        val scaled = Bitmap.createScaledBitmap(small, origW, origH, true) // Bilinear, matching cv2.resize
+        // createScaledBitmap returns same object when target size == source size (scaled === small) -> must not recycle small first,
+        // otherwise scaled is also recycled and getPixels below crashes ("getPixels on a recycled bitmap").
+        // Trigger: page size makes r=min(size/h,size/w)=1.0 (e.g., 720x1024, size=1024) -> nw,nh==origW,origH.
+        // So: getPixels first, then recycle scaled only if different object, finally always recycle small.
         val th = (cfg.segThreshold * 255f).toInt()
         val px = IntArray(origW * origH)
         scaled.getPixels(px, 0, origW, 0, 0, origW, origH)
@@ -215,5 +229,5 @@ class Detector(
     }
 }
 
-/** 偵測結果：文字行 ＋ 原圖尺寸的細筆畫文字遮罩（去字用，§去字升級）。 */
+/** Detection result: text lines + original-size fine stroke text mask (for inpainting, § inpaint upgrade). */
 class Detection(val lines: List<TextLine>, val textMask: Bitmap)

@@ -1,16 +1,16 @@
 package li.joye.yakuyomi.engine
 
 /**
- * 引擎參數（CLAUDE.md §5 Config：第一層 schema + 預設值）。
+ * Engine parameters (CLAUDE.md §5 Config: first-layer schema + defaults).
  *
- * 參考使用者的 m-i-t config_deepseek.json，但**預設值對齊本專案實際使用的模型**：
- *   偵測 = DBNet（m-i-t default 偵測器，ResNet34+DB head）
- *   OCR  = 48px CTC（非 48px 自回歸）
- *   去字 = AOT-GAN（m-i-t inpainting.ckpt，NCNN·整頁 768；LaMa 已退役）
- * 因此部分數值與該 config 的 default/48px 不同，差異處以註解標出。
+ * Referenced from user's m-i-t config_deepseek.json, but **defaults are aligned to the models actually used**:
+ *   detection = DBNet (m-i-t default detector, ResNet34+DB head)
+ *   OCR = 48px CTC (not 48px autoregressive)
+ *   inpainting = AOT-GAN (m-i-t inpainting.ckpt, NCNN whole-page 768; LaMa retired)
+ * Some values therefore differ from that config's default/48px, differences annotated.
  *
- * 設定粒度：§11 v1 全域。標〔設定〕者＝預期在設定頁開放調整（頻繁調，如直/橫排、provider/key/語言）；
- * 未標者＝預設，留可控空間（仍在此結構內），需要時可快速加進設定 UI。
+ * Granularity: §11 v1 global. Marked `[Settings]` = expected to be exposed in settings (frequently tuned, e.g., vertical/horizontal, provider/key/language);
+ * unmarked = default, keep tunable headroom (still inside this structure), can be added to settings UI quickly when needed.
  */
 data class EngineConfig(
     val detector: DetectorConfig = DetectorConfig(),
@@ -22,127 +22,116 @@ data class EngineConfig(
 
 data class DetectorConfig(
     val minSide: Float = 3f,
-    // seg 文字筆畫遮罩二值門檻（去字用）。★ 0.3 會濾掉漢字旁注音「假名」的弱訊號 → 去字留一排假名殘留。
-    // 降到 0.12＝偵測器其實看得到假名、只是 prob 弱（桌面 parity/auto_diag.py dev_furi3 實證）。只影響去字遮罩、不動偵測框/OCR。
+    // seg stroke mask binarization threshold (for inpainting). 0.3 filters weak furigana signals next to kanji → leaves a row of furigana after inpainting.
+    // Lowered to 0.12 = detector actually sees furigana but prob is weak (desktop parity/auto_diag.py dev_furi3). Only affects inpaint mask, not detection box/OCR.
     val segThreshold: Float = 0.12f,
-    // ── DBNet（m-i-t default 偵測器，本專案唯一偵測器）：ResNet34+DB head，讀對率贏退役的 ctd 1.6–2.5×（真機定案）──
-    //   out0=db（2ch，ch0=raw logits，Kotlin 補 sigmoid）、out1=mask（1ch，半/全解析度平台不定、已 sigmoid）。DB 後處理見 Detector.linesFromProbMap。
-    val dbnetInputSize: Int = 1024,       // DBNet 甜蜜點（真機 3頁×size×OCR 定案：@1024 字對率最高 + warm ~0.9s；@960 字糙、@1280+ 慢又字誤、@768 漏。resize_aspect → input canvas 768×1024、矩形繞開正方形 832-992 crash 帶）
-    val detectUnsharp: Boolean = false,   // 可選：偵測輸入銳利化（marginal + OOD；真機 demo06 A/B 定預設關）
-    val dbBinThreshold: Float = 0.5f,     // DB binarize：sigmoid(db ch0) > 此（m-i-t text_threshold=0.5）
-    val dbBoxThreshold: Float = 0.7f,     // DB score 過濾：component-mean prob < 此丟（m-i-t box_threshold=0.7）
-    val dbUnclipRatio: Float = 2.3f,      // DB unclip 膨脹（m-i-t unclip_ratio=2.3）
+    // DBNet (m-i-t default detector, sole detector in this project): ResNet34+DB head, 1.6-2.5x more correct reads than retired ctd (device-proven)
+    // out0=db (2ch, ch0=raw logits, Kotlin adds sigmoid), out1=mask (1ch, half/full-res depends on platform, already sigmoid). DB post-processing see Detector.linesFromProbMap.
+    val dbnetInputSize: Int = 1024,       // DBNet sweet spot (proven on device 3 pages x size x OCR: @1024 highest read rate + warm ~0.9s; @960 rough, @1280+ slow and misreads, @768 misses. resize_aspect -> input canvas 768x1024, rectangle avoids square 832-992 crash zone)
+    val detectUnsharp: Boolean = false,   // Optional: detection input sharpening (marginal + OOD; default off per demo06 A/B)
+    val dbBinThreshold: Float = 0.5f,     // DB binarize: sigmoid(db ch0) > this (m-i-t text_threshold=0.5)
+    val dbBoxThreshold: Float = 0.7f,     // DB score filter: component-mean prob < this dropped (m-i-t box_threshold=0.7)
+    val dbUnclipRatio: Float = 2.3f,      // DB unclip expansion (m-i-t unclip_ratio=2.3)
 )
 
 data class OcrConfig(
     val textHeight: Int = 48,         // 48px CTC
     val minTextLength: Int = 0,       // config.ocr.min_text_length
-    val ignoreBubble: Int = 0,        // 〔設定〕config.ocr.ignore_bubble：1–50 開啟，跳過彩色/非氣泡 SFX 類文字（預設 0＝關）
-    val minProb: Float = 0.5f,        // config.ocr.prob：OCR 平均信心 < 此值就丟（剃除低信心誤讀；m-i-t 預設 0.5）
-    // OCR 裁切前把偵測 quad 四邊各外擴 N px（RotRect.expand；只動 OCR 裁切、**不動偵測框** ⇒ 去字遮罩走 seg 筆畫不受影響）。
-    // 病根：偵測框太瘦把字切掉 → 48px CTC 空讀（model_48px_ctc 對 0 字元框在 prob 門檻前就丟）→ 該區被 Pipeline 的
-    // textRegions filter 濾掉 → 留原文不翻＝使用者看到的「漏氣泡」。桌面 16 頁實測：pad=4 讀出 345→398(+15%)、框數不變、
-    // 弄壞 9 vs 救回 350；006「その通りじゃ」框僅 23px 寬「通」被切 → pad=0 空讀、pad=12 讀對 p=0.993。
-    // ★ 預設 4＝真機 A/B 定案（sandbox 6 頁 161 框、按偵測框 index 精確配對）：救回 2（含 006「その通りじゃ」＝
-    //   使用者回報的漏氣泡）、**弄壞 0**、實質修復 ~14（'と一も百白です'→'とても面白いですね'、'あいませか'→
-    //   'ありませんか'、'お父雄'→'お父様'、'そんな学識も'→'そんな常識も'…），代價＝微小雜訊（'！'→'ー'、少個假名，
-    //   LLM 容錯；同 [useBicubic] 的權衡）。**且 OCR 快 ~20%**（框變寬→warp 後 strip 比例→CTC 序列變短）。
-    //   pad=8/12 開始退步（8：弄壞 2；12：弄壞 1）⇒ 4 是甜蜜點。桌面 m-i-t warp 模擬曾給 +15% 讀出，真機只 +2
-    //   （引擎自刻 bicubic warp 的 baseline 已達 98%），故真機定值不可照抄桌面。
+    val ignoreBubble: Int = 0,        // [Settings] config.ocr.ignore_bubble: 1-50 enabled, skip colored/non-bubble SFX text (default 0=off)
+    val minProb: Float = 0.5f,        // config.ocr.prob: drop OCR avg confidence < this (filter low-confidence misreads; m-i-t default 0.5)
+    // Expand each side of detection quad by N px before OCR crop (RotRect.expand; only OCR crop, not detection box => inpaint mask via seg strokes unaffected).
+    // Root cause: thin detection boxes clip glyphs -> 48px CTC empty read (model_48px_ctc drops 0-char boxes before prob threshold) -> region filtered by Pipeline textRegions -> left untranslated = user sees "missing bubble". Desktop 16 pages: pad=4 reads 345->398 (+15%), box count unchanged,
+    // break 9 vs save 350; 006 "sono toori ja" box only 23px wide "tsu" clipped -> pad=0 empty, pad=12 correct p=0.993.
+    // Default 4 = device A/B proven (sandbox 6 pages 161 boxes, matched by detection box index): save 2 (including 006), break 0, effectively fix ~14 (e.g., 'to ichi mo...'), cost = minor noise ('!'->'—', one kana, LLM tolerant; same tradeoff as useBicubic). Also ~20% faster OCR (wider box -> shorter CTC sequence).
+    // pad=8/12 regress (8: break 2; 12: break 1) => 4 is sweet spot. Desktop m-i-t warp sim gave +15% reads, device only +2 (engine bicubic warp baseline already 98%), so device value cannot be copied from desktop.
     val stripPad: Int = 4,
-    val useXnnpack: Boolean = false,  // ★預設關：XNNPACK 會把 48px CTC OCR 模型算錯（真機實證吐空），改純 CPU 才正確
-    // 逐行並發 OCR：小圖塊（48px 高、窄）吃不滿 intra-op 4 緒 → 改「每行單緒、N 行並發」把核填滿。
-    // concurrent=true → session intra-op 設 1（單行單緒）、靠 Semaphore(concurrency) 並發；false → 單行用滿 NUM_THREADS、序列（現狀）。
-    // 純 CPU、ORT 共享 thread pool ⇒ 收益需實測（sandbox 去背比較 OCR 列 A/B）。與「批次 padding」不同：零 padding 浪費。
-    val concurrent: Boolean = true,   // 預設開：真機 8.9s→4.8s(快46%)、零品質風險(每行邏輯不變)、8 核全填滿
-    val concurrency: Int = 8,         // 同時在飛的行數上限（＝核數，全核並發；conc=核數為甜蜜點，再高無核可用）
-    // 裁切縮放內插法：true=手刻 perspective bicubic（救小假名漏讀→句尾否定不再翻反）、false=Canvas bilinear（舊）。
-    // parity 517字/100行 vs bilinear 486/96；真機 A/B 驗過：+6% OCR 時間、把「才能がある/言わないから/言いなさい」
-    // 等句尾/關鍵詞讀回（消滅最陰險的「意思相反」），偶爾多讀個雜訊字（LLM 可容錯）。淨正面 → 預設開。
+    val useXnnpack: Boolean = false,  // Default off: XNNPACK miscomputes 48px CTC model (device proven empty), pure CPU is correct
+    // Per-line concurrent OCR: small tiles (48px high, narrow) under-utilize intra-op 4 threads -> use "1 thread per line, N lines concurrent" to fill cores.
+    // concurrent=true -> session intra-op =1 (one line one thread), via Semaphore(concurrency); false -> one line uses NUM_THREADS, sequential.
+    // Pure CPU, ORT shared thread pool => gains need measurement (sandbox A/B). Different from "batch padding": zero padding is wasteful.
+    val concurrent: Boolean = true,   // Default on: device 8.9s->4.8s (46% faster), zero quality risk (per-line logic unchanged), 8 cores saturated
+    val concurrency: Int = 8,         // Max concurrent lines in flight (=core count, sweet spot; higher gives no gain)
+    // Crop scaling interpolation: true=hand-rolled perspective bicubic (saves small kana misreads -> sentence-ending negation no longer inverted), false=Canvas bilinear (old).
+    // parity 517 chars/100 lines vs bilinear 486/96; device A/B proven: +6% OCR time, restores tails like "才能がある/言わないから/言いなさい" (eliminates most dangerous "meaning inversion"), occasional extra noise char (LLM tolerant). Net positive -> default on.
     val useBicubic: Boolean = true,
-    // OCR strip 銳化（unsharp mask，見 Ocr.unsharp）：抵銷 warp 把 ~30px 寬直行上採樣到 48px 的模糊、
-    // 救回被糊掉漏讀的小假名（v0.16.9 加）。★預設開＝實測救回小假名（對本就讀對 p≈1.0 的乾淨行無副作用）；
-    // 關＝退回無銳化（strip 較糊、小假名可能漏讀）。原本硬編碼永遠開，2026-07-16 抽成設定（進階玩家可關）。
+    // OCR strip sharpening (unsharp mask, see Ocr.unsharp): counteracts blur from warping ~30px wide vertical strip upscaled to 48px,
+    // restores small kana that were blurred away (added v0.16.9). Default on = proven to restore small kana (no side effect on clean lines with p~1.0);
+    // off = revert to no sharpening (strip blurrier, small kana may be missed). Was hard-coded always on, extracted to setting 2026-07-16 (advanced users can turn off).
     val ocrUnsharp: Boolean = true,
 )
 
-// 預設 few-shot（日→繁中）：示範 <|i|> 逐行格式。改語言對時連同 toLangName/fromLangName 一起換成對應譯文。
+// Default few-shot (ja->cht): demonstrates <|i|> line format. When changing language pair, update toLangName/fromLangName together with corresponding translation.
 private const val DEFAULT_SAMPLE_SOURCE =
     "<|1|>恥ずかしい… 目立ちたくない… 私が消えたい…\n<|2|>きみ… 大丈夫⁉\n<|3|>なんだこいつ 空気読めて ないのか…？"
 private const val DEFAULT_SAMPLE_TARGET =
     "<|1|>好尷尬…我不想引人注目…我想消失…\n<|2|>你…沒事吧⁉\n<|3|>這傢伙是看不懂氣氛嗎…？"
 
 /**
- * 翻譯設定。**語言對可任意**（不寫死日→繁中，只是預設）：
- *  - [toLangName] = 目標語言（LLM 直接照這個翻）。
- *  - [fromLangName] = 來源語言標註（進 prompt 措辭；實際來源其實由 OCR 模型決定＝BYOM 換模型就換來源）。
- *  - [sampleSource]/[sampleTarget] = few-shot 範例（同時示範格式與語言對）。
- * 換語言對：設 toLangName + fromLangName + 對應的 few-shot（三者要一致，否則 few-shot 會把輸出帶偏）。
+ * Translation settings. **Language pair is arbitrary** (not hard-coded ja->cht, just default):
+ *  - [toLangName] = target language (LLM translates directly into this).
+ *  - [fromLangName] = source language label (goes into prompt wording; actual source is determined by OCR model = BYOM model determines source).
+ *  - [sampleSource]/[sampleTarget] = few-shot example (demonstrates both format and language pair).
+ * Change language pair: set toLangName + fromLangName + corresponding few-shot (all three must be consistent, otherwise few-shot will bias output).
  */
 data class TranslatorConfig(
     val provider: String = "deepseek",                                  // 〔設定〕config.translator
-    val targetLang: String = "CHT",                                     // 〔設定〕config.target_lang
-    // 預設同 LlmProviders 的 deepseek 那筆。舊名 deepseek-chat 於 2026-07-24 15:59 UTC 退役（送出去會 400）
-    // → 改為其對應的 deepseek-v4-flash；存著舊名的既有設定由 LlmProviders.migrateModel 就地換名。
-    val model: String = "deepseek-v4-flash",                            // 〔設定〕
-    val apiBase: String = "https://api.deepseek.com/chat/completions",  // 〔設定〕custom_openai 用
-    // ⚠️ toLangName / fromLangName 預設被 fork :domain 的 TranslationPreferences.DEFAULT_TARGET_LANG /
-    //   DEFAULT_SOURCE_LANG 鏡像（:domain 不能 import 引擎）。改這兩個請同步改那邊，否則 few-shot 判斷會 drift。
-    val toLangName: String = "Traditional Chinese (Taiwan, 台灣慣用的繁體中文用語)",  // 〔設定〕目標語言
-    val fromLangName: String = "Japanese",          // 〔設定〕來源語言標註（空白＝讓 LLM 自己判）
-    val sampleSource: String = DEFAULT_SAMPLE_SOURCE, // 〔設定〕few-shot 原文（空白＝不放範例）
-    val sampleTarget: String = DEFAULT_SAMPLE_TARGET, // 〔設定〕few-shot 譯文（要跟 toLangName 同語言）
-    // 〔設定〕**取樣溫度**。★不是每家/每個模型都吃：OpenAI 的 reasoning 模型（o 系列、gpt-5 系列）**拒收**
-    //   temperature（送了 400）、DeepSeek 思考模式下則是「收下但無效」⇒ 由 LlmProviders.requestParams 決定
-    //   這次請求送不送、以及 clamp 到該家的合法範圍（見 [ParamRule]）。
+    val targetLang: String = "CHT",                                     // [Settings] config.target_lang
+    // Default matches LlmProviders deepseek entry. Old name deepseek-chat retired 2026-07-24 15:59 UTC (400) 
+    // -> changed to corresponding deepseek-v4-flash; existing settings with old name migrated in place by LlmProviders.migrateModel.
+    val model: String = "deepseek-v4-flash",                            // [Settings]
+    val apiBase: String = "https://api.deepseek.com/chat/completions",  // [Settings] for custom_openai
+    // Warning: toLangName / fromLangName defaults are mirrored from fork :domain TranslationPreferences.DEFAULT_TARGET_LANG /
+    // DEFAULT_SOURCE_LANG (domain cannot import engine). If you change these, sync there, otherwise few-shot drift.
+    val toLangName: String = "Traditional Chinese (Taiwan, Taiwan common Traditional Chinese)",  // [Settings] target language
+    val fromLangName: String = "Japanese",          // [Settings] source language label (blank = let LLM decide)
+    val sampleSource: String = DEFAULT_SAMPLE_SOURCE, // [Settings] few-shot source (blank = no example)
+    val sampleTarget: String = DEFAULT_SAMPLE_TARGET, // [Settings] few-shot target (must match toLangName language)
+    // [Settings] **Sampling temperature**. Not every provider/model consumes it: OpenAI reasoning models (o series, gpt-5) reject
+    // temperature (400), DeepSeek in thinking mode accepts but ignores => LlmProviders.requestParams decides whether to send and clamps to provider's valid range (see ParamRule).
     val temperature: Double = 0.3,
-    // 〔設定〕**思考模式（reasoning）**，預設 **關**。
-    //   為什麼預設關：各家新世代模型（DeepSeek v4 系、Gemini 3 系…）**預設就會思考**——對「逐行照翻」這種
-    //   結構化任務多花數秒與數倍 token 卻沒明顯品質提升 ⇒ 關掉＝復刻舊 deepseek-chat 的非思考行為（快又便宜）。
-    //   開＝允許模型思考：**回應更慢、token 更多、費用更高**。
-    //   欄位形狀 per-provider（thinking / reasoning_effort / enable_thinking / reasoning），映射表見 [ParamRule]；
-    //   ★不是每家都能關（OpenAI o 系列只能降到最低檔、Gemini 3.x 只能 minimal、Groq 的 GPT-OSS 關不掉、
-    //   自架的 custom/sakura 一律不送欄位）。
+    // [Settings] **Thinking mode (reasoning)**, default **off**.
+    // Why off by default: newer models (DeepSeek v4, Gemini 3...) think by default — for structured "line-by-line translation" tasks extra seconds and tokens give no clear quality gain => off = replicates old deepseek-chat non-thinking behavior (fast and cheap).
+    // On = allow thinking: **slower, more tokens, higher cost**.
+    // Field shape per-provider (thinking / reasoning_effort / enable_thinking / reasoning), mapping see ParamRule;
+    // Not every provider can turn off (OpenAI o series only to minimal, Gemini 3.x only minimal, Groq GPT-OSS cannot be turned off, self-hosted custom/sakura never send field).
     val thinking: Boolean = false,
-    // 跨頁批次翻譯（對映 m-i-t --batch-size / --batch-concurrent；§2 翻譯批次策略、§10 並發旋鈕）。
-    // ★ 現況：引擎端**無消費者**——原本讀這兩欄的 BatchTranslator 已移除（跨頁併發改由 fork 的 PageTranslator
-    //   以 Semaphore(pipelineDepth) 負責、不吃這裡）。保留＝§4 第一層「config schema 照搬上游」（上游調參 ⇒
-    //   這裡零 code 改動）；日後引擎要自帶批次器可直接接回。**非產品設定頁項目**（故不標〔設定〕）。
-    val batchSize: Int = 8,              // m-i-t --batch-size：concurrent 模式＝同時並發頁數上限；merged 模式＝每 prompt 併幾頁
-    val batchConcurrent: Boolean = true, // m-i-t --batch-concurrent：true＝逐頁分開請求、批內並發（防 truncation/幻覺）；false＝併大 prompt
-    val filterText: String? = null,   // 〔設定〕config.filter_text：regex 命中譯文則濾掉該區（例 ".*badtext.*"）
+    // Cross-page batch translation (maps to m-i-t --batch-size / --batch-concurrent; §2 batch strategy, §10 concurrency knob).
+    // Current: engine has **no consumer** — original BatchTranslator reading these fields was removed (cross-page concurrency now handled by fork PageTranslator via Semaphore(pipelineDepth), not here). Kept = §4 first layer "config schema mirrors upstream" (upstream tuning => zero code change here); future engine batcher can re-attach directly. **Not a product settings item** (hence not marked [Settings]).
+    val batchSize: Int = 8,              // m-i-t --batch-size: concurrent mode = max concurrent pages; merged mode = pages per prompt
+    val batchConcurrent: Boolean = true, // m-i-t --batch-concurrent: true = separate requests per page, concurrent in batch (prevents truncation/hallucination); false = merged large prompt
+    val filterText: String? = null,   // [Settings] config.filter_text: regex matching translation filters that region (e.g., ".*badtext.*")
 )
 
 data class InpainterConfig(
-    // 〔設定〕去字方法（真機 A/B 定案＝兩門別，皆純 NCNN；LaMa/逐格/auto 逐區路由/GPU 皆已退役移除）：
-    //   boxfill＝「快速去字」：取字區就近的背景色平塗（瞬間、平/單色泡泡最乾淨；壓畫面/多彩會塗錯色塊＝粗糙）。不跑去字模型。
-    //   aot（預設）＝「AI 去字」：全區都跑 AOT-GAN 重建背景，整頁一次縮到 [tileSize]。走 NCNN AOT；去字被翻譯的網路等待蓋住(§8)，故 tile 大小幾乎不加牆鐘。
+    // [Settings] Inpainting method (proven on device = two options, both pure NCNN; LaMa/per-cell/auto per-region routing/GPU all retired):
+    //   boxfill="fast inpaint": flat fill with nearest background color near text area (instant, cleanest for flat/solid bubbles; rough on busy/multicolor where it paints wrong color blocks). No inpaint model run.
+    //   aot (default)="AI inpaint": reconstruct background for whole page with AOT-GAN, whole page scaled to [tileSize]. Runs NCNN AOT; inpaint hidden under translation network wait (§8), so tile size barely adds wall time.
     val method: String = "aot",
-    val tileSize: Int = 768,          // 整頁 AOT 去字解析度。AOT 全卷積·任意尺寸；768＝畫質/記憶體/藏在翻譯下的甜蜜點（真機 A/B 定案：512 忙碌區糊、1024 記憶體 2× 且貼翻譯天花板）。
-    // 去字遮罩膨脹（半徑 = maskDilate/2）。★關鍵：漫畫在臉/頭髮上的字會描一圈白邊；遮罩太薄只蓋黑筆畫、
-    // 白邊留在外面 → 去字後殘白塊。加厚到半徑~12 吞掉白邊後，AOT 周圍 context 全變底圖 → 重建乾淨（桌面 inpaint_dev DIL=12 實證 ≈ MIT）。
-    val maskDilate: Float = 24f,      // 半徑 12px：吞掉文字白邊（之前 7=半徑4 會殘白塊）
-    val bboxPad: Int = 16,            // 去字 allow 用區域 bbox 矩形外擴 px：涵蓋貼 bbox 邊界的假名（行框太緊會漏）
+    val tileSize: Int = 768,          // Whole-page AOT inpaint resolution. AOT fully convolutional, any size; 768 = quality/memory/hidden-under-translation sweet spot (proven on device: 512 busy areas blurry, 1024 memory 2x and hits translation ceiling).
+    // Inpaint mask dilation (radius = maskDilate/2). Key: manga text on faces/hair has white outline around glyphs; mask too thin covers only black strokes,
+    // white outline remains outside -> white blocks remain after inpaint. Thickened to radius ~12 swallows outline, AOT surrounding context becomes background -> clean reconstruction (desktop inpaint_dev DIL=12 proven ~ MIT).
+    val maskDilate: Float = 24f,      // Radius 12px: swallow text white outline (before 7=radius 4 left white blocks)
+    val bboxPad: Int = 16,            // Inpaint allow region bbox rectangle expansion px: covers furigana at bbox edge (tight line box would miss)
 )
 
 data class RenderConfig(
-    val orientation: TextOrientation = TextOrientation.AUTO, // 〔設定〕對應 config.render.direction=auto（CJK→直排）
-    val fontBorder: Boolean = true,                              // 〔設定〕config.render.disable_font_border=false
-    val artStrokeRatio: Float = 0.16f,                           // 壓畫面區(aot 重建·onArt)的白邊寬＝字級×此（比一般 0.10 粗；busy 背景上黑字粗白邊更好讀）
+    val orientation: TextOrientation = TextOrientation.AUTO, // [Settings] corresponds to config.render.direction=auto (CJK -> vertical)
+    val fontBorder: Boolean = true,                              // [Settings] config.render.disable_font_border=false
+    val artStrokeRatio: Float = 0.16f,                           // White outline width for onArt areas (aot reconstructed, onArt) = font size * this (thicker than normal 0.10; better readability for black text with thick white outline on busy background)
     val fontSizeMax: Int = 60,
     val fontSizeMin: Int = 9,
-    // 排版幾何（純文字框法，對齊 parity/typeset_parity.py；不常動，留可控空間）
-    val expandW: Float = 1.3f,   // 文字框放大倍率（寬）給呼吸空間
-    val expandH: Float = 1.5f,   // 文字框放大倍率（直欄高 / 橫排列高）
-    val colTrim: Int = 3,        // 直排每欄少放幾字（縮短欄長、減少凸出；欄變多→字級自動縮）
-    val rowTrim: Int = 3,        // 橫排每行少放幾字（colTrim 的橫排對映：行變短、列變多→字級自動縮）
-    val fontScale: Float = 0.85f, // 算好字級後整體縮放（<1＝更小、更 fit 格子、留邊距）
-    // 文字顏色：auto＝取去字後背景亮度判黑/白字（最穩、白底黑字/黑底白字）；mono＝一律黑字白邊；
-    // 其他＝使用者指定的固定文字色（ARGB，如 0xFF000000 純黑；outline 維持依背景亮度判黑/白，確保任何底色都讀得到）。
+    // Layout geometry (pure text box method, aligned with parity/typeset_parity.py; rarely changed, keep tunable headroom)
+    val expandW: Float = 1.3f,   // Text box expansion factor (width) for breathing room
+    val expandH: Float = 1.5f,   // Text box expansion factor (vertical column height / horizontal row height)
+    val colTrim: Int = 3,        // Vertical: trim few chars per column (shorten column length, reduce overflow; more columns -> auto shrink font)
+    val rowTrim: Int = 3,        // Horizontal: trim few chars per row (horizontal counterpart of colTrim: shorter rows, more rows -> auto shrink font)
+    val fontScale: Float = 0.85f, // Overall scale after computing font size (<1 = smaller, more fit into cell, leave margin)
+    // Text color: auto = determine black/white from background luminance after inpaint (most robust, white bg black text / black bg white text); mono = always black text white outline;
+    // other = user-specified fixed text color (ARGB, e.g., 0xFF000000 pure black; outline still determined by background luminance to ensure readability on any background).
     val colorMode: String = "auto",
-    val fixedTextColor: Int = 0xFF000000.toInt(), // 〔設定〕colorMode=固定色時的譯文字色（預設純黑）
-    val bgDark: Int = 110,       // auto：去字後背景平均亮度 < 此值＝暗底 → 白字
-    // 縱中橫（tate-chu-yoko）：直排時把連續短 ASCII 串（2–4 字的數字/字母/!?）併成一格水平並排（年齡「20」、年份「2020」、「!?」不再上下堆疊歪頭讀）。
-    // §4 第三層知情偏離：m-i-t/parity 逐字畫、無此邏輯；只影響直排內 ASCII 短串，CJK 不變。預設開、可關回逐字。
+    val fixedTextColor: Int = 0xFF000000.toInt(), // [Settings] text color when colorMode=fixed (default pure black)
+    val bgDark: Int = 110,       // auto: average luminance of background in text box after inpaint < this = dark background -> white text
+    // Tate-chu-yoko: when vertical, merge consecutive short ASCII strings (2-4 chars digits/letters/!? ) into one cell displayed horizontally (age "20", year "2020", "!?" no longer stacked vertically). 
+    // §4 third layer informed deviation: m-i-t/parity draws char-by-char, no such logic; only affects short ASCII strings inside vertical, CJK unchanged. Default on, can be turned off to char-by-char.
     val tateChuYoko: Boolean = true,
 )

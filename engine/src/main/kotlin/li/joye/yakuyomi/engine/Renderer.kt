@@ -11,17 +11,16 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** 排版方向。AUTO＝依內容（CJK 直排、純英數橫排），對應 m-i-t config 的 direction:auto。 */
+/** Layout direction. AUTO = based on content (CJK vertical, pure alphanumerics horizontal), corresponds to m-i-t config direction:auto. */
 enum class TextOrientation { VERTICAL, HORIZONTAL, AUTO }
 
 /**
- * 排版（純文字框法，可靠）：定位 + 大小都用文字框，框適度放大（[RenderConfig.expandW]/[RenderConfig.expandH]）給呼吸空間。
- * 對齊 parity/typeset_parity.py（§4 第二層：同輸入近輸出）。
- *   不靠氣泡 flood-fill——相鄰氣泡會連通成一塊、整個算錯，已棄用。
- *   直排：CJK 上→下、欄右→左、向上對齊、每欄少 [RenderConfig.colTrim] 字（縮短欄長、減少凸出）、標點旋轉、短 ASCII 串縱中橫（tate-chu-yoko，見 [RenderConfig.tateChuYoko]）。
- *   橫排：左→右、上→下、向上對齊。
- *   文字色：[RenderConfig.colorMode]=auto 取去字後背景亮度判黑/白字（白底黑字、黑底白字）；OCR color head 色相太雜不採用。
- * ★ 後續：字型可選。
+ * Typesetting (pure text-box method, reliable): position + size both use text box, box moderately enlarged ([RenderConfig.expandW]/[RenderConfig.expandH]) for breathing room.
+ * Aligned with parity/typeset_parity.py (layer 2: same input near output).
+ *   Does not rely on bubble flood-fill — adjacent bubbles would connect into one block and be miscomputed, deprecated.
+ *   Vertical: CJK top->bottom, columns right->left, top-aligned, each column trims [RenderConfig.colTrim] chars (shorten column, reduce overflow), punctuation rotation, short ASCII strings as tate-chu-yoko (see [RenderConfig.tateChuYoko]).
+ *   Horizontal: left->right, top->bottom, top-aligned.
+ *   Text color: [RenderConfig.colorMode]=auto picks black/white from background luminance after inpaint (white bg black text / black bg white text); OCR color head hue too noisy not used.
  */
 object Renderer {
 
@@ -47,7 +46,7 @@ object Renderer {
             fill.color = fillColor
             stroke.color = outlineColor
             val vertical = when (cfg.orientation) {
-                TextOrientation.AUTO -> region.direction == "v" // 跟著偵測到的原文方向（對齊 m-i-t），不再無腦直排
+                TextOrientation.AUTO -> region.direction == "v" && isCjk(text)
                 TextOrientation.VERTICAL -> true
                 TextOrientation.HORIZONTAL -> false
             }
@@ -73,8 +72,8 @@ object Renderer {
     }
 
     /**
-     * 估計區域原文的字級（px）：對每行取 min(行框寬,高)＝文字筆畫厚度（直/橫書皆然），再取中位數。
-     * 這是排版「譯文要和原文一樣大」的錨點：短譯文（如英文短句 vs 長日文）不再放大到填滿整個氣泡。
+     * Estimate original font size (px) for a region: for each line take min(line box width, height) = stroke thickness (both vertical/horizontal), then median.
+     * This is the anchor for "translated text should be same size as original": short translations (e.g., short English vs long Japanese) no longer inflate to fill the bubble.
      */
     private fun originalFontSize(region: TextRegion): Int {
         val thicknesses = ArrayList<Float>()
@@ -95,18 +94,18 @@ object Renderer {
         return thicknesses[thicknesses.size / 2].roundToInt()
     }
 
-    /** 文字色 (fill, outline)：auto＝取去字後背景亮度（暗底白字、亮底黑字，對齊 parity auto_colors）；mono＝黑字白邊；其他＝固定色。 */
+    /** Text color (fill, outline): auto = pick from background luminance after inpaint (dark bg white text, light bg black text, aligned with parity auto_colors); mono = black text white outline; other = fixed color. */
     private fun textColors(page: Bitmap, r: TextRegion, cfg: RenderConfig): Pair<Int, Int> {
         if (cfg.colorMode == "mono") return Color.BLACK to Color.WHITE
-        // 使用者指定固定文字色（預設純黑）：outline 仍依背景亮度判黑/白，確保任何底色都讀得到。
+        // User-specified fixed text color (default pure black): outline still determined by background luminance to ensure readability on any background.
         if (cfg.colorMode != "auto") return cfg.fixedTextColor to (if (bgLuminance(page, r.x0, r.y0, r.x1, r.y1) < cfg.bgDark) Color.WHITE else Color.BLACK)
-        // 壓在畫面上(lama 重建的 busy 背景)：一律黑字+粗白邊。白邊把字框出來，任何雜亂背景都讀得到（對齊 m-i-t 做法）。
+        // On art (lama-reconstructed busy background): always black text + thick white outline. Outline frames text, readable on any busy background (aligned with m-i-t).
         if (r.onArt) return Color.BLACK to Color.WHITE
         val lum = bgLuminance(page, r.x0, r.y0, r.x1, r.y1)
         return if (lum < cfg.bgDark) Color.WHITE to Color.BLACK else Color.BLACK to Color.WHITE
     }
 
-    /** 去字後背景在文字框內的平均亮度（Rec.601）。 */
+    /** Average luminance of background after inpaint inside the text box (Rec.601). */
     private fun bgLuminance(page: Bitmap, rx0: Float, ry0: Float, rx1: Float, ry1: Float): Float {
         val w = page.width
         val h = page.height
@@ -130,15 +129,15 @@ object Renderer {
         o in 0x3040..0x30FF || o in 0x4E00..0x9FFF || o in 0x3400..0x4DBF || o in 0xFF00..0xFFEF
     }
 
-/** 直排：欄右→左、格上→下、向上對齊；大小填滿放大後的文字框、每欄少 colTrim 格。每格＝1 字或 1 個縱中橫短串。 */
+/** Vertical: columns right->left, cells top->bottom, top-aligned; size fills enlarged text box, each column trims colTrim chars. Each cell = 1 char or 1 tate-chu-yoko short string. */
     private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
-        val cells = toVerticalCells(chars, cfg.tateChuYoko)  // 切格：一般字一格、短 ASCII 串併成一個縱中橫格
-        val bw = (x1 - x0) * cfg.expandW         // 寬：放大後的文字框寬
-        val colRoom = (y1 - y0) * cfg.expandH    // 直欄可用高（從文字框頂往下）
+        val cells = toVerticalCells(chars, cfg.tateChuYoko)  // Split into cells: normal char one cell, short ASCII strings merge into one tate-chu-yoko cell
+        val bw = (x1 - x0) * cfg.expandW         // Width: enlarged text box width
+        val colRoom = (y1 - y0) * cfg.expandH    // Vertical column available height (from top of text box downward)
         var size = cfg.fontSizeMin
-        // 起點錨定原文字級：譯文不該比原文大；長譯文仍會往下縮到 fit。
+        // Anchor start to original font size: translation should not be larger than original; long translations will shrink to fit.
         val cap = if (originalSize > 0) minOf(cfg.fontSizeMax, originalSize) else cfg.fontSizeMax
         var s = min(colRoom.toInt(), cap)
         while (s >= cfg.fontSizeMin) {
@@ -147,16 +146,16 @@ object Renderer {
             if (ceil(cells.size / cpc.toFloat()).toInt() * cw <= bw) { size = s; break }
             s--
         }
-        size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
+        size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // Overall shrink, more fit
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
+        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // Outline scales with font size; onArt uses thicker outline
         val lh = size * 1.05f; val cw = size * 1.1f
         val cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
-        val columns = splitColumnsV(cells, cpc)       // 禁則：欄不以行頭禁則字開頭
+        val columns = splitColumnsV(cells, cpc)       // Kinsoku: columns should not start with forbidden starting chars
         val cols = columns.size
-        val tcx = (x0 + x1) / 2f                  // 定位：水平置中於文字框中心
+        val tcx = (x0 + x1) / 2f                  // Position: horizontally centered at text box center
         val rightCx = tcx + cols * cw / 2f - cw / 2f
-        val blockH = columns.maxOf { it.size } * lh // 垂直置中：以最長欄格數為塊高，置中於框
+        val blockH = columns.maxOf { it.size } * lh // Vertically centered: use longest column cell count as block height, centered in box
         val startCy = (y0 + y1) / 2f - blockH / 2f
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
@@ -173,8 +172,8 @@ object Renderer {
     }
 
     /**
-     * 直排切格：一般字一格；連續短 ASCII 串（2–[MAX_TCY] 字的數字/字母/!?）併成一個縱中橫格（tate-chu-yoko）。
-     * 單字 ASCII（如獨立「5」）維持單格；過長串（> MAX_TCY，如英文長詞）退回逐字（避免水平壓太扁）。
+     * Vertical cell splitting: normal char one cell; consecutive short ASCII strings (2-[MAX_TCY] chars digits/letters/!?) merge into one tate-chu-yoko cell.
+     * Single ASCII (e.g., lone "5") stays single cell; overlong strings (> MAX_TCY, e.g., long English words) fall back to char-by-char (avoid over-compression).
      */
     private fun toVerticalCells(chars: String, enabled: Boolean): List<String> {
         if (!enabled) return chars.map { it.toString() }
@@ -201,8 +200,7 @@ object Renderer {
     private fun isTcyChar(c: Char): Boolean =
         c in '0'..'9' || c in 'A'..'Z' || c in 'a'..'z' || c == '!' || c == '?'
 
-    /** 直排切欄＋行頭禁則：禁則字（單字標點）不置於欄頭、併回前一欄（最多 +2，避免暴衝）。 */
-    private fun splitColumnsV(cells: List<String>, cpc: Int): List<List<String>> {
+    /** Vertical column split + line-start kinsoku: forbidden start chars (single punctuation) should not start a column, merge back to previous column (max +2 to avoid explosion). */
         val cols = ArrayList<List<String>>()
         var i = 0
         val n = cells.size
@@ -216,7 +214,7 @@ object Renderer {
         return cols
     }
 
-    /** 縱中橫：把短 ASCII 串在一個直排格內水平並排、置中於欄心；超出格寬只橫向壓縮（高度不變、與鄰字視覺一致）。 */
+    /** Tate-chu-yoko: lay short ASCII strings horizontally within one vertical cell, centered at column center; if wider than cell only compress horizontally (height unchanged, visually consistent with neighbors). */
     private fun drawTateChuYoko(canvas: Canvas, group: String, cx: Float, cyc: Float, cellW: Float, fill: Paint, stroke: Paint, border: Boolean) {
         val w = fill.measureText(group)
         val fm = fill.fontMetrics
@@ -224,7 +222,7 @@ object Renderer {
         val target = cellW * 0.92f
         val scaleX = if (w > target) target / w else 1f
         canvas.save()
-        if (scaleX != 1f) canvas.scale(scaleX, 1f, cx, baseline)  // 只橫向縮、繞欄心
+        if (scaleX != 1f) canvas.scale(scaleX, 1f, cx, baseline)  // Only scale horizontally, around column center
         val tx = cx - w / 2f
         if (border) canvas.drawText(group, tx, baseline, stroke)
         canvas.drawText(group, tx, baseline, fill)
@@ -233,28 +231,32 @@ object Renderer {
 
     /** 橫排：列上→下、字左→右、向上對齊；大小填滿放大後的文字框。直式原文的狹長框改旋轉 90° 排版，讓譯文沿長軸填滿（不再縮成一條直排柱）。壓在畫面上的自由文字（onArt）一律不轉：跟著偵測方向排，避免水平原文被轉成側躺。 */
     private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
-        // 90° 旋轉只服務「直式原文的狹長氣泡」；自由文字（無氣泡、壓在畫面上）保持偵測到的方向。
-        val portrait = !onArt && (y1 - y0) * 0.9f > (x1 - x0)
+        // 對於非CJK英文，即使是直式原文的狹長氣泡也不應無條件旋轉 — 保持水平可讀性。
+        // 只有當氣泡極度狹長（高寬比>2.5）且非onArt時才考慮旋轉，否則保持水平排版避免破壞文字框。
+        val aspect = if ((x1 - x0) > 1f) (y1 - y0) / (x1 - x0) else 1f
+        val portrait = !onArt && aspect > 2.5f && !isCjk(text)
         val wrapW = if (portrait) (y1 - y0) else (x1 - x0)
         val roomH = if (portrait) (x1 - x0) else (y1 - y0)
         val bw = wrapW * cfg.expandW
         val rowRoom = roomH * cfg.expandH
         var size = cfg.fontSizeMin
         var lines = listOf(text)
-        // 起點錨定原文字級：譯文不該比原文大；長譯文仍會往下縮到 fit。
         val cap = if (originalSize > 0) minOf(cfg.fontSizeMax, originalSize) else cfg.fontSizeMax
         var s = min(rowRoom.toInt(), cap)
         while (s >= cfg.fontSizeMin) {
             fill.textSize = s.toFloat()
-            val ls = wrapCjk(text, fill, (bw - cfg.rowTrim * s).coerceAtLeast(s.toFloat())) // 每行少 rowTrim 字（橫向字數）
+            // 窄框保護：rowTrim 對窄框不應過度扣除，否則可用寬度過小導致單詞級 mid-word 斷裂
+            val trimW = if (bw < s * 8) cfg.rowTrim * s * 0.3f else cfg.rowTrim * s
+            val ls = wrapCjk(text, fill, (bw - trimW).coerceAtLeast(s * 2f))
             val maxW = ls.maxOfOrNull { fill.measureText(it) } ?: 0f
             if (ls.size * s * 1.18f <= rowRoom && maxW <= bw) { size = s; lines = ls; break }
             s--
         }
-        size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())  // 整體縮小、更 fit
+        size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // 描邊隨字級；壓畫面區用更粗白邊
-        lines = wrapCjk(text, fill, (bw - cfg.rowTrim * size).coerceAtLeast(size.toFloat()))  // 縮小後重排（含 rowTrim）
+        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))
+        val finalTrim = if (bw < size * 8) cfg.rowTrim * size * 0.3f else cfg.rowTrim * size
+        lines = wrapCjk(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f))
         val lh = size * 1.18f
         if (portrait) {
             // 直式框：繞框心旋轉 90°（順時針），譯文沿長軸橫排、由上往下讀，填滿氣泡長邊。

@@ -1,19 +1,20 @@
 package li.joye.yakuyomi.engine
 
-// ported from manga_translator/manga_translator.py（翻譯後過濾鏈，~L1323-1352）@ d5a3eee（第一層照搬）
+// Ported from manga_translator/manga_translator.py (post-translation filter chain, ~L1323-1352) @ d5a3eee (first layer direct port)
 
 /**
- * 翻譯後過濾（在去字/排版之前）：丟掉「不值得蓋上去」的譯文區，保留原圖（§11 不變式）。
+ * Post-translation filtering (before inpaint/typeset): discard "not worth overwriting" translated regions, keep original (section 11 invariant).
  *
- * 對齊 m-i-t `_run_text_translation` 的 should_filter 鏈：
- *   1. 空白譯文                → 丟
- *   2. 純數字譯文              → 丟
- *   3. [filterText] regex 命中 → 丟（使用者提供，預設 null＝不啟用）
- *   4. 譯文 == 原文（忽略大小寫/前後空白）→ 丟（LLM 漏譯或原樣回傳）
+ * Aligned with m-i-t `_run_text_translation` should_filter chain:
+ *   1. Blank translation                -> discard
+ *   2. Pure numeric translation        -> discard
+ *   3. [filterText] regex match        -> discard (user-provided, default null = disabled)
+ *   4. Translation == source (ignore case/trim) -> discard (LLM missed translation or returned as-is)
  *
- * 被丟的區不進 [Inpainter]/[Renderer]，原始日文畫面原樣保留——比「去字後蓋回日文」更好。
- * 僅在「實際有翻譯」時套用；無 key 的 debug 路徑（排版日文）不過濾。
- * internal：屬 pipeline 內部步驟，不跨出 library 邊界。
+ * Discarded regions do not go to [Inpainter]/[Renderer], original Japanese image kept as is — better than "inpaint then re-paste Japanese".
+ * Only applied when "actually translated"; debug path without key (typeset Japanese) is not filtered.
+ * Internal: belongs to pipeline internal step, does not cross library boundary.
+ * Hardened: handles null/empty, overly long text, invalid regex gracefully.
  */
 internal object TextFilter {
 

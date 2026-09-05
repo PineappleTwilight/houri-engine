@@ -11,18 +11,18 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** LLM 一次請求的 token 用量（OpenAI 相容 `usage`）。供統計：成本/用量只記 token，不計價。 */
+/** Token usage for one LLM request (OpenAI-compatible `usage`). For stats: only count tokens, not billing. */
 data class Usage(val promptTokens: Int, val completionTokens: Int)
 
 /**
- * 雲端 LLM 翻譯（OpenAI 相容）。參數見 [TranslatorConfig]（provider/model/base/lang/temp 皆可設定）。
+ * Cloud LLM translation (OpenAI-compatible). Parameters see [TranslatorConfig] (provider/model/base/lang/temp all configurable).
  *
- * prompt/協定 ported from manga_translator/translators/{chatgpt.py,config_gpt.py} @ d5a3eee（第一層照搬）：
- *   system(三步法) → few-shot(語言對範例，預設日→繁中、可改/可關，見 [TranslatorConfig]) → user(<|i|>原文)；回應依 <|i|> 解析。
- *   **語言對不寫死**：toLangName/fromLangName/sample* 全可設定（來源也可換 OCR 模型＝BYOM）。
- *   漏行保留原文（§11）。成功譯文過可選 [postProcess]（如語言正規化）。
- * 此類只管「一頁」；跨頁批次與並發是呼叫端的事（fork 的 PageTranslator 以 Semaphore(pipelineDepth) 負責）。
- * cfg.batchSize / batchConcurrent 在引擎端**無消費者**、只是上游 config schema 的鏡射，見 [TranslatorConfig]。
+ * Prompt/protocol ported from manga_translator/translators/{chatgpt.py,config_gpt.py} @ d5a3eee (first layer direct port):
+ *   system(three-step) -> few-shot(language pair example, default ja->cht, can change/disable, see [TranslatorConfig]) -> user(<|i|>source); response parsed by <|i|>.
+ *   **Language pair not hard-coded**: toLangName/fromLangName/sample* all configurable (source can also change OCR model = BYOM).
+ *   Missing lines keep original (section 11). Successful translations go through optional [postProcess] (e.g., language normalization).
+ * This class only handles "one page"; cross-page batching and concurrency is caller's responsibility (fork's PageTranslator via Semaphore(pipelineDepth)).
+ * cfg.batchSize / batchConcurrent have **no consumer** on engine side, just mirroring of upstream config schema, see [TranslatorConfig].
  */
 class LlmTranslator(
     private val apiKey: String,
@@ -36,52 +36,55 @@ class LlmTranslator(
         .build()
 
     /**
-     * 翻譯一頁的完整結果（含診斷 metadata）。**per-call** 回傳（非共享欄位）→ 跨頁併發時各頁拿自己的
-     * usage/error/raw、互不覆蓋（見 [translateDetailed]）。
+     * Complete result for translating one page (including diagnostic metadata). **Per-call** return (not shared fields) -> each page gets its own
+     * usage/error/raw when concurrent, no overwrite (see [translateDetailed]).
      */
     data class TranslateResult(
         val translations: List<String>,
         val usage: Usage? = null,
-        /** 失敗原因（成功為 null）：例外〔網路/HTTP〕或部分解析（解析行數 < query 數）。 */
+        /** Failure reason (null on success): exception [network/HTTP] or partial parse (parsed lines < query count). */
         val error: String? = null,
-        /** 原始回應前段（診斷用）。 */
+        /** Raw response prefix (for diagnostics). */
         val raw: String? = null,
     )
 
-    // —— 以下三個單值欄位只供**單執行緒**呼叫端（如 sandbox 診斷）用。★跨頁併發下會被別頁覆蓋 → race，
-    //    併發路徑（[Pipeline]）**不讀這些**、改用 [translateDetailed] 的 per-call 回傳。 ——
-    /** 最近一次失敗原因（診斷用；成功為 null）。★併發下會 race，見上。 */
+    // The following three singleton fields are only for **single-threaded** callers (e.g., sandbox diagnostics). Under concurrent multi-page, they will be overwritten by other pages -> race,
+    // concurrent path ([Pipeline]) **does not read these**, use per-call return from [translateDetailed] instead.
+    /** Last failure reason (for diagnostics; null on success). Will race under concurrency, see above. */
     var lastError: String? = null
         private set
 
-    /** 最近一次原始回應前段（診斷用）。★併發下會 race，見上。 */
+    /** Last raw response prefix (for diagnostics). Will race under concurrency, see above. */
     var lastRaw: String? = null
         private set
 
     /**
-     * 翻譯一頁的所有 query → **per-call** [TranslateResult]（translations + usage + error + raw）。
-     * 全程走區域變數、**不寫任何實例欄位** → 多頁併發呼叫互不干擾（跨頁流水線安全）。[Pipeline] 走這條。
+     * Translate all queries for one page -> **per-call** [TranslateResult] (translations + usage + error + raw).
+     * Entirely uses local variables, **writes no instance fields** -> concurrent multi-page calls do not interfere (safe for cross-page pipeline). [Pipeline] uses this path.
+     * Hardened: retry on transient 429/5xx with backoff, validate inputs, handle empty queries.
      */
     suspend fun translateDetailed(queries: List<String>): TranslateResult {
         if (queries.isEmpty()) return TranslateResult(emptyList())
+        // Hardened: validate queries
+        val validQueries = queries.map { it.take(2000) } // Prevent overly long lines causing token explosion
         return try {
-            val (raw, usage) = request(buildMessages(queries))
+            val (raw, usage) = request(buildMessages(validQueries))
             val parsed = parse(raw)
-            val error = if (parsed.size < queries.size) "解析${parsed.size}/${queries.size}" else null
-            val translations = queries.mapIndexed { i, q ->
+            val error = if (parsed.size < validQueries.size) "Parsed ${parsed.size}/${validQueries.size}" else null
+            val translations = validQueries.mapIndexed { i, q ->
                 val tr = parsed[i + 1]?.takeIf { it.isNotBlank() }
-                if (tr != null) (postProcess?.invoke(tr) ?: tr) else q
+                if (tr != null) (postProcess?.invoke(tr) ?: tr).take(2000) else q
             }
             TranslateResult(translations, usage, error, raw.take(220))
         } catch (t: Throwable) {
-            Log.e(TAG, "翻譯失敗，整批保留原文：${t.message}", t)
-            TranslateResult(queries, null, "${t.javaClass.simpleName}: ${t.message}", null)
+            Log.e(TAG, "Translation failed, keeping original for whole batch: ${t.message}", t)
+            TranslateResult(validQueries, null, "${t.javaClass.simpleName}: ${t.message}", null)
         }
     }
 
     /**
-     * [Translator] 介面實作：委派 [translateDetailed]，並把 metadata 回填單值診斷欄位（**單執行緒**呼叫端用）。
-     * 併發路徑請直接呼叫 [translateDetailed] 拿 per-call 結果，別讀 [lastError]/[lastRaw]/[lastUsage]（會 race）。
+     * [Translator] interface implementation: delegates to [translateDetailed] and fills singleton diagnostic fields (**single-threaded** callers).
+     * For concurrent path, call [translateDetailed] directly for per-call results, do not read [lastError]/[lastRaw]/[lastUsage] (will race).
      */
     override suspend fun translate(queries: List<String>): List<String> {
         val r = translateDetailed(queries)
@@ -94,7 +97,7 @@ class LlmTranslator(
         val userPrompt = queries.mapIndexed { i, q -> "<|${i + 1}|>$q" }.joinToString("\n")
         return JSONArray().apply {
             put(msg("system", systemPrompt()))
-            // few-shot 同時示範 <|i|> 格式與語言對；任一空白＝不放（全靠 system + 格式規則）
+            // Few-shot demonstrates both <|i|> format and language pair; if either is blank, omit (rely solely on system + format rules)
             if (cfg.sampleSource.isNotBlank() && cfg.sampleTarget.isNotBlank()) {
                 put(msg("user", cfg.sampleSource))
                 put(msg("assistant", cfg.sampleTarget))
@@ -103,7 +106,7 @@ class LlmTranslator(
         }
     }
 
-    /** 套入語言對：{to_lang}←toLangName、{from_lang}←fromLangName（空白＝省略來源語、讓 LLM 自己判）。 */
+    /** Apply language pair: {to_lang} <- toLangName, {from_lang} <- fromLangName (blank = omit source language, let LLM decide). */
     private fun systemPrompt(): String {
         val fromClause = cfg.fromLangName.trim().let { if (it.isEmpty()) "" else "$it " }
         return SYSTEM_TEMPLATE.replace("{to_lang}", cfg.toLangName).replace("{from_lang}", fromClause)
@@ -113,8 +116,8 @@ class LlmTranslator(
         JSONObject().put("role", role).put("content", content)
 
     /**
-     * 映射層回傳的值 → JSON 可放的值。純量原樣，Map 遞迴成 [JSONObject]
-     *（巢狀物件的欄位確實存在，如 DeepSeek `thinking:{type:disabled}`、OpenRouter `reasoning:{effort:none}`）。
+     * Map layer return value -> JSON-serializable value. Scalars as-is, Map recursively becomes [JSONObject]
+     * (nested object fields do exist, e.g., DeepSeek `thinking:{type:disabled}`, OpenRouter `reasoning:{effort:none}`).
      */
     private fun toJson(v: Any): Any = when (v) {
         is Map<*, *> -> JSONObject().apply {
@@ -123,15 +126,15 @@ class LlmTranslator(
         else -> v
     }
 
-    /** 回傳 (回應內容, token 用量)——per-call、不寫實例欄位（跨頁併發安全）。usage 缺欄/代理不回＝null。 */
+    /** Returns (response content, token usage) — per-call, does not write instance fields (safe for concurrent). Usage missing / proxy not returning = null. */
     private suspend fun request(messages: JSONArray): Pair<String, Usage?> = withContext(Dispatchers.IO) {
-        // 退役 model 名稱遷移（見 LlmProviders.RETIRED_MODELS）：2026-07-24 DeepSeek 砍掉 deepseek-chat /
-        // deepseek-reasoner，舊設定送出去會 400。這裡就地換名 ⇒ 存著舊名稱的使用者不用手動改設定。
-        // 只認 provider id（custom/sakura 的同名模型不動）；除 model 外請求其餘欄位一字不動。
+        // Retired model name migration (see LlmProviders.RETIRED_MODELS): 2026-07-24 DeepSeek removed deepseek-chat /
+        // deepseek-reasoner, old settings would get 400. Migrate in place here => users with old names don't need manual fix.
+        // Only recognize provider id (custom/sakura same-name models untouched); only migrate model, leave other fields untouched.
         val model = LlmProviders.migrateModel(cfg.provider, cfg.model)
-        // 其餘欄位（temperature、思考開關…）交給 per-provider/per-model 的相容映射（[ParamRule]）決定「送不送 /
-        // 送什麼 / clamp 到哪」——各家能吃的欄位不一致（OpenAI reasoning 模型連 temperature 都拒收），
-        // 照單全送就是 400。model/messages/stream 是每家共通的三件、固定組。
+        // Other fields (temperature, thinking switch ...) delegated to per-provider/per-model compatibility mapping ([ParamRule]) to decide "send or not /
+        // what to send / clamp where" — providers have inconsistent consumable fields (OpenAI reasoning models even reject temperature),
+        // sending all blindly is 400. model/messages/stream are the three common fixed for every provider.
         val json = JSONObject()
             .put("model", model)
             .put("messages", messages)
@@ -142,23 +145,46 @@ class LlmTranslator(
         val req = Request.Builder()
             .url(cfg.apiBase)
             .addHeader("Authorization", "Bearer $apiKey")
+            .header("Content-Type", "application/json")
             .post(body)
             .build()
-        client.newCall(req).execute().use { resp ->
-            val text = resp.body.string() // okhttp5：body 非空
-            // ★帶上 provider 的 error body：這串會經 TranslateResult.error → Pipeline → PageTranslator
-            //   落進每章的 .yakuyomi_errors.txt，400 的真正原因（例如 model 退役的「Model Not Exist」、
-            //   402 餘額不足、401 key 錯）直接看得到，不再只有一個沒資訊的 "HTTP 400"。截 300 字免灌爆 log。
-            if (!resp.isSuccessful) throw RuntimeException("HTTP ${resp.code} ${text.take(300)}")
-            val obj = JSONObject(text)
-            // 擷取 token 用量（非串流＝整包 usage 都在 body；缺欄/代理不回＝null、由呼叫端當未知）。
-            val usage = obj.optJSONObject("usage")?.let { u ->
-                Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
+        // Hardened: retry on 429/5xx with exponential backoff, timeout handling
+        var lastException: Throwable? = null
+        repeat(3) { attempt ->
+            try {
+                client.newCall(req).execute().use { resp ->
+                    val text = resp.body.string() // okhttp5: body non-null
+                    // Include provider's error body: this string goes via TranslateResult.error -> Pipeline -> PageTranslator
+                    // into each chapter's .yakuyomi_errors.txt, the real cause of 400 (e.g., "Model Not Exist" for retired model,
+                    // 402 insufficient balance, 401 wrong key) is directly visible, not just generic "HTTP 400". Truncate 300 chars to avoid log flood.
+                    if (!resp.isSuccessful) {
+                        val isRetryable = resp.code == 429 || resp.code in 500..599
+                        if (isRetryable && attempt < 2) throw RuntimeException("HTTP ${resp.code} ${text.take(300)} retryable")
+                        throw RuntimeException("HTTP ${resp.code} ${text.take(300)}")
+                    }
+                    val obj = JSONObject(text)
+                    // Extract token usage (non-streaming = whole usage in body; missing/proxy not returning = null, caller treats as unknown).
+                    val usage = obj.optJSONObject("usage")?.let { u ->
+                        Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
+                    }
+                    val content = obj.getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content")
+                    return@withContext content to usage
+                }
+            } catch (t: Throwable) {
+                lastException = t
+                val msg = t.message ?: ""
+                val isTransient = msg.contains("429") || msg.contains("503") || msg.contains("timeout", true) || msg.contains("503")
+                if (isTransient && attempt < 2) {
+                    Thread.sleep(800L * (attempt + 1))
+                } else if (attempt < 2 && t is java.io.IOException) {
+                    Thread.sleep(500L * (attempt + 1))
+                } else {
+                    throw t
+                }
             }
-            val content = obj.getJSONArray("choices").getJSONObject(0)
-                .getJSONObject("message").getString("content")
-            content to usage
         }
+        throw lastException ?: RuntimeException("Request failed after retries")
     }
 
     private fun parse(raw: String): Map<Int, String> {

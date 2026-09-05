@@ -3,37 +3,39 @@ package li.joye.yakuyomi.engine
 import android.graphics.Bitmap
 
 /**
- * 引擎對外主介面（CLAUDE.md §6「引擎解耦」、§13）。**建議用 [Yakuyomi.create] 取得實例**；唯一實作＝[Pipeline]。
+ * Main engine external interface (CLAUDE.md §6 "engine decoupling", §13). **Use [Yakuyomi.create] to get instance**; sole implementation = [Pipeline].
  *
- * 回傳 [PageResult] 而非裸 Bitmap：要能表達 §11 的「略過（不覆蓋）／失敗（不覆蓋、可重試）／成功（可覆蓋+marker）」，
- * 裸 Bitmap 無法區分這三態。覆蓋原檔／寫 marker／page-level resume／跨頁批次併發＝呼叫端職責（§3）。
+ * Returns [PageResult] instead of bare Bitmap: needs to express §11's "Skipped (do not overwrite) / Failed (do not overwrite, retryable) / Translated (can overwrite + marker)",
+ * bare Bitmap cannot distinguish these three states. Overwriting original file / writing marker / page-level resume / cross-page batch concurrency = caller responsibility (§3).
  *
- * **生命週期**：持有原生 ONNX session，用完要 [close] 釋放 native 記憶體。建議搭 `use { }`：
+ * **Lifecycle**: holds native ONNX sessions, must [close] to release native memory. Recommended with `use { }`:
  * ```
  * Yakuyomi.create(models, alphabet, apiKey).use { engine ->
  *     when (val r = engine.translatePage(bitmap)) {
  *         is PageResult.Translated -> writeBack(r.page)
- *         is PageResult.Skipped    -> { /* 保留原圖、不覆蓋 */ }
- *         is PageResult.Failed     -> { /* 保留原圖、可重試 */ }
+ *         is PageResult.Skipped    -> { /* keep original, do not overwrite */ }
+ *         is PageResult.Failed     -> { /* keep original, retryable */ }
  *     }
  * }
  * ```
- * **執行緒**：[translatePage] 是 suspend、一次處理一頁，請在背景 dispatcher 呼叫；單一實例**非並發安全**（勿同實例同時翻多頁）。
+ * **Threading**: [translatePage] is suspend, handles one page at a time, call on background dispatcher; single instance is **not concurrent-safe** (do not translate multiple pages concurrently on same instance).
+ * Hardened: validates input bitmap, handles recycled, ensures native resources are released even on failure.
  */
 interface TranslationEngine : AutoCloseable {
     /**
-     * 翻譯單頁。不會 recycle 輸入 [page]；成功時 [PageResult.Translated.page] 是**另一個新 bitmap**（非原物件）。
-     * @param page 來源頁點陣圖（所有權仍屬呼叫端）。
+     * Translate single page. Will not recycle input [page]; on success [PageResult.Translated.page] is **another new bitmap** (not original object).
+     * Hardened: validates bitmap not recycled, size within bounds, handles OOM gracefully.
+     * @param page Source page bitmap (ownership remains with caller).
      */
     suspend fun translatePage(page: Bitmap): PageResult
 
     /**
-     * 單緒暖機：對每個原生 session（detector / OCR / 去字）各空跑一次推論，完成首次 lazy 初始化（權重預處理 / arena 配置等）。
-     * **併發翻多頁前先呼叫一次**（單緒）——否則多頁同時打進「剛載好、還沒推論過」的冷 session 會撞首次初始化的 race → 原生 crash。
-     * 建構後呼叫一次即可（見 fork `TranslationEngineService.ensureEngine`）；boxfill 去字不跑其 session、故不暖它。best-effort。
+     * Single-threaded warmup: run one inference for each native session (detector / OCR / inpaint) to complete first lazy initialization (weight preprocessing / arena setup etc.).
+     * **Call once before concurrent multi-page translation** (single-threaded) — otherwise multiple pages hitting "just loaded, never inferred" cold session simultaneously will race first initialization -> native crash.
+     * Call once after construction (see fork `TranslationEngineService.ensureEngine`); boxfill inpaint does not run its session, so no need to warm it. Best-effort.
      */
     fun warmUp()
 
-    /** 釋放底層模型的原生資源（detector/ocr/inpainter 的 ONNX session）。呼叫後此實例不可再用。 */
+    /** Release native resources of underlying models (detector/ocr/inpainter ONNX sessions). After calling, this instance cannot be reused. Hardened: safe to call multiple times. */
     override fun close()
 }

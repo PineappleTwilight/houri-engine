@@ -4,32 +4,34 @@ import android.graphics.Bitmap
 import android.graphics.Typeface
 
 /**
- * 引擎入口工廠：把「建三顆模型元件 + 組 [Pipeline]」收成一行，回傳可 `use { }` 的 [TranslationEngine]。
+ * Engine entry factory: hides "build three model components + assemble [Pipeline]" into one line, returns [TranslationEngine] usable with `use { }`.
  *
- * 取代各消費端各自手動拼裝 + 各自記得 `close()` 的重複碼：
+ * Replaces repetitive code where each consumer manually assembles and remembers to `close()`:
  * ```
- * val models = ModelSet.resolve(localModelFiles) ?: return   // 模型沒備齊 → 略過
+ * val models = ModelSet.resolve(localModelFiles) ?: return   // Models not ready -> skip
  * Yakuyomi.create(models, alphabet, apiKey).use { engine ->
  *     for (bmp in pages) when (val r = engine.translatePage(bmp)) {
  *         is PageResult.Translated -> writeBack(r.page)
- *         is PageResult.Skipped    -> { /* 保留原圖 */ }
- *         is PageResult.Failed     -> { /* 保留原圖、可重試 */ }
+ *         is PageResult.Skipped    -> { /* keep original */ }
+ *         is PageResult.Failed     -> { /* keep original, retryable */ }
  *     }
  * }
  * ```
- * **進階**（逐元件除錯，如 debug overlay）：可直接 new [Detector]/[Ocr]/[Inpainter]/[LlmTranslator] 再自組 [Pipeline]，
- * 但生命週期得自己管（這條工廠路徑才會幫你 close）。
+ * **Advanced** (per-component debugging, e.g., debug overlay): can directly new [Detector]/[Ocr]/[Inpainter]/[LlmTranslator] and assemble [Pipeline] yourself,
+ * but lifecycle must be managed manually (only this factory path will close for you).
+ * Hardened: validates models and alphabet, handles missing API key gracefully.
  */
 object Yakuyomi {
     /**
-     * 建一個翻譯引擎。
+     * Build a translation engine.
      *
-     * @param models   三顆模型的本機路徑（見 [ModelSet]；用 [ModelSet.resolve] 從檔名比對）。
-     * @param alphabet OCR 字元表（48px CTC 解碼用；通常由引擎 assets 載入後傳入）。
-     * @param apiKey   翻譯 LLM 的 API key；**null/空白＝不翻譯**（只跑偵測/OCR/去字，純除錯）。
-     * @param config   引擎設定（全可調，預設見各 `*Config`）。
-     * @param typeface 算繪字型；null＝系統預設 CJK。
-     * @return 可 `use { }` 的 [TranslationEngine]；其 [TranslationEngine.close] 會釋放三顆模型的 native session。
+     * @param models   Local paths of three models (see [ModelSet]; use [ModelSet.resolve] to match by filename).
+     * @param alphabet OCR alphabet (for 48px CTC decoding; usually loaded from engine assets).
+     * @param apiKey   Translation LLM API key; **null/blank = no translation** (only detection/OCR/inpaint, for debugging).
+     * @param config   Engine config (all tunable, defaults see each `*Config`).
+     * @param typeface Rendering typeface; null = system default CJK.
+     * @return [TranslationEngine] usable with `use { }`; its [TranslationEngine.close] will release native sessions of the three models.
+     * Hardened: validates inputs, checks NCNN availability before loading.
      */
     fun create(
         models: ModelSet,
@@ -38,24 +40,25 @@ object Yakuyomi {
         config: EngineConfig = EngineConfig(),
         typeface: Typeface? = null,
     ): TranslationEngine {
-        // 偵測 + 去字皆純 NCNN（產品 arm64、NCNN 必在；ORT 備援與 LaMa 已退役移除）。
-        check(NcnnBackend.available) { "NCNN 原生庫未載入（arm64 應可用）" }
+        require(alphabet.isNotEmpty()) { "Alphabet must not be empty" }
+        // Detection + inpaint are pure NCNN (product arm64, NCNN required; ORT fallback and LaMa retired).
+        check(NcnnBackend.available) { "NCNN native library not loaded (arm64 should be available)" }
         EngineTrace.log("create.detector")
-        val detector = Detector(models.detectorNcnn ?: error("需 NCNN 偵測模型（.param）"), config.detector)
+        val detector = Detector(models.detectorNcnn ?: error("Requires NCNN detection model (.param)"), config.detector)
         EngineTrace.log("create.ocr")
         val ocr = Ocr(models.ocr, alphabet, config.ocr)
-        // 去字兩門別（boxfill/aot）皆用同一顆 NCNN AOT 模型（boxfill 只平塗不跑它、但仍要載得起來）。
+        // Both inpaint methods (boxfill/aot) use same NCNN AOT model (boxfill only flat-fills, does not run it, but still needs to be loadable).
         EngineTrace.log("create.inpainter")
-        val inpainter = Inpainter(models.aotInpainterNcnn ?: error("需 NCNN AOT 去字模型（.param）"), config.inpainter)
+        val inpainter = Inpainter(models.aotInpainterNcnn ?: error("Requires NCNN AOT inpaint model (.param)"), config.inpainter)
         val translator = apiKey?.takeIf { it.isNotBlank() }?.let { LlmTranslator(it, config.translator) }
         EngineTrace.log("create.done")
         return Pipeline(detector, ocr, translator, inpainter, config, typeface)
     }
 
     /**
-     * 診斷（sandbox 用）：對一頁跑偵測 → 每行分別以 bilinear / bicubic 裁切做 OCR，回逐行讀取對照 + 各自 recognize 耗時。
-     * 真機 A/B 驗證「bicubic 前處理救回被縮放糊掉的小假名（句尾否定→意思相反）」的品質提升與效能代價。
-     * 兩者共用同一 ORT session（只差裁切內插法）；計時前先暖跑兩條路徑（session lazy init + JIT），數字才可靠。
+     * Diagnostics (for sandbox): run detection on one page -> each line OCR with bilinear / bicubic crop, return per-line read comparison + each recognize timing.
+     * Proves on device that "bicubic preprocessing restores small kana blurred by scaling (sentence-ending negation -> meaning inversion)" in quality and cost.
+     * Both share same ORT session (only crop interpolation differs); warm up both paths before timing (session lazy init + JIT) for reliable numbers.
      */
     suspend fun ocrAbTest(
         models: ModelSet,
@@ -63,19 +66,19 @@ object Yakuyomi {
         page: Bitmap,
         config: EngineConfig = EngineConfig(),
     ): OcrAbResult {
-        check(NcnnBackend.available) { "NCNN 原生庫未載入" }
-        val detector = Detector(models.detectorNcnn ?: error("需 NCNN 偵測模型（.param）"), config.detector)
+        check(NcnnBackend.available) { "NCNN native library not loaded" }
+        val detector = Detector(models.detectorNcnn ?: error("Requires NCNN detection model (.param)"), config.detector)
         val ocr = Ocr(models.ocr, alphabet, config.ocr)
         try {
             val tDet = System.nanoTime()
             val det = detector.detect(page)
             val detectMs = (System.nanoTime() - tDet) / 1e6
-            val clone = { det.lines.map { TextLine(it.quad, it.score) } } // recognize 就地寫 text → 每次跑用新副本
-            // 暖跑兩條路徑（不計時）：session 首次 run 的 lazy init + bicubic 迴圈 JIT
+            val clone = { det.lines.map { TextLine(it.quad, it.score) } } // recognize writes text in place -> use fresh copy each run
+            // Warm up both paths (not timed): session first run lazy init + bicubic loop JIT
             ocr.warmUp()
             ocr.recognize(page, clone(), bicubic = false)
             ocr.recognize(page, clone(), bicubic = true)
-            // 正式計時
+            // Formal timing
             val linesBil = clone()
             val t0 = System.nanoTime()
             ocr.recognize(page, linesBil, bicubic = false)
@@ -93,7 +96,7 @@ object Yakuyomi {
     }
 }
 
-/** [Yakuyomi.ocrAbTest] 結果：逐行 bilinear vs bicubic OCR 讀取 [rows] + 各內插法 recognize 總耗時（ms）+ 偵測耗時。 */
+/** Result of [Yakuyomi.ocrAbTest]: per-line bilinear vs bicubic OCR reads [rows] + each interpolation total recognize time (ms) + detection time. */
 class OcrAbResult(
     val rows: List<OcrAbRow>,
     val bilinearMs: Double,
@@ -101,5 +104,5 @@ class OcrAbResult(
     val detectMs: Double,
 )
 
-/** 單行對照：同一行框，[bilinear] 與 [bicubic] 裁切各自 OCR 讀出的文字（空＝低於信心門檻被丟）。 */
+/** Single line comparison: same line box, [bilinear] and [bicubic] crops each OCR read text (empty = dropped below confidence threshold). */
 class OcrAbRow(val bilinear: String, val bicubic: String)

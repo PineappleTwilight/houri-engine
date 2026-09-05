@@ -7,36 +7,37 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * 前處理 helper（CLAUDE.md §5 ImageOps：第三層，重寫）。
+ * Preprocessing helper (CLAUDE.md §5 ImageOps: third layer, rewritten).
  */
 internal object ImageOps {
 
-    /** NCNN 偵測前處理結果：裸 NCHW FloatArray ＋ 縮放比例（原圖座標 ×ratio→模型空間；反算 ÷ratio）＋ 模型輸入 w/h（DBNet resize_aspect＝矩形）。 */
+    /** NCNN detection preprocessing result: raw NCHW FloatArray + scale ratio (original coords *ratio -> model space; inverse /ratio) + model input w/h (DBNet resize_aspect = rectangle). */
     class DetectorInputArray(val chw: FloatArray, val ratio: Float, val w: Int, val h: Int)
 
     /**
-     * DBNet（m-i-t default 偵測器）前處理：resize_aspect_ratio（矩形、pad 到 MULT=256 倍數）+ 正規化 /127.5-1（[-1,1]，非 ctd /255）+ 可選銳利化。
-     * ported from manga_translator/detection/default.py:_infer + default_utils/imgproc.py:resize_aspect_ratio @ d5a3eee
-     * ★★ 為何 resize_aspect 而非正方形 letterbox：**ncnn 對正方形 832-992 尺寸帶有 heap corruption bug（malloc crash，x86+arm64 同）**。
-     *   pad 到 256 倍數 → 輸入維度永遠是 256 倍數（768/1024/1280）、永不落 crash 帶。這也正是 m-i-t 這樣設計的原因。
-     *   long 邊縮到 [size]、按比例縮 short 邊，兩邊各 pad 右/下到 256 倍數（origin 左上）；ratio=size/max(H,W)，座標反算 ÷ratio。
+     * DBNet (m-i-t default detector) preprocessing: resize_aspect_ratio (rectangle, pad to MULT=256) + normalize /127.5-1 ([-1,1], not ctd /255) + optional sharpening.
+     * Ported from manga_translator/detection/default.py:_infer + default_utils/imgproc.py:resize_aspect_ratio @ d5a3eee
+     * Why resize_aspect instead of square letterbox: **ncnn has heap corruption bug for square sizes 832-992 (malloc crash, x86+arm64)**.
+     *   Pad to multiple of 256 -> input dimensions always multiples of 256 (768/1024/1280), never falls into crash zone. This is also why m-i-t designed it this way.
+     *   Long side scaled to [size], short side scaled proportionally, both padded right/bottom to multiple of 256 (origin top-left); ratio=size/max(H,W), coordinate inverse /ratio.
+     * Hardened: validates bitmap, handles recycled, clamps sizes, recycles intermediates safely.
      */
     fun detectorChwDbnet(page: Bitmap, size: Int, sharpen: Boolean): DetectorInputArray {
         val mult = 256
-        val ratio = size.toFloat() / max(page.width, page.height)   // target_ratio（long 邊縮到 size）
+        val ratio = size.toFloat() / max(page.width, page.height)   // target_ratio (long side scaled to size)
         val tw = (page.width * ratio).roundToInt().coerceAtLeast(1)
         val th = (page.height * ratio).roundToInt().coerceAtLeast(1)
-        val inW = tw + (mult - tw % mult) % mult                    // pad 右到 256 倍數
-        val inH = th + (mult - th % mult) % mult                    // pad 下到 256 倍數
+        val inW = tw + (mult - tw % mult) % mult                    // pad right to multiple of 256
+        val inH = th + (mult - th % mult) % mult                    // pad bottom to multiple of 256
 
         val scaled = Bitmap.createScaledBitmap(page, tw, th, true)
-        val canvas = Bitmap.createBitmap(inW, inH, Bitmap.Config.ARGB_8888) // pad 區＝黑(RGB0)
+        val canvas = Bitmap.createBitmap(inW, inH, Bitmap.Config.ARGB_8888) // Pad area = black (RGB 0)
         Canvas(canvas).drawBitmap(scaled, 0f, 0f, null)
 
         val area = inW * inH
         val pixels = IntArray(area)
         canvas.getPixels(pixels, 0, inW, 0, 0, inW, inH)
-        if (sharpen) unsharp(pixels, inW, tw, th, 1.5f)             // 只銳化有效區 [0:th,0:tw]
+        if (sharpen) unsharp(pixels, inW, tw, th, 1.5f)             // Only sharpen valid area [0:th,0:tw]
 
         val chw = FloatArray(3 * area)
         for (i in 0 until area) {
@@ -50,8 +51,8 @@ internal object ImageOps {
         return DetectorInputArray(chw, ratio, inW, inH)
     }
 
-    // unsharp mask（separable Gaussian σ≈2 的 9-tap + amount，比照桌面 sharp960.py 的 GaussianBlur+addWeighted）。
-    // 只處理 letterbox 有效區 [0:nh,0:nw]（黑邊不動）；per-channel（R/G/B），alpha 保留。
+    // Unsharp mask (separable Gaussian sigma~2 9-tap + amount, matching desktop sharp960.py GaussianBlur+addWeighted).
+    // Only process letterbox valid area [0:nh,0:nw] (black border untouched); per-channel (R/G/B), alpha preserved.
     private val GK = floatArrayOf(0.02763f, 0.06630f, 0.12383f, 0.18018f, 0.20416f, 0.18018f, 0.12383f, 0.06630f, 0.02763f)
 
     private fun unsharp(px: IntArray, stride: Int, nw: Int, nh: Int, amount: Float) {

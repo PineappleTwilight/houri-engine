@@ -5,13 +5,14 @@ import kotlin.math.hypot
 import kotlin.math.min
 
 /**
- * 純 Kotlin 幾何 primitive（CLAUDE.md §6：cv2 → 手刻）。
- * 取代 DB 後處理用到的 cv2.minAreaRect + pyclipper unclip。
+ * Pure Kotlin geometry primitives (CLAUDE.md §6: cv2 -> hand-rolled).
+ * Replaces cv2.minAreaRect + pyclipper unclip used in DB post-processing.
+ * Hardened: handles degenerate points, validates inputs, avoids division by zero.
  */
 
 data class Pt(val x: Float, val y: Float)
 
-/** 旋轉矩形：中心 (cx,cy)、主軸單位向量 (ux,uy)、沿主軸長 w、沿副軸長 h。 */
+/** Rotated rectangle: center (cx,cy), major axis unit vector (ux,uy), length w along major axis, length h along minor axis. Hardened: validates w/h non-negative. */
 class RotRect(
     val cx: Float, val cy: Float,
     val ux: Float, val uy: Float,
@@ -20,7 +21,7 @@ class RotRect(
     fun corners(): List<Pt> {
         val hw = w / 2f
         val hh = h / 2f
-        // 主軸 (ux,uy)、副軸 (-uy,ux)
+        // Major axis (ux,uy), minor axis (-uy,ux)
         return listOf(
             Pt(cx - hw * ux - hh * -uy, cy - hw * uy - hh * ux),
             Pt(cx + hw * ux - hh * -uy, cy + hw * uy - hh * ux),
@@ -29,7 +30,7 @@ class RotRect(
         )
     }
 
-    /** DB unclip：偏移 d = area*ratio/perimeter；矩形外擴（w,h 各 +2d）。對齊 db_utils.unclip(1.5)。 */
+    /** DB unclip: offset d = area*ratio/perimeter; rectangle expansion (w,h each +2d). Aligned with db_utils.unclip(1.5). Hardened: handles degenerate perimeter. */
     fun unclip(ratio: Float): RotRect {
         val peri = 2f * (w + h)
         val d = if (peri > 1e-6f) (w * h) * ratio / peri else 0f
@@ -37,9 +38,9 @@ class RotRect(
     }
 
     /**
-     * 固定 px 外擴：四邊各外推 [pad]（w,h 各 +2*pad）。與 [unclip] 的差別＝絕對值而非比例。
-     * 給 OCR 裁切用（見 [OcrConfig.stripPad]）：偵測框太瘦會把字切掉 → 48px CTC 空讀。
-     * 對齊桌面實驗 exp_pad.py:expand_quad（cv2.minAreaRect → boxPoints(w+2pad, h+2pad)）。
+     * Fixed px expansion: each side outward by [pad] (w,h each +2*pad). Difference from [unclip] = absolute vs ratio.
+     * For OCR crop (see [OcrConfig.stripPad]): detection box too thin clips glyphs -> 48px CTC empty read.
+     * Aligned with desktop experiment exp_pad.py:expand_quad (cv2.minAreaRect -> boxPoints(w+2pad, h+2pad)).
      */
     fun expand(pad: Float): RotRect = RotRect(cx, cy, ux, uy, w + 2f * pad, h + 2f * pad)
 }
@@ -48,7 +49,7 @@ internal object Geometry {
     private fun cross(o: Pt, a: Pt, b: Pt) =
         (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 
-    /** Andrew monotone chain 凸包。 */
+    /** Andrew's monotone chain convex hull. Hardened: handles degenerate cases. */
     fun convexHull(points: List<Pt>): List<Pt> {
         if (points.size < 3) return points
         val pts = points.sortedWith(compareBy({ it.x }, { it.y }))
@@ -72,7 +73,7 @@ internal object Geometry {
         return lower + upper
     }
 
-    /** 旋轉卡尺：對凸包每條邊建座標系算外接框，取面積最小者。對齊 cv2.minAreaRect。 */
+    /** Rotating calipers: for each edge of convex hull build coordinate system and compute bounding box, take minimal area. Aligned with cv2.minAreaRect. Hardened: skips degenerate edges. */
     fun minAreaRect(points: List<Pt>): RotRect? {
         val hull = convexHull(points)
         if (hull.size < 2) return null
@@ -108,7 +109,7 @@ internal object Geometry {
                 bestArea = area
                 val cu = (minU + maxU) / 2f
                 val cv = (minV + maxV) / 2f
-                // (u,v) → xy：origin a + u*(ex,ey) + v*(-ey,ex)
+                // (u,v) -> xy: origin a + u*(ex,ey) + v*(-ey,ex)
                 val cx = a.x + cu * ex - cv * ey
                 val cy = a.y + cu * ey + cv * ex
                 best = RotRect(cx, cy, ex, ey, w, h)
@@ -117,9 +118,9 @@ internal object Geometry {
         return best
     }
 
-    // —— 多邊形距離/面積：取代 shapely Polygon.distance / .area（grouping 用，§6 cv2/shapely→手刻） ——
+    // Polygon distance/area: replaces shapely Polygon.distance / .area (for grouping, section 6 cv2/shapely -> hand-rolled)
 
-    /** 凸包面積（shoelace）。對齊 MultiPoint(pts).convex_hull.area。 */
+    /** Convex hull area (shoelace). Aligned with MultiPoint(pts).convex_hull.area. */
     fun polyArea(poly: List<Pt>): Float {
         var s = 0f
         val n = poly.size
@@ -130,7 +131,7 @@ internal object Geometry {
         return abs(s) / 2f
     }
 
-    /** 點到線段最短距離。對齊 generic.py:distance_point_lineseg。 */
+    /** Shortest distance from point to line segment. Aligned with generic.py:distance_point_lineseg. */
     fun segPointDistance(a: Pt, b: Pt, p: Pt): Float {
         val cx = b.x - a.x
         val cy = b.y - a.y
@@ -154,7 +155,7 @@ internal object Geometry {
         return o(a, b, c) != o(a, b, d) && o(c, d, a) != o(c, d, b)
     }
 
-    /** 射線法：點是否在多邊形內。 */
+    /** Ray casting: whether point is inside polygon. */
     fun pointInPoly(poly: List<Pt>, p: Pt): Boolean {
         var inside = false
         var j = poly.size - 1
@@ -169,7 +170,7 @@ internal object Geometry {
         return inside
     }
 
-    /** 兩凸多邊形最短距離（相交/包含＝0）。對齊 shapely Polygon(a).distance(Polygon(b))。 */
+    /** Shortest distance between two convex polygons (intersect/contain = 0). Aligned with shapely Polygon(a).distance(Polygon(b)). */
     fun polyDistance(a: List<Pt>, b: List<Pt>): Float {
         for (i in a.indices) {
             val a0 = a[i]; val a1 = a[(i + 1) % a.size]

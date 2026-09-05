@@ -1,13 +1,13 @@
 package li.joye.yakuyomi.engine
 
 /**
- * LLM provider 預設表（多 provider + 自動撈模型清單）。
+ * LLM provider presets (multi-provider + automatic model list fetching).
  *
- * 涵蓋 m-i-t 的 LLM translator（openai / deepseek / gemini / groq / custom_openai / sakura / qwen2 @ d5a3eee）
- * ＋ OpenRouter 便利預設。**全部走 OpenAI 相容「聊天」端點**（含 Gemini 的 OpenAI-compat 端點）
- * ⇒ [LlmTranslator] 一個 client 通吃、零新請求 builder。差別只在「列模型」端點（見 [ModelSource]）。
+ * Covers m-i-t LLM translators (openai / deepseek / gemini / groq / custom_openai / sakura / qwen2 @ d5a3eee)
+ * + OpenRouter convenience preset. **All go through OpenAI-compatible "chat" endpoint** (including Gemini's OpenAI-compat endpoint)
+ * => [LlmTranslator] one client handles all, zero new request builders. Difference only in "list models" endpoint (see [ModelSource]).
  *
- * 借鏡 nextai-translator 的 listModels：能 `GET /v1/models` 就自動撈、跟著官方更新（模型迭代快、不寫死清單）。
+ * Inspired by nextai-translator's listModels: if `GET /v1/models` works, automatically fetch and follow official updates (models iterate fast, don't hardcode list).
  */
 enum class ModelSource {
     /** OpenAI 相容：`GET {modelsUrl}` 帶 Bearer → `data[].id`。涵蓋 deepseek/openai/groq/qwen/openrouter/sakura/custom。 */
@@ -21,10 +21,10 @@ enum class ModelSource {
 }
 
 /**
- * 一個 provider 預設。
+ * One provider preset.
  *
- * @param baseEditable 自架 / 自訂（sakura / custom）：由使用者填 base，[chatUrl]/[modelsUrl] 留空、由 base 推導
- *                     （見 [LlmProviders.chatUrlOf]/[LlmProviders.modelsUrlOf]）。
+ * @param baseEditable Self-hosted / custom (sakura / custom): base filled by user, [chatUrl]/[modelsUrl] left empty and derived from base
+ *                     (see [LlmProviders.chatUrlOf]/[LlmProviders.modelsUrlOf]).
  */
 data class LlmProvider(
     val id: String,
@@ -37,22 +37,22 @@ data class LlmProvider(
 )
 
 /**
- * 一條 **request 參數相容規則**（資料表驅動：加 provider / 加特例 model 只改表、不動邏輯，見 [LlmProviders.PARAM_RULES]）。
+ * One **request parameter compatibility rule** (data-driven: add provider / special-case model only changes table, not logic, see [LlmProviders.PARAM_RULES]).
  *
- * 為什麼需要：各家雖然都是「OpenAI 相容」，能吃的欄位其實不一致，**同一家不同世代也不同**，照單全送就是 400——
- *   · OpenAI 的 reasoning 模型（o 系列 / gpt-5 系列）**整組拒收** `temperature`/`top_p`/`max_tokens`…
- *   · 「思考開關」每家欄位形狀都不同：`thinking` / `reasoning_effort` / `enable_thinking` / `reasoning`
- *   · 同一個欄位的合法值還逐代不同（`reasoning_effort` 的 none / minimal）
- * 規則本身純資料 ⇒ [LlmProviders.requestParams] 是純函式、可單測（`LlmParamsTest`）。
+ * Why needed: although all are "OpenAI-compatible", consumable fields are actually inconsistent, **even different generations within same provider differ**, sending all blindly is 400 —
+ *   · OpenAI reasoning models (o series / gpt-5 series) **reject entire group** of `temperature`/`top_p`/`max_tokens`...
+ *   · "Thinking switch" field shape differs per provider: `thinking` / `reasoning_effort` / `enable_thinking` / `reasoning`
+ *   · Valid values for same field also differ per generation (`reasoning_effort` none / minimal)
+ * Rule itself is pure data => [LlmProviders.requestParams] is pure function, testable (`LlmParamsTest`).
  *
- * @param modelPattern  model id 比對（比對前小寫化、用 `containsMatchIn`，故要錨定請自己寫 `^`）；
- *                      null＝不比對＝該 provider 的 fallback 規則（放清單最後）。
- * @param temperature   送不送 `temperature`（OpenAI reasoning 模型拒收 → false）。
- * @param temperatureRange 合法範圍，超出就 clamp（OpenAI 相容主流是 0–2）。
- * @param maxTokensField 「最大輸出 token」欄位名（OpenAI reasoning 模型只認 `max_completion_tokens`）。
- *                      ★引擎目前不送這欄，先備著（見 [LlmProviders.maxTokensFieldOf]）。
- * @param thinkingOff   [TranslatorConfig.thinking]=false（預設）時要附加的欄位；空＝該家沒這概念或關不掉 → 不送。
- * @param thinkingOn    [TranslatorConfig.thinking]=true 時要附加的欄位；空＝用該家預設（多數家預設就會思考）。
+ * @param modelPattern  model id matching (lowercased before matching, using `containsMatchIn`, so anchor with `^` yourself);
+ *                      null = no match = fallback rule for that provider (put at end of list).
+ * @param temperature   whether to send `temperature` (OpenAI reasoning models reject -> false).
+ * @param temperatureRange valid range, out of range -> clamp (OpenAI-compatible mainstream is 0-2).
+ * @param maxTokensField "max output tokens" field name (OpenAI reasoning models only accept `max_completion_tokens`).
+ *                      Engine currently does not send this field, keep for future (see [LlmProviders.maxTokensFieldOf]).
+ * @param thinkingOff   fields to attach when [TranslatorConfig.thinking]=false (default); empty = provider has no such concept or cannot be turned off -> do not send.
+ * @param thinkingOn    fields to attach when [TranslatorConfig.thinking]=true; empty = use provider default (most providers default to thinking).
  */
 data class ParamRule(
     val modelPattern: Regex? = null,
@@ -65,14 +65,14 @@ data class ParamRule(
 
 object LlmProviders {
 
-    /** m-i-t 全部 LLM provider ＋ OpenRouter 便利預設。順序＝設定頁下拉順序。 */
+    /** All m-i-t LLM providers + OpenRouter convenience preset. Order = settings dropdown order. */
     val ALL: List<LlmProvider> = listOf(
         LlmProvider(
             "deepseek", "DeepSeek",
             "https://api.deepseek.com/chat/completions",
             "https://api.deepseek.com/v1/models",
-            // deepseek-chat 於 2026-07-24 15:59 UTC 退役（相容 shim 一併移除）→ 改用其對應的
-            // deepseek-v4-flash（原 deepseek-chat＝此模型的非思考模式）。舊名稱的遷移見 [RETIRED_MODELS]。
+            // deepseek-chat retired 2026-07-24 15:59 UTC (compat shim removed) -> use corresponding
+            // deepseek-v4-flash (original deepseek-chat = this model's non-thinking mode). Old name migration see [RETIRED_MODELS].
             ModelSource.OPENAI, "deepseek-v4-flash",
         ),
         LlmProvider(
@@ -83,11 +83,10 @@ object LlmProviders {
         ),
         LlmProvider(
             "gemini", "Google Gemini",
-            // 走 Gemini 的 OpenAI 相容聊天端點 ⇒ 既有 LlmTranslator 直接通；列模型走 native（compat 路徑無 /models）。
+            // Via Gemini's OpenAI-compatible chat endpoint => existing LlmTranslator works directly; list models via native (compat path has no /models).
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             "https://generativelanguage.googleapis.com/v1beta/models",
-            // 舊預設 gemini-2.0-flash 於 2026-06-01 **停役**（送出去 404）→ 換成官方點名的替代、且是 models 頁
-            // 列為 stable 的現役泛用 flash。舊 id 的自動遷移見 [RETIRED_MODELS]。
+            // Old default gemini-2.0-flash retired 2026-06-01 **retired** (404) -> replaced with official designated alternative, and listed as stable active generic flash on models page. Old id auto migration see [RETIRED_MODELS].
             // https://ai.google.dev/gemini-api/docs/deprecations
             ModelSource.GEMINI, "gemini-3.6-flash",
         ),
@@ -95,19 +94,14 @@ object LlmProviders {
             "groq", "Groq",
             "https://api.groq.com/openai/v1/chat/completions",
             "https://api.groq.com/openai/v1/models",
-            // 舊預設 llama-3.3-70b-versatile 於 2026-08-16 **停役**→ 換成 Groq 自己點名的替代、且在 models 頁
-            // 列為 **production** 的 openai/gpt-oss-120b（另一個建議 qwen/qwen3.6-27b 只是 preview
-            // 「evaluation only」，不當預設）。停役日已過 ⇒ 舊 id 的自動遷移見 [RETIRED_MODELS]（2026-08-25 收錄）。
-            // https://console.groq.com/docs/deprecations ／ https://console.groq.com/docs/models
+            // Old default llama-3.3-70b-versatile retired 2026-08-16 **retired** -> replaced with Groq's designated alternative, and listed as **production** openai/gpt-oss-120b on models page (other suggestion qwen/qwen3.6-27b is just preview "evaluation only", not default). Retirement passed => old id auto migration see [RETIRED_MODELS] (collected 2026-08-25).
+            // https://console.groq.com/docs/deprecations / https://console.groq.com/docs/models
             ModelSource.OPENAI, "openai/gpt-oss-120b",
         ),
         LlmProvider(
-            "qwen", "通義千問 Qwen",
-            // **國際版端點**（dashscope-intl＝新加坡；2026-08-25 驗活、無 key 回 401 invalid_api_key）。
-            // 原本用的 dashscope.aliyuncs.com 是**中國大陸**端點——本 app 受眾多在國際版 console
-            // （alibabacloud.com）開 key，打大陸端點必 401。大陸 key 使用者請改走「自訂」provider 填
-            // https://dashscope.aliyuncs.com/compatible-mode/v1。官方新推的 {WorkspaceId}.*.maas 專屬
-            // 網域因含個人 workspace id 無法當 preset；官方明言舊網域 remains fully functional。
+            "qwen", "Qwen",
+            // **International endpoint** (dashscope-intl = Singapore; verified 2026-08-25, no key returns 401 invalid_api_key).
+            // Previously used dashscope.aliyuncs.com is **mainland China** endpoint — this app's audience mostly uses international console (alibabacloud.com) keys, hitting mainland endpoint always 401. Mainland key users please use "custom" provider with https://dashscope.aliyuncs.com/compatible-mode/v1. Official newly promoted {WorkspaceId}.*.maas dedicated domains contain personal workspace id and cannot be preset; official states old domains remain fully functional.
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
             ModelSource.OPENAI, "qwen-plus",
@@ -116,20 +110,19 @@ object LlmProviders {
             "openrouter", "OpenRouter",
             "https://openrouter.ai/api/v1/chat/completions",
             "https://openrouter.ai/api/v1/models",
-            // OpenRouter 的 deepseek/deepseek-chat 仍存在（＝DeepSeek V3、OpenRouter 自己的命名空間、沒被退役），
-            // 但既然對應的新世代 deepseek/deepseek-v4-flash 已在 OpenRouter 上架（2026-07 對 /api/v1/models 查證過），
-            // 預設就跟 DeepSeek 官方那筆對齊。
+            // OpenRouter's deepseek/deepseek-chat still exists (=DeepSeek V3, OpenRouter's own namespace, not retired),
+            // but since corresponding new-gen deepseek/deepseek-v4-flash is already on OpenRouter (verified via /api/v1/models 2026-07), default aligns with DeepSeek official entry.
             ModelSource.OPENAI, "deepseek/deepseek-v4-flash",
         ),
-        // m-i-t sakura：自架 JA→ZH 專精 LLM（SAKURA_API_BASE，OpenAI 相容）。
+        // m-i-t sakura: self-hosted JA->ZH specialized LLM (SAKURA_API_BASE, OpenAI-compatible).
         LlmProvider(
-            "sakura", "Sakura（自架）",
+            "sakura", "Sakura (self-hosted)",
             "", "", ModelSource.OPENAI, "sakura-14b-qwen2.5-v1.0",
             baseEditable = true,
         ),
-        // m-i-t custom_openai：OpenRouter / LM Studio / SiliconFlow / 任何 OpenAI 相容端點的傘。
+        // m-i-t custom_openai: umbrella for OpenRouter / LM Studio / SiliconFlow / any OpenAI-compatible endpoint.
         LlmProvider(
-            "custom", "自訂（OpenAI 相容）",
+            "custom", "Custom (OpenAI-compatible)",
             "", "", ModelSource.OPENAI, "",
             baseEditable = true,
         ),
@@ -140,21 +133,21 @@ object LlmProviders {
     fun byId(id: String?): LlmProvider = ALL.firstOrNull { it.id == id } ?: DEFAULT
 
     /**
-     * 已退役的 model id → 現行替代（**per-provider**，key＝[LlmProvider.id]）。
+     * Retired model id -> current replacement (**per-provider**, key = [LlmProvider.id]).
      *
-     * 2026-07-24 15:59 UTC：DeepSeek 退役 `deepseek-chat` / `deepseek-reasoner` 兩個舊名稱、相容 shim
-     * 一併移除 → 舊名稱送出去一律 HTTP 400（`Model Not Exist`）。key / base URL / 請求格式都沒變，**只有名稱要換**：
-     * 兩者原本分別對應 `deepseek-v4-flash` 的非思考 / 思考模式，故都遷到 `deepseek-v4-flash`。
+     * 2026-07-24 15:59 UTC: DeepSeek retired `deepseek-chat` / `deepseek-reasoner` old names, compat shim
+     * removed together -> old names always get HTTP 400 (`Model Not Exist`). Key / base URL / request format unchanged, **only name needs change**:
+     * both originally mapped to `deepseek-v4-flash` non-thinking / thinking modes, so both migrate to `deepseek-v4-flash`.
      *
-     * 為什麼不是只改 [LlmProvider.defaultModel] 就好：使用者的 model 設定若**存著**舊名稱（曾手動輸入 /
-     * 從舊的「抓取模型」清單挑過），預設值救不到他 → 在送出請求前就地換名（見 [migrateModel] 的呼叫端
-     * `LlmTranslator.request`），使用者不必手動改設定。
+     * Why not just change [LlmProvider.defaultModel]: if user's model setting **stores** old name (manually entered /
+     * picked from old "fetch models" list), default value cannot save them -> migrate in place before sending request (see [migrateModel] caller
+     * `LlmTranslator.request`), user does not need manual fix.
      *
-     * **只認 provider id**：custom / sakura / 自架端點上的同名模型不動（那是別人的命名空間，可能真的存在）。
+     * **Only recognize provider id**: custom / sakura / self-hosted same-name models untouched (that's other's namespace, may really exist).
      *
-     * **只收「已停役＝送出去會報錯」的名稱，不收「deprecated 但還能用」的**——後者硬換掉等於偷偷改使用者
-     * 選的模型（例：Groq 的 `llama-3.3-70b-versatile` 在 deprecated 期間官方寫明「Model remains fully
-     * functional during this period」⇒ 當時只改預設、不遷移；2026-08-16 真的停役後才進表，見下）。
+     * **Only collect "retired = will error when sent" names, not "deprecated but still usable"** — latter forced migration would secretly change user's
+     * chosen model (e.g., Groq's `llama-3.3-70b-versatile` during deprecated period official states "Model remains fully
+     * functional during this period" => only changed default, not migration then; only after truly retired 2026-08-16 is it collected, see below).
      */
     private val RETIRED_MODELS: Map<String, Map<String, String>> = mapOf(
         "deepseek" to mapOf(
@@ -163,32 +156,31 @@ object LlmProviders {
         ),
         // Gemini 2.0 系四個 id 於 **2026-06-01 停役**（已不可存取＝送出去報錯，非只是 deprecated）。
         // 替代照官方 deprecations 頁的建議、再對 models 頁挑「列為 stable」的現役 id：
-        // 泛用 flash → gemini-3.6-flash、lite → gemini-3.5-flash-lite（維持原本的價位/延遲級距，不硬升級費率）。
-        // https://ai.google.dev/gemini-api/docs/deprecations ／ https://ai.google.dev/gemini-api/docs/models
+        // Generic flash -> gemini-3.6-flash, lite -> gemini-3.5-flash-lite (keep original price/latency tier, not forced upgrade).
+        // https://ai.google.dev/gemini-api/docs/deprecations / https://ai.google.dev/gemini-api/docs/models
         "gemini" to mapOf(
             "gemini-2.0-flash" to "gemini-3.6-flash",
             "gemini-2.0-flash-001" to "gemini-3.6-flash",
             "gemini-2.0-flash-lite" to "gemini-3.5-flash-lite",
             "gemini-2.0-flash-lite-001" to "gemini-3.5-flash-lite",
         ),
-        // ── 2026-08-25 五家全面稽核（DeepSeek/OpenAI/Gemini/Qwen/OpenRouter 官方 deprecation 頁逐一核過）──
-        // 收表判準補充：**除了「已停役」，還要「使用者可能存著」**——本 app 2026-06-09 首發，凡停役日早於
-        // 首發的 id（Gemini 全部 preview 系、Qwen 2026-01-30 前各批、OpenAI o1-mini/o1-preview 等）不可能
-        // 出現在我們的「撈模型」清單裡 ⇒ 不收（手輸古 id 屬極端例外；mixtral 例外是因 m-i-t 文件教人輸它）。
-        // 【到期看板：日期到了收下一波】
-        //   2026-08-31  OpenRouter moonshotai/kimi-k2.5（官方無指定替代、到期後從 /models 消失即 400）
-        //   2026-10-10  Qwen qwen3 大批（qwen3-32b/-coder-plus/-max-preview…→ 官方指 qwen3.6-flash/3.7-plus/3.7-max）
-        //   2026-10-23  OpenAI 大批（gpt-4/gpt-4-turbo/gpt-3.5-turbo/o1/o3-mini/o4-mini/gpt-4.1-nano → gpt-5.6-sol/terra/luna）
-        //   2026-12-11  OpenAI 快照批（gpt-5/-mini/-nano/-pro 2025-08-07 快照、o3/o3-pro → gpt-5.6 系）
-        //   2027-05-07  Gemini gemini-3.1-flash-lite → gemini-3.5-flash-lite（我們的 lite 遷移目標已直指 3.5，無鏈風險）
-        // 預設 model 全數現役：deepseek-v4-flash（2026-07-31 GA）/ gpt-4o-mini（不在任何停役名單）/
-        // gemini-3.6-flash（stable）/ openai/gpt-oss-120b（production）/ qwen-plus（穩定別名）/
-        // openrouter deepseek/deepseek-v4-flash（expiration_date:null）。
-        // Groq 三波停役（2026-07-17 / 2026-08-16）全數到期後收錄（2026-08-25）。替代照官方 deprecations 頁
-        // 建議、並維持原本的大小/價位級距（8b-instant → 20b、其餘 → 120b）。migrateModel 在 PARAM_RULES
-        // 比對之前跑 ⇒ 遷移目標自動命中既有的 gpt-oss 規則（reasoning_effort=low），不用另加參數列。
-        // mixtral-8x7b-32768 停役更早（m-i-t 也是 2026-08 才修它的預設，PR #1166）：使用者若照 m-i-t 文件
-        // 手輸過就會存著它 → 一併遷移；級距對齊 m-i-t 的選擇（→ gpt-oss-20b）。
+        // 2026-08-25 comprehensive audit of all five providers (DeepSeek/OpenAI/Gemini/Qwen/OpenRouter official deprecation pages verified)
+        // Collection criteria: **in addition to "retired", also "user likely has it stored"** — this app first release 2026-06-09, any id retired before
+        // that (all Gemini preview series, batches before Qwen 2026-01-30, OpenAI o1-mini/o1-preview etc.) could not appear in our "fetch models" list => not collected (manual old id is extreme exception; mixtral exception because m-i-t docs tell users to enter it).
+        // [Expiry board: collect next batch when date arrives]
+        //   2026-08-31  OpenRouter moonshotai/kimi-k2.5 (official no designated replacement, disappears from /models after expiry => 400)
+        //   2026-10-10  Qwen qwen3 batch (qwen3-32b/-coder-plus/-max-preview...-> official points to qwen3.6-flash/3.7-plus/3.7-max)
+        //   2026-10-23  OpenAI batch (gpt-4/gpt-4-turbo/gpt-3.5-turbo/o1/o3-mini/o4-mini/gpt-4.1-nano -> gpt-5.6-sol/terra/luna)
+        //   2026-12-11  OpenAI snapshot batch (gpt-5/-mini/-nano/-pro 2025-08-07 snapshots, o3/o3-pro -> gpt-5.6 series)
+        //   2027-05-07  Gemini gemini-3.1-flash-lite -> gemini-3.5-flash-lite (our lite migration target already points to 3.5, no chain risk)
+        // Default models all active: deepseek-v4-flash (2026-07-31 GA) / gpt-4o-mini (not on any retirement list) /
+        // gemini-3.6-flash (stable) / openai/gpt-oss-120b (production) / qwen-plus (stable alias) /
+        // openrouter deepseek/deepseek-v4-flash (expiration_date:null).
+        // Groq three retirement waves (2026-07-17 / 2026-08-16) all collected after expiry (2026-08-25). Replacement per official deprecations page
+        // and keep original size/price tier (8b-instant -> 20b, rest -> 120b). migrateModel runs before PARAM_RULES
+        // matching => migration target automatically hits existing gpt-oss rule (reasoning_effort=low), no extra param column needed.
+        // mixtral-8x7b-32768 retired earlier (m-i-t also fixed its default only 2026-08, PR #1166): if user manually entered per m-i-t docs
+        // it will be stored -> migrate together; tier aligns with m-i-t choice (-> gpt-oss-20b).
         // https://console.groq.com/docs/deprecations
         "groq" to mapOf(
             "llama-3.3-70b-versatile" to "openai/gpt-oss-120b",
@@ -199,91 +191,89 @@ object LlmProviders {
         ),
     )
 
-    /** 送出請求前的 model 名稱遷移：命中 [RETIRED_MODELS] 換成替代名，否則原樣回傳。 */
+    /** Migrate model name before sending request: hit [RETIRED_MODELS] -> replace with alternative, else return as-is. */
     fun migrateModel(providerId: String?, model: String): String =
         RETIRED_MODELS[providerId]?.get(model.trim()) ?: model
 
-    // ───────────────────────── request 參數相容映射（per provider / per model） ─────────────────────────
+    // Request parameter compatibility mapping (per provider / per model)
 
-    /** OpenAI reasoning 模型的「最大輸出 token」欄位名（Chat Completions 只認這個、送 max_tokens 會 400）。 */
+    /** "Max output tokens" field name for OpenAI reasoning models (Chat Completions only accepts this, sending max_tokens is 400). */
     private const val MAX_COMPLETION = "max_completion_tokens"
 
     /**
-     * provider → 規則清單。**由上而下第一個命中 [ParamRule.modelPattern] 者勝**、pattern=null 的 fallback 放最後；
-     * **不在表內的 provider（custom / sakura / 未知）→ [DEFAULT_RULE]＝只送 temperature、不加任何欄位**
-     * （自架端點的相容性未知，亂送未知欄位就是 400）。
+     * Provider -> rule list. **First matching [ParamRule.modelPattern] wins** from top to bottom, pattern=null fallback at end;
+     * **Providers not in table (custom / sakura / unknown) -> [DEFAULT_RULE] = only send temperature, add no other fields**
+     * (self-hosted endpoint compatibility unknown, sending unknown fields is 400).
      *
-     * 加一家 provider / 一個特例 model ＝**只加一列資料**，[requestParams] 的邏輯不用動。
+     * Adding a provider / special-case model = **only add one row of data**, [requestParams] logic does not move.
      */
     private val PARAM_RULES: Map<String, List<ParamRule>> = mapOf(
-        // DeepSeek：思考開關＝**頂層物件** {"thinking":{"type":"disabled"}}（OpenAI SDK 的 extra_body ＝ body 頂層欄位）。
-        // v4-flash / v4-pro 兩顆都支援雙模式、**預設思考開**（比舊 deepseek-chat 慢且貴）→ 我們預設關＝復刻舊行為。
-        // thinking=true 不送欄位（該家預設就是思考）。思考模式下 temperature/top_p/presence/frequency
-        // 「不支援但不報錯、只是無效」⇒ 照送無妨（關思考時才真的生效）。
+        // DeepSeek: thinking switch = **top-level object** {"thinking":{"type":"disabled"}} (OpenAI SDK extra_body = body top-level field).
+        // v4-flash / v4-pro both support dual mode, **default thinking on** (slower and more expensive than old deepseek-chat) -> we default off = replicate old behavior.
+        // thinking=true sends no field (provider default is thinking). In thinking mode temperature/top_p/presence/frequency
+        // "unsupported but not error, just ineffective" => sending is fine (only effective when thinking off).
         // https://api-docs.deepseek.com/guides/thinking_mode/
         "deepseek" to listOf(
             ParamRule(thinkingOff = mapOf("thinking" to mapOf("type" to "disabled"))),
         ),
-        // OpenAI：★最大地雷＝**reasoning 模型整組拒收取樣參數**。官方（Azure 同一份 API 規格）明列
-        // 「currently unsupported with reasoning models: temperature, top_p, presence_penalty, frequency_penalty,
-        //   logprobs, top_logprobs, logit_bias, max_tokens」→ 送了 400，且長度上限要改叫 max_completion_tokens。
-        // reasoning_effort 的可用值又**逐代不同**：none 只有 gpt-5.1 以後有／minimal 只有初代 gpt-5 系有
-        //（gpt-5.1+ 拿掉、gpt-5-codex 也不支援）／o 系列只有 low|medium|high（o1-mini 根本沒這參數）／
-        // gpt-5-pro 只吃 high（＝關不掉）。gpt-5*-chat 是**非** reasoning 的聊天模型（吃 temperature、
-        // 送 reasoning_effort 反而 400）⇒ 放第一條先攔下來。
+        // OpenAI: largest pitfall = **reasoning models as a group reject sampling params**. Official (Azure same API spec) lists
+        // "currently unsupported with reasoning models: temperature, top_p, presence_penalty, frequency_penalty, logprobs, top_logprobs, logit_bias, max_tokens" -> 400, and length limit must be called max_completion_tokens.
+        // reasoning_effort valid values also **differ per generation**: none only from gpt-5.1 onward / minimal only first-gen gpt-5 series
+        // (removed from gpt-5.1+, gpt-5-codex also not supported) / o series only low|medium|high (o1-mini has no such param at all) /
+        // gpt-5-pro only high (= cannot be turned off). gpt-5*-chat is **non**-reasoning chat model (consumes temperature, sending reasoning_effort is 400) => put first to intercept.
         // https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning
         "openai" to listOf(
-            ParamRule(Regex("^gpt-5.*chat")), // gpt-5-chat-latest / gpt-5.1-chat：非 reasoning，走一般規則
-            ParamRule(Regex("^o1-mini"), temperature = false, maxTokensField = MAX_COMPLETION), // 無 reasoning_effort
-            // o 系列（o1/o3/o4-mini/o3-pro/codex-mini）：關不掉，只能降到最低檔 low
+            ParamRule(Regex("^gpt-5.*chat")), // gpt-5-chat-latest / gpt-5.1-chat: non-reasoning, follow normal rules
+            ParamRule(Regex("^o1-mini"), temperature = false, maxTokensField = MAX_COMPLETION), // No reasoning_effort
+            // o series (o1/o3/o4-mini/o3-pro/codex-mini): cannot be turned off, only down to low
             ParamRule(
                 Regex("^(o\\d|codex-mini)"), temperature = false, maxTokensField = MAX_COMPLETION,
                 thinkingOff = mapOf("reasoning_effort" to "low"),
             ),
-            ParamRule(Regex("^gpt-5-pro"), temperature = false, maxTokensField = MAX_COMPLETION), // 只支援 high＝關不掉
-            ParamRule( // gpt-5-codex：不支援 minimal → 降到 low
+            ParamRule(Regex("^gpt-5-pro"), temperature = false, maxTokensField = MAX_COMPLETION), // Only supports high = cannot be turned off
+            ParamRule( // gpt-5-codex: does not support minimal -> down to low
                 Regex("^gpt-5-codex"), temperature = false, maxTokensField = MAX_COMPLETION,
                 thinkingOff = mapOf("reasoning_effort" to "low"),
             ),
-            ParamRule( // 初代 gpt-5 / -mini / -nano：最低檔＝minimal（沒有 none）
+            ParamRule( // First-gen gpt-5 / -mini / -nano: lowest = minimal (no none)
                 Regex("^gpt-5(-mini|-nano)?$"), temperature = false, maxTokensField = MAX_COMPLETION,
                 thinkingOff = mapOf("reasoning_effort" to "minimal"),
             ),
-            ParamRule( // gpt-5.1 以後（5.1/5.2/5.4/5.5/5.6…）：none＝完全不思考
+            ParamRule( // gpt-5.1 and later (5.1/5.2/5.4/5.5/5.6...): none = no thinking at all
                 Regex("^gpt-5\\."), temperature = false, maxTokensField = MAX_COMPLETION,
                 thinkingOff = mapOf("reasoning_effort" to "none"),
             ),
-            // 其餘沒列到的 gpt-5 變體：確定是 reasoning 模型（不送 temperature），但 effort 值沒把握 → 不送
+            // Other gpt-5 variants not listed: confirmed reasoning model (do not send temperature), but effort value uncertain -> do not send
             ParamRule(Regex("^gpt-5"), temperature = false, maxTokensField = MAX_COMPLETION),
-            ParamRule(), // gpt-4o / gpt-4.1 / 其他＝非 reasoning，一般規則
+            ParamRule(), // gpt-4o / gpt-4.1 / others = non-reasoning, normal rules
         ),
-        // Gemini（走 OpenAI 相容端點）：思考走 reasoning_effort，compat 層自動映射到 thinkingBudget(2.5 系)／
-        // thinking_level(3.x)。**none 只有 2.5 系吃**；3.x 最低檔是 minimal（關不掉、只能最小化）。
-        // 2.0 系不是思考模型（且 2026-06-01 已停役）→ 什麼都不送。
-        // temperature：官方 changelog 2026-07-21 對「最新 Gemini 模型」標 deprecated，但 compat 層明文
-        // silently ignore 不支援的參數 ⇒ 照送無妨（同 DeepSeek v4 的立場）；若日後開始報錯再加 temperature=false 規則。
+        // Gemini (via OpenAI-compatible endpoint): thinking via reasoning_effort, compat layer auto maps to thinkingBudget (2.5 series) /
+        // thinking_level (3.x). **none only for 2.5 series**; 3.x lowest is minimal (cannot be turned off, only minimized).
+        // 2.0 series is not a thinking model (and retired 2026-06-01) -> send nothing.
+        // temperature: official changelog 2026-07-21 marks "latest Gemini models" as deprecated, but compat layer states
+        // silently ignore unsupported params => sending is fine (same stance as DeepSeek v4); add temperature=false rule later if it starts erroring.
         // https://ai.google.dev/gemini-api/docs/openai
         "gemini" to listOf(
             ParamRule(Regex("^gemini-2\\.5"), thinkingOff = mapOf("reasoning_effort" to "none")),
             ParamRule(Regex("^gemini-[3-9]"), thinkingOff = mapOf("reasoning_effort" to "minimal")),
             ParamRule(),
         ),
-        // Groq：reasoning_effort **只有部分模型吃**——Qwen 3.x 支援 none|default（真的能關）、GPT-OSS 只有
-        // low|medium|high（關不掉、只能降到 low）；送給 llama 系會 400「reasoning_effort is not supported with
-        // this model」⇒ llama 什麼都不送。**現行預設 openai/gpt-oss-120b 走 gpt-oss 那條**。
+        // Groq: reasoning_effort **only some models consume** — Qwen 3.x supports none|default (can truly be turned off), GPT-OSS only
+        // low|medium|high (cannot be turned off, only down to low); sending to llama series is 400 "reasoning_effort is not supported with
+        // this model" => send nothing for llama. **Current default openai/gpt-oss-120b goes via gpt-oss path**.
         // https://console.groq.com/docs/reasoning
         "groq" to listOf(
             ParamRule(Regex("qwen"), thinkingOff = mapOf("reasoning_effort" to "none")),
             ParamRule(Regex("gpt-oss"), thinkingOff = mapOf("reasoning_effort" to "low")),
             ParamRule(),
         ),
-        // Qwen（DashScope compatible-mode）：思考開關＝頂層 enable_thinking。★本引擎一律 stream=false，
-        // 而 DashScope 對「會思考的模型 + 非串流」直接 400
-        //「parameter.enable_thinking must be set to false for non-streaming calls」
-        // ⇒ **兩種狀態都送 false**（非串流下本來就拿不到思考，寧可保證跑得動）。
-        // qwen-plus/max/flash/turbo 預設關、Qwen3.5+ 預設開，統一顯式關掉最穩。
+        // Qwen (DashScope compatible-mode): thinking switch = top-level enable_thinking. This engine always stream=false,
+        // and DashScope directly returns 400 for "thinking model + non-streaming"
+        // "parameter.enable_thinking must be set to false for non-streaming calls"
+        // => **both states send false** (cannot get thinking in non-streaming anyway, better guarantee it runs).
+        // qwen-plus/max/flash/turbo default off, Qwen3.5+ default on, uniformly explicitly turn off is most stable.
         // https://www.alibabacloud.com/help/en/model-studio/deep-thinking
-        // temperature：DashScope 官方明文「Range: [0, 2). Do not set to 0.」——兩端都不合法 ⇒ clamp 到 (0,2) 內。
+        // temperature: DashScope official "Range: [0, 2). Do not set to 0." — both ends illegal => clamp to (0,2).
         "qwen" to listOf(
             ParamRule(
                 temperatureRange = 0.01..1.99,
@@ -291,11 +281,11 @@ object LlmProviders {
                 thinkingOn = mapOf("enable_thinking" to false),
             ),
         ),
-        // OpenRouter：統一的 reasoning 物件，effort="none"＝「Disables reasoning entirely」。對不支援推理的模型
-        // 也安全——OpenRouter 預設「providers that don't support all the LLM parameters ... will ignore unknown
-        // parameters」（要改成排除該 provider 得自己開 require_parameters）。同理，`openai/o3` 這種轉手的
-        // reasoning 模型即使收到 temperature 也由 OpenRouter 吸收掉 ⇒ 不必在這裡逐家重列一次規則。
-        // https://openrouter.ai/docs/use-cases/reasoning-tokens ／ https://openrouter.ai/docs/features/provider-routing
+        // OpenRouter: unified reasoning object, effort="none" = "Disables reasoning entirely". Safe for non-reasoning models too
+        // — OpenRouter defaults to "providers that don't support all the LLM parameters ... will ignore unknown
+        // parameters" (to exclude that provider you must set require_parameters yourself). Similarly, `openai/o3` handed-off
+        // reasoning models even if they receive temperature will be absorbed by OpenRouter => no need to re-list rules per provider here.
+        // https://openrouter.ai/docs/use-cases/reasoning-tokens / https://openrouter.ai/docs/features/provider-routing
         "openrouter" to listOf(
             ParamRule(thinkingOff = mapOf("reasoning" to mapOf("effort" to "none"))),
         ),

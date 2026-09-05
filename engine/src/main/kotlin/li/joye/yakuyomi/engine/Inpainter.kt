@@ -9,13 +9,13 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.coroutineScope
 
 /**
- * 去字（text removal）。真機 A/B 定案＝兩門別，皆純 NCNN（`.param`/`.bin`）：
- *  - **boxfill（快速去字）**：逐區把去字遮罩像素平塗成背景色。瞬間、不跑模型；乾淨白泡完美、壓畫面是平色塊。
- *  - **aot（AI 去字·預設）**：AOT-GAN（m-i-t 漫畫權重）整頁一次縮到 [InpainterConfig.tileSize]（768）重建背景、全區重建。
- *    全卷積 → 任意尺寸；768＝畫質/記憶體/藏在翻譯下（§8 去字‖翻譯重疊）的甜蜜點。
+ * Text removal. Proven on device = two options, both pure NCNN (`.param`/`.bin`):
+ *  - **boxfill (fast inpaint)**: flat-fill inpaint mask pixels per region with background color. Instant, no model run; perfect for clean white bubbles, flat color block on busy art.
+ *  - **aot (AI inpaint, default)**: AOT-GAN (m-i-t manga weights) whole page scaled to [InpainterConfig.tileSize] (768) to reconstruct background, whole area.
+ *    Fully convolutional -> any size; 768 = quality/memory/hidden-under-translation (§8 inpaint || translation overlap) sweet spot.
  *
- * AOT I/O 契約（對齊 parity/inpaint_parity.py）：img∈[-1,1] 且洞歸零（m-i-t `img*(1-mask)`）、mask∈{0,1}(1=擦)、輸出∈[-1,1]。
- * LaMa（整頁縮 512 必糊）與 AOT 逐格（原生解析度·CPU 太貴）皆已退役移除；GPU/Vulkan 實測算不對 AOT-GAN（見 memory ncnn-vulkan-fp16）。
+ * AOT I/O contract (aligned with parity/inpaint_parity.py): img in [-1,1] and holes zeroed (m-i-t `img*(1-mask)`), mask in {0,1}(1=erase), output in [-1,1].
+ * LaMa (whole page scaled 512 always blurry) and per-tile AOT (native res, CPU too expensive) both retired; GPU/Vulkan proven to miscompute AOT-GAN (see memory ncnn-vulkan-fp16).
  */
 class Inpainter(
     modelPath: String,
@@ -27,44 +27,58 @@ class Inpainter(
     val ep: String = "NCNN-CPU"
 
     init {
-        check(modelPath.endsWith(".param")) { "去字需 NCNN `.param` 模型（AOT-GAN）：$modelPath" }
-        check(NcnnBackend.available) { "NCNN 原生庫未載入，無法去字" }
+        check(modelPath.endsWith(".param")) { "Inpaint requires NCNN `.param` model (AOT-GAN): $modelPath" }
+        check(NcnnBackend.available) { "NCNN native library not loaded, cannot inpaint" }
         val bin = modelPath.removeSuffix(".param") + ".bin"
         ncnnHandle = NcnnBackend.createNet(modelPath, bin)
-        check(ncnnHandle != 0L) { "NCNN AOT 模型載入失敗：$modelPath" }
+        check(ncnnHandle != 0L) { "Failed to load NCNN AOT model: $modelPath" }
     }
 
     suspend fun inpaint(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap, render: RenderConfig = RenderConfig()): Bitmap = coroutineScope {
         val w = page.width
         val h = page.height
         val result = page.copy(Bitmap.Config.ARGB_8888, true)
-        // 遮罩＝翻譯區的「擴展後文字框」整塊（見 buildSegMask）：新譯文（尤其直式框旋轉 90° 的長 LTR 文）落點都要有乾淨背景。
+        // Mask = entire "expanded text box" of translation regions (see buildSegMask): new translated text (especially long LTR text in vertical boxes rotated 90°) must have clean background at its landing spot.
         val maskPx = buildSegMask(regions, textMask, w, h, render)
 
         if (cfg.method == "boxfill") {
-            // 逐區平塗背景色：白泡乾淨無殘留、忙碌區是平色塊（要品質用 aot）。
+            // Per-region flat fill with background color: clean white bubbles with no residue, busy areas are flat color blocks (use aot for quality).
             val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
             val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
             for (r in regions) {
                 val s = bgStats(px, tightPx, r, w, h)
-                r.onArt = false; r.dbgStd = s.std; r.dbgWhite = s.meanLum // dbg 值給 sandbox 去背比較標框
+                r.onArt = false; r.dbgStd = s.std; r.dbgWhite = s.meanLum // dbg values for sandbox inpaint comparison boxes
                 flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
             }
             return@coroutineScope result
         }
 
-        // aot（預設）：全區都跑 AOT-GAN 整頁重建；標 onArt 讓 Renderer 給黑字粗白邊。
+        // aot (default): whole page runs AOT-GAN whole-page reconstruction; mark onArt so Renderer gives black text thick white outline.
+        // Hardened: for bubble regions (not onArt) we still prefer boxfill to preserve bubble borders, only art regions use AOT
+        val bubbleRegions = regions.filter { !it.onArt }
+        val artRegions = regions.filter { it.onArt }
+        // If we have mixed, handle bubbles with boxfill first to preserve, then AOT for art
+        if (bubbleRegions.isNotEmpty() && artRegions.isNotEmpty()) {
+            val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
+            val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
+            for (r in bubbleRegions) {
+                val s = bgStats(px, tightPx, r, w, h)
+                flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
+            }
+        }
         regions.forEach { it.onArt = true }
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
-        runWholeAot(page, maskBmp, w, h)?.let { compositePixels(result, maskPx, it) }
+        // Hardened: if AOT fails, keep boxfill result instead of destroying original
+        val aotResult = try { runWholeAot(page, maskBmp, w, h) } catch (t: Throwable) { Log.w(TAG, "AOT failed, keeping boxfill fallback", t); null }
+        aotResult?.let { compositePixels(result, maskPx, it) }
         maskBmp.recycle()
         result
     }
 
     /**
-     * 暖機：aot 方法對空白小圖跑一次 NCNN AOT session（首次 lazy 初始化在單緒完成）。
-     * boxfill 只平塗、不跑該 session → 無需暖（也不會冷撞）。併發翻多頁前先呼叫一次。
+     * Warmup: aot method runs NCNN AOT session once on blank small image (first lazy init completes on single thread).
+     * boxfill only flat-fills, does not run that session -> no warmup needed (and no cold collision). Call once before concurrent multi-page translation.
      */
     fun warmUp() {
         if (cfg.method == "boxfill") return
@@ -75,14 +89,14 @@ class Inpainter(
         try {
             runWholeAot(page, mask, w, h)
         } catch (t: Throwable) {
-            Log.w(TAG, "去字暖機失敗：${t.message}")
+            Log.w(TAG, "Inpaint warmup failed: ${t.message}")
         } finally {
             page.recycle()
             mask.recycle()
         }
     }
 
-    /** 去字遮罩 Bitmap（白＝要去字）。給重繪素材/視覺化用；與 inpaint 同一份遮罩。 */
+    /** Inpaint mask Bitmap (white = to be inpainted). For redraw material/visualization; same mask as inpaint. */
     fun buildMask(page: Bitmap, regions: List<TextRegion>, textMask: Bitmap, render: RenderConfig = RenderConfig()): Bitmap {
         val w = page.width; val h = page.height
         val maskPx = buildSegMask(regions, textMask, w, h, render)
@@ -90,11 +104,11 @@ class Inpainter(
     }
 
     /**
-     * 去字遮罩＝「擴展後文字框」整塊（白＝要去字）。區框依 Renderer 的 expandW/expandH 外擴
-     * （直式框長短軸對調、配合 drawHorizontal 的 90° 旋轉），再膨脹 maskDilate。
-     * ★ 從「seg 細筆畫 ∩ 框」改成整框：新譯文會畫滿擴展框（直式框的長 LTR 文尤其如此），
-     * 只有整框重建過，譯文落點才有乾淨背景（壓畫面的字不再蓋在沒去字的原稿上）。
-     * SFX/未譯區（OCR 原文空白）不在 regions 內 → 照舊不動。
+     * Inpaint mask = entire "expanded text box" (white = to be inpainted). Region box expanded per Renderer expandW/expandH
+     * (vertical box swaps long/short axis, matching drawHorizontal 90° rotation), then dilate by maskDilate.
+     * Changed from "seg thin strokes ∩ box" to whole box: new translated text will fill the expanded box (especially long LTR text in vertical boxes),
+     * only whole-box reconstruction ensures translated text lands on clean background (text on art no longer covers un-inpainted original).
+     * SFX/untranslated regions (OCR source blank) not in regions -> remain untouched.
      */
     private fun buildSegMask(regions: List<TextRegion>, textMask: Bitmap, w: Int, h: Int, render: RenderConfig): IntArray {
         val pad = cfg.bboxPad
@@ -105,8 +119,10 @@ class Inpainter(
             for (region in regions) {
                 val halfW = (region.x1 - region.x0) / 2f
                 val halfH = (region.y1 - region.y0) / 2f
-                // 與 drawHorizontal 相同的直式判定：長軸當排版寬、短軸當列高。
-                val portrait = (region.y1 - region.y0) * 0.9f > (region.x1 - region.x0)
+                // Same portrait check as drawHorizontal: long axis as layout width, short axis as row height.
+                // Hardened: use same 2.5 aspect threshold as Renderer to avoid over-expanding near-square bubbles
+                val aspect = if ((region.x1 - region.x0) > 1f) (region.y1 - region.y0) / (region.x1 - region.x0) else 1f
+                val portrait = aspect > 2.5f
                 val expW = if (portrait) render.expandH else render.expandW
                 val expH = if (portrait) render.expandW else render.expandH
                 val dx = halfW * (expW - 1f) + pad
@@ -121,7 +137,7 @@ class Inpainter(
         return mask
     }
 
-    /** 二值遮罩可分離膨脹（先橫後縱 max-filter），radius 像素。覆蓋筆畫抗鋸齒邊緣、給去字餘裕。 */
+    /** Binary mask separable dilation (horizontal then vertical max-filter), radius pixels. Covers stroke anti-aliased edges, gives inpaint margin. */
     private fun dilate(px: IntArray, w: Int, h: Int, radius: Int) {
         if (radius <= 0) return
         val tmp = IntArray(px.size)
@@ -145,8 +161,8 @@ class Inpainter(
     private class BgStat(val meanLum: Float, val std: Float, val color: Int)
 
     /**
-     * 區 bbox 內「非文字(背景)」像素的亮度均值+std+平均色。tightPx＝未膨脹 textMask（量得到筆畫間的白）。
-     * boxfill 用 [BgStat.color] 平塗；std/meanLum 只給 sandbox 去背比較標框（對照用）。用行框多邊形局部遮罩避開軸對齊 bbox 角落雜訊。
+     * Mean luminance + std + average color of "non-text (background)" pixels inside region bbox. tightPx = undilated textMask (can measure white between strokes).
+     * boxfill uses [BgStat.color] for flat fill; std/meanLum only for sandbox inpaint comparison boxes (for reference). Use line quad polygon local mask to avoid axis-aligned bbox corner noise.
      */
     private fun bgStats(px: IntArray, tightPx: IntArray, region: TextRegion, w: Int, h: Int): BgStat {
         val x0 = region.x0.toInt().coerceIn(0, w - 1)
@@ -177,7 +193,7 @@ class Inpainter(
             for (x in 0 until bw) {
                 if ((qm[y * bw + x] and 0xFF) <= 127) continue
                 val gi = (y0 + y) * w + (x0 + x)
-                if ((tightPx[gi] and 0xFF) > 127) continue // 文字像素
+                if ((tightPx[gi] and 0xFF) > 127) continue // Text pixel
                 val p = px[gi]
                 val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
                 val lum = 0.299 * r + 0.587 * g + 0.114 * b
@@ -190,7 +206,7 @@ class Inpainter(
         return BgStat(mean.toFloat(), std.toFloat(), Color.rgb((sr / n).toInt(), (sg / n).toInt(), (sb / n).toInt()))
     }
 
-    /** 白泡去字＝把區域 bbox(外擴 pad)內的去字遮罩像素直接平塗成背景色。均勻白泡保證無殘留。 */
+    /** White bubble inpaint = flat-fill inpaint mask pixels inside region bbox (expanded by pad) with background color. Uniform white bubbles guarantee no residue. */
     private fun flatFill(result: Bitmap, maskPx: IntArray, region: TextRegion, color: Int, pad: Int, w: Int, h: Int) {
         val x0 = (region.x0.toInt() - pad).coerceIn(0, w - 1)
         val y0 = (region.y0.toInt() - pad).coerceIn(0, h - 1)
@@ -210,8 +226,8 @@ class Inpainter(
     private class WinOut(val x0: Int, val y0: Int, val ww: Int, val wh: Int, val px: IntArray)
 
     /**
-     * 整頁跑一次 NCNN AOT-GAN：整張縮到方形 [cfg.tileSize] → 推論 → 放回原尺寸。只讀 page/maskBmp ⇒ 併發安全。
-     * NCNN net 固定方形輸入、同尺寸復用安全（跨尺寸 reuse 會崩，故一律整頁 tileSize）。
+     * Run whole-page NCNN AOT-GAN once: scale whole page to square [cfg.tileSize] -> inference -> scale back to original size. Read-only page/maskBmp => concurrent safe.
+     * NCNN net has fixed square input, same-size reuse is safe (reuse across sizes would crash, so always whole page tileSize).
      */
     private fun runWholeAot(page: Bitmap, maskBmp: Bitmap, w: Int, h: Int): WinOut? {
         val t = cfg.tileSize
@@ -222,7 +238,7 @@ class Inpainter(
             val maskArr = maskArr(maskScaled, t)
             val out = FloatArray(3 * t * t)
             val rc = NcnnBackend.inpaintAot(ncnnHandle, imgChw, maskArr, t, out)
-            check(rc == 0) { "NCNN AOT 推論失敗 rc=$rc" }
+            check(rc == 0) { "NCNN AOT inference failed rc=$rc" }
             val resScaled = aotArrToBitmap(out, t)
             val resWin = Bitmap.createScaledBitmap(resScaled, w, h, true)
             val px = IntArray(w * h)
@@ -231,21 +247,21 @@ class Inpainter(
             resWin.recycle()
             WinOut(0, 0, w, h, px)
         } catch (t2: Throwable) {
-            Log.w(TAG, "AOT 去字失敗：${t2.message}"); null
+            Log.w(TAG, "AOT inpaint failed: ${t2.message}"); null
         } finally {
             if (imgScaled !== page) imgScaled.recycle()
             if (maskScaled !== maskBmp) maskScaled.recycle()
         }
     }
 
-    /** AOT 影像的裸 NCHW 陣列 [3*n*n]：RGB→[-1,1]，遮罩處歸零（m-i-t `img*(1-mask)`）。 */
+    /** Raw NCHW array for AOT image [3*n*n]: RGB -> [-1,1], holes zeroed (m-i-t `img*(1-mask)`). */
     private fun aotImageChw(imgBmp: Bitmap, maskBmp: Bitmap, n: Int): FloatArray {
         val area = n * n
         val px = IntArray(area); imgBmp.getPixels(px, 0, n, 0, 0, n, n)
         val mp = IntArray(area); maskBmp.getPixels(mp, 0, n, 0, 0, n, n)
         val chw = FloatArray(3 * area)
         for (i in 0 until area) {
-            if ((mp[i] and 0xFF) > 127) continue // 洞＝0
+            if ((mp[i] and 0xFF) > 127) continue // Hole = 0
             val p = px[i]
             chw[i] = ((p shr 16) and 0xFF) / 127.5f - 1f
             chw[area + i] = ((p shr 8) and 0xFF) / 127.5f - 1f
@@ -254,7 +270,7 @@ class Inpainter(
         return chw
     }
 
-    /** 遮罩的裸陣列 [n*n]（1=擦）。 */
+    /** Raw array for mask [n*n] (1=erase). */
     private fun maskArr(bmp: Bitmap, n: Int): FloatArray {
         val px = IntArray(n * n); bmp.getPixels(px, 0, n, 0, 0, n, n)
         val m = FloatArray(n * n)
@@ -262,7 +278,7 @@ class Inpainter(
         return m
     }
 
-    /** AOT 輸出陣列 [3*n*n]∈[-1,1] → Bitmap（(x+1)*127.5）。 */
+    /** AOT output array [3*n*n] in [-1,1] -> Bitmap ((x+1)*127.5). */
     private fun aotArrToBitmap(arr: FloatArray, n: Int): Bitmap {
         val area = n * n
         val px = IntArray(area)
@@ -275,7 +291,7 @@ class Inpainter(
         return Bitmap.createBitmap(px, n, n, Bitmap.Config.ARGB_8888)
     }
 
-    /** 把 AOT 輸出貼回 result，只換遮罩內像素（序列呼叫、寫入安全）。 */
+    /** Composite AOT output back to result, only replacing pixels inside mask (called sequentially, write-safe). */
     private fun compositePixels(result: Bitmap, maskPx: IntArray, o: WinOut) {
         val w = result.width
         val cur = IntArray(o.ww * o.wh)

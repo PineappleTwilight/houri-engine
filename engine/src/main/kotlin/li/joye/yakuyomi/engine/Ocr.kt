@@ -25,15 +25,15 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * 48px CTC OCR。
+ * 48px CTC OCR.
  *
- * ported from manga_translator/ocr/model_48px_ctc.py (+ ocr/common.py, utils/generic.py) @ d5a3eee
- *   裁切：sortPnts 定直/橫書 + get_transformed_region（findHomography→warpPerspective→48px 條，直書轉90°）
- *         此處用 Android Matrix.setPolyToPoly 取代 cv2 透視（§6）。
- *   前處理：(x-127.5)/127.5、NCHW、RGB。
- *   解碼：greedy CTC（blank=0、收合重複+去blank）→ 查字典。
- *   ignore_bubble（cfg.ignoreBubble，ported from utils/bubble.py）：跳過彩色/非氣泡 SFX 類文字。
- *   顏色 head 不採用（彩底太雜）；文字色改由 [Renderer] 取去字後背景亮度判黑/白。
+ * Ported from manga_translator/ocr/model_48px_ctc.py (+ ocr/common.py, utils/generic.py) @ d5a3eee
+ *   Crop: sortPnts determines vertical/horizontal + get_transformed_region (findHomography->warpPerspective->48px strip, vertical rotated 90°)
+ *         here uses Android Matrix.setPolyToPoly instead of cv2 perspective (§6).
+ *   Preprocess: (x-127.5)/127.5, NCHW, RGB.
+ *   Decode: greedy CTC (blank=0, collapse repeats + strip blank) -> lookup dictionary.
+ *   ignore_bubble (cfg.ignoreBubble, ported from utils/bubble.py): skip colored/non-bubble SFX text.
+ *   Color head not used (colored backgrounds too noisy); text color instead determined by [Renderer] from post-inpaint background luminance.
  */
 class Ocr(
     modelPath: String,
@@ -45,7 +45,7 @@ class Ocr(
     private val session: OrtSession
 
     init {
-        // 並發模式：每行單緒（intra-op=1）、靠 N 行並發填核；序列模式：單行用滿 NUM_THREADS（現狀）。
+        // Concurrent mode: one thread per line (intra-op=1), fill cores via N concurrent lines; sequential mode: one line uses NUM_THREADS (current).
         val threads = if (cfg.concurrent) 1 else NUM_THREADS
         val options = OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(threads)
@@ -53,22 +53,22 @@ class Ocr(
                 try {
                     addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
                 } catch (t: Throwable) {
-                    Log.w(TAG, "XNNPACK 不可用，退回 CPU：${t.message}")
+                    Log.w(TAG, "XNNPACK unavailable, fallback to CPU: ${t.message}")
                 }
             }
         }
-        session = env.createSession(modelPath, options) // 路徑載入＝native 記憶體、不佔 JVM heap
+        session = env.createSession(modelPath, options) // Path load = native memory, does not occupy JVM heap
     }
 
     /**
-     * 對每條文字行做 OCR，就地填入 direction 與 text。每條右側加 [PAD_MARGIN] 白邊（見 [stripToTensor]）讓 CTC 不截尾字。
-     * [OcrConfig.concurrent]＝true：多行並發（小圖塊吃不滿 intra-op→改單緒、並發填核，見 init）；false：逐行序列（現狀）。
-     * 批次 padding 已否決（寬度差→padding 浪費）；此處是「並發」（零 padding），與批次不同。
+     * Perform OCR on each text line, filling direction and text in place. Each line gets [PAD_MARGIN] white border on right (see [stripToTensor]) so CTC does not cut trailing chars.
+     * [OcrConfig.concurrent]=true: concurrent multi-line (small tiles under-utilize intra-op -> switch to single-thread, fill cores via concurrency, see init); false: sequential per line (current).
+     * Batch padding already rejected (width variance -> padding waste); here is "concurrency" (zero padding), different from batch.
      */
     suspend fun recognize(
         page: Bitmap,
         lines: List<TextLine>,
-        bicubic: Boolean = cfg.useBicubic, // 裁切縮放內插法：true=手刻 bicubic（救小假名漏讀）、false=Canvas bilinear（現行）
+        bicubic: Boolean = cfg.useBicubic, // Crop scaling interpolation: true=hand-rolled bicubic (saves small kana), false=Canvas bilinear (current)
     ): Unit = coroutineScope {
         val inputName = session.inputNames.first()
         if (cfg.concurrent && lines.size > 1) {
@@ -82,8 +82,8 @@ class Ocr(
     }
 
     /**
-     * 暖機：對空白 strip 跑一次 OCR session，讓 ORT session 首次 run 的 lazy 初始化（arena/EP 配置）在單緒完成。
-     * 併發翻多頁前先呼叫一次；strip 內容不重要（只為觸發一次 run）。
+     * Warmup: run OCR session once on a blank strip to complete first lazy initialization of ORT session (arena/EP setup) on a single thread.
+     * Call once before concurrent multi-page translation; strip content does not matter (just to trigger one run).
      */
     fun warmUp() {
         val strip = Bitmap.createBitmap(160, cfg.textHeight, Bitmap.Config.ARGB_8888)
@@ -92,15 +92,15 @@ class Ocr(
                 session.run(mapOf(session.inputNames.first() to input)).use { }
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "OCR 暖機失敗：${t.message}")
+            Log.w(TAG, "OCR warmup failed: ${t.message}")
         } finally {
             strip.recycle()
         }
     }
 
-    /** 單行 OCR：裁切→前處理→CTC→填 text。thread-safe：只寫自己的 line、session.run 可並發、其餘皆 local/唯讀。 */
+    /** Single-line OCR: crop -> preprocess -> CTC -> fill text. Thread-safe: only writes own line, session.run can be concurrent, rest is local/read-only. */
     private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String, bicubic: Boolean) {
-        // ★ 先外擴、再 sortPnts：sortPnts 定的點序是 warp 要的，擴完才排才不會亂序（擴張本身不改直/橫書判定）。
+        // First expand, then sortPnts: sortPnts determines point order for warp, expand then sort avoids disorder (expansion itself does not change vertical/horizontal determination).
         val quad = if (cfg.stripPad > 0) expandQuad(line.quad, cfg.stripPad, page.width, page.height) else line.quad
         val (ordered, isV) = sortPnts(quad)
         line.direction = if (isV) "v" else "h"
@@ -127,9 +127,9 @@ class Ocr(
     }
 
     /**
-     * quad 四邊各外擴 [pad] px 供 OCR 裁切（[OcrConfig.stripPad]）：minAreaRect → w,h 各 +2*pad → corners → clamp 進圖內。
-     * **只回新的點、不動 [TextLine.quad]** ⇒ 偵測框與去字遮罩（走 seg 筆畫）完全不受影響。
-     * 對齊桌面 exp_pad.py:expand_quad（cv2.minAreaRect + boxPoints）。救「框太瘦把字切掉 → CTC 空讀 → 留原文不翻」。
+     * Expand each side of quad by [pad] px for OCR crop ([OcrConfig.stripPad]): minAreaRect -> w,h each +2*pad -> corners -> clamp inside image.
+     * **Only returns new points, does not modify [TextLine.quad]** => detection box and inpaint mask (via seg strokes) completely unaffected.
+     * Aligned with desktop exp_pad.py:expand_quad (cv2.minAreaRect + boxPoints). Saves "thin box clips glyphs -> CTC empty read -> left untranslated".
      */
     private fun expandQuad(pts: List<Pt>, pad: Int, w: Int, h: Int): List<Pt> {
         val rect = Geometry.minAreaRect(pts) ?: return pts
@@ -138,12 +138,11 @@ class Ocr(
         }
     }
 
-    /** 對齊 generic.py:sort_pnts —— 回傳排序後 4 點與是否直書。 */
-    private fun sortPnts(quad: List<Pt>): Pair<List<Pt>, Boolean> {
+    /** Aligned with generic.py:sort_pnts — return sorted 4 points and whether vertical. */
         val n = quad.size
         var best0 = 0
         var best1 = 0
-        // 16 對向量、取長度排序的第 8、10 名（長邊）
+        // 16 pairs of vectors, take 8th and 10th longest (long edges)
         val norms = FloatArray(n * n)
         for (i in 0 until n) for (j in 0 until n) {
             val vx = quad[i].x - quad[j].x
@@ -169,15 +168,15 @@ class Ocr(
             Pair(listOf(first2[0], first2[1], last2[1], last2[0]), true)
         } else {
             val byX = quad.sortedBy { it.x }
-            val ls = listOf(byX[0], byX[1]).sortedBy { it.y } // 左：上、下
-            val rs = listOf(byX[2], byX[3]).sortedBy { it.y } // 右：上、下
+            val ls = listOf(byX[0], byX[1]).sortedBy { it.y } // Left: top, bottom
+            val rs = listOf(byX[2], byX[3]).sortedBy { it.y } // Right: top, bottom
             Pair(listOf(ls[0], rs[0], rs[1], ls[1]), false)
         }
     }
 
-    /** 對齊 generic.py:Quadrilateral.get_transformed_region。[bicubic]=true 時 warp 用手刻 bicubic 取樣（見 [bicubicWarp]）。 */
+    /** Aligned with generic.py:Quadrilateral.get_transformed_region. When [bicubic]=true warp uses hand-rolled bicubic sampling (see [bicubicWarp]). */
     private fun transformedRegion(page: Bitmap, pts: List<Pt>, isV: Boolean, th: Int, bicubic: Boolean): Bitmap? {
-        // structure 邊中點
+        // Structure edge midpoints
         val p1x = (pts[0].x + pts[1].x) / 2f; val p1y = (pts[0].y + pts[1].y) / 2f
         val p2x = (pts[2].x + pts[3].x) / 2f; val p2y = (pts[2].y + pts[3].y) / 2f
         val p3x = (pts[1].x + pts[2].x) / 2f; val p3y = (pts[1].y + pts[2].y) / 2f
@@ -207,8 +206,8 @@ class Ocr(
         val m = Matrix()
         if (!m.setPolyToPoly(src, 0, dst, 0, 4)) return null
 
-        // bicubic：手刻 perspective bicubic 取樣（Android Canvas 只有 bilinear）；bilinear 把 ~30px 直行上採樣到 48px
-        // 時糊掉小假名 → OCR 漏字（連句尾否定漏→意思相反）。parity 實測 bicubic 517字/100行 vs bilinear 486/96。
+        // Bicubic: hand-rolled perspective bicubic sampling (Android Canvas only has bilinear); bilinear blurs ~30px vertical strip upscaled to 48px
+        // and loses small kana -> OCR misses (even sentence-ending negation -> meaning inversion). Parity measured bicubic 517 chars/100 lines vs bilinear 486/96.
         val region = if (bicubic) {
             bicubicWarp(page, m, w, h, pts) ?: return null
         } else {
@@ -217,24 +216,24 @@ class Ocr(
         }
         if (!isV) return region
 
-        // 直書：cv2.ROTATE_90_COUNTERCLOCKWISE → 高度變 48
+        // Vertical: cv2.ROTATE_90_COUNTERCLOCKWISE -> height becomes 48
         val rot = Matrix().apply { postRotate(-90f) }
-        // filter=false（無損 transpose）：精確 90° 旋轉不需內插；filter=true 會在 warp 的 bilinear 之上再疊一層
-        // bilinear 模糊、把小假名糊掉 → OCR 漏字。旋轉本身無縮放，關掉 filter 不失真且更快（見 stripToTensor 銳化）。
+        // filter=false (lossless transpose): exact 90° rotation needs no interpolation; filter=true would add another bilinear blur on top of warp's bilinear
+        // and blur small kana -> OCR misses. Rotation itself has no scaling, turning off filter is lossless and faster (see stripToTensor sharpening).
         val rotated = Bitmap.createBitmap(region, 0, 0, w, h, rot, false)
         region.recycle()
         return rotated
     }
 
-    // ── 手刻 perspective bicubic warp（a=-0.75 cubic convolution）：逐位對齊 parity 驗證腳本 verify_handcubic(a=-0.75)
-    //    → 517 字 / 100 行過信心門檻（vs 現行 bilinear 486/96），救回被 bilinear 縮放糊掉的小假名（含句尾否定→意思相反）。
-    //    Android Canvas 無 bicubic 故手刻。效能：strip 小（平均 ~13K px）、每頁額外 ~12M 乘加 ≈ +1~4% OCR 時間（parity 估）。
+    // Hand-rolled perspective bicubic warp (a=-0.75 cubic convolution): bit-exact with parity verification script verify_handcubic(a=-0.75)
+    // -> 517 chars / 100 lines over confidence threshold (vs current bilinear 486/96), restores small kana blurred by bilinear scaling (including sentence-ending negation -> meaning inversion).
+    // Android Canvas has no bicubic so hand-rolled. Performance: strip small (avg ~13K px), extra ~12M multiply-add per page ~ +1-4% OCR time (parity est).
     private fun bicubicWarp(page: Bitmap, forward: Matrix, w: Int, h: Int, pts: List<Pt>): Bitmap? {
         val inv = Matrix()
         if (!forward.invert(inv)) return null
         val iv = FloatArray(9)
-        inv.getValues(iv) // 3x3：sx=(iv0*dx+iv1*dy+iv2)/(iv6*dx+iv7*dy+iv8)、sy 同理（Android Matrix 透視同 cv2）
-        // 只 crop quad 來源包圍盒（±2 容 4-tap）→ 一次 getPixels、省記憶體
+        inv.getValues(iv) // 3x3: sx=(iv0*dx+iv1*dy+iv2)/(iv6*dx+iv7*dy+iv8), sy similar (Android Matrix perspective same as cv2)
+        // Only crop quad source bounding box (±2 for 4-tap) -> single getPixels, save memory
         val pw = page.width
         val ph = page.height
         val x0 = (floor(pts.minOf { it.x }) - 2f).toInt().coerceIn(0, pw - 1)
@@ -258,7 +257,7 @@ class Ocr(
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
-    /** 對 [px]（cw×ch，ARGB）在 (sx,sy) 做 4×4 bicubic 取樣（a=-0.75、邊界 clamp、per-channel）。 */
+    /** Sample [px] (cw x ch, ARGB) at (sx,sy) with 4x4 bicubic (a=-0.75, clamp borders, per-channel). */
     private fun bicubicSample(px: IntArray, cw: Int, ch: Int, sx: Float, sy: Float): Int {
         val a = -0.75f
         val fx = floor(sx).toInt()
@@ -289,7 +288,7 @@ class Ocr(
             b.roundToInt().coerceIn(0, 255)
     }
 
-    /** cubic convolution kernel（Horner 展開）：|t|≤1 與 1<|t|<2 兩段，其餘 0。 */
+    /** Cubic convolution kernel (Horner expansion): |t|<=1 and 1<|t|<2 segments, else 0. */
     private fun cubicW(t: Float, a: Float): Float {
         val x = abs(t)
         return when {
@@ -300,13 +299,13 @@ class Ocr(
     }
 
     /**
-     * Unsharp mask（原地銳化 [px]＝strip 的 ARGB 像素、[w]×[h]）：抵銷 warp 把 ~30px 寬直行上採樣到 48px 時的模糊。
-     * 那層模糊會把小假名（に/い/ど/ん）糊成一團 → CTC 收合掉 → 整句漏字（真機把「なれない者など」讀成「者」）。
+     * Unsharp mask (in-place sharpen [px]=strip ARGB pixels, [w]x[h]): counteracts blur from warping ~30px wide vertical strip upscaled to 48px.
+     * That blur smears small kana (ni/i/do/n) into blobs -> CTC collapses -> whole sentence missed (device read "narenai mono nado" as "mono").
      *
-     * 做法＝per-channel separable Gaussian(σ≈1.2、5-tap) 求模糊，再 `orig + AMOUNT*(orig-blur)`、clamp 0..255。
-     * parity 實測（此前處理 + 銳化 amount=1.6）：整章可讀字數 255→431、過信心門檻(minProb 0.5)行數 60→90（/101）；
-     * 對本就讀對(p≈1.0)的乾淨行無副作用。移植自 `parity` 驗證腳本 verify_myunsharp.py:my_unsharp（逐位對齊）。
-     * 銳化因子與內插法皆由 parity benchmark 定（bilinear+unsharp 取 bicubic+unsharp 約 93% 效益、Android 無 bicubic 故選此）。
+     * Method = per-channel separable Gaussian (sigma~1.2, 5-tap) blur, then `orig + AMOUNT*(orig-blur)`, clamp 0..255.
+     * Parity measured (this preprocessing + sharpen amount=1.6): whole chapter readable chars 255->431, lines over confidence threshold (minProb 0.5) 60->90 (/101);
+     * no side effect on already correct (p~1.0) clean lines. Ported from `parity` verification script verify_myunsharp.py:my_unsharp (bit-exact).
+     * Sharpen factor and interpolation both determined by parity benchmark (bilinear+unsharp achieves ~93% of bicubic+unsharp benefit, Android has no bicubic so choose this).
      */
     private fun unsharp(px: IntArray, w: Int, h: Int) {
         val n = w * h
@@ -315,18 +314,18 @@ class Ocr(
         val k0 = 0.3434f
         val k1 = 0.2428f
         val k2 = 0.0855f // Gaussian σ≈1.2 正規化 5-tap（中心/±1/±2）
-        for (shift in intArrayOf(16, 8, 0)) { // R、G、B 各自銳化（文字多為灰階、但彩色 SFX 也照顧）
+        for (shift in intArrayOf(16, 8, 0)) { // R, G, B each sharpened (text mostly grayscale, but colored SFX also handled)
             val ch = FloatArray(n)
             for (i in 0 until n) ch[i] = ((px[i] shr shift) and 0xFF).toFloat()
             val tmp = FloatArray(n)
-            for (y in 0 until h) { // 水平模糊（邊界 clamp 複製）
+            for (y in 0 until h) { // Horizontal blur (border clamp copy)
                 val row = y * w
                 for (x in 0 until w) {
                     tmp[row + x] = k2 * ch[row + max(0, x - 2)] + k1 * ch[row + max(0, x - 1)] +
                         k0 * ch[row + x] + k1 * ch[row + min(w - 1, x + 1)] + k2 * ch[row + min(w - 1, x + 2)]
                 }
             }
-            for (y in 0 until h) { // 垂直模糊 + 銳化寫回 px（僅動本 channel 的 8 bit、保留其餘）
+            for (y in 0 until h) { // Vertical blur + sharpen write back to px (only modify this channel's 8 bits, preserve rest)
                 val row = y * w
                 val rm2 = max(0, y - 2) * w
                 val rm1 = max(0, y - 1) * w
@@ -347,12 +346,12 @@ class Ocr(
     private fun stripToTensor(strip: Bitmap): OnnxTensor {
         val sw = strip.width
         val h = strip.height
-        val w = sw + PAD_MARGIN // 右側白邊：避免 CTC 截掉尾字（坂→坂本、ねえね→ねえねえ）
+        val w = sw + PAD_MARGIN // Right white border: prevent CTC from cutting trailing chars (Saka -> Sakamoto, neene -> neenee)
         val px = IntArray(sw * h)
         strip.getPixels(px, 0, sw, 0, 0, sw, h)
-        if (cfg.ocrUnsharp) unsharp(px, sw, h) // 銳化：抵銷縮放模糊、救回漏讀小假名（見 [unsharp]、OcrConfig.ocrUnsharp）
+        if (cfg.ocrUnsharp) unsharp(px, sw, h) // Sharpen: counteract scaling blur, restore missed small kana (see [unsharp], OcrConfig.ocrUnsharp)
         val area = h * w
-        val chw = FloatArray(3 * area) { 1f } // 白底（(255-127.5)/127.5=1.0），右邊維持白
+        val chw = FloatArray(3 * area) { 1f } // White background ((255-127.5)/127.5=1.0), right side stays white
         for (y in 0 until h) {
             val inRow = y * sw
             val outRow = y * w
@@ -368,7 +367,7 @@ class Ocr(
         )
     }
 
-    /** greedy CTC（單條 [1,T,d]）→ 讀出 arr 後交給 [ctcDecodeArr]。 */
+    /** Greedy CTC (single [1,T,d]) -> read arr then delegate to [ctcDecodeArr]. */
     private fun ctcDecode(logits: OnnxTensor): Pair<String, Float> {
         val shape = (logits.info as TensorInfo).shape // [1, T, dict]
         val t = shape[1].toInt()
@@ -378,7 +377,7 @@ class Ocr(
         return ctcDecodeArr(arr, t, d)
     }
 
-    /** greedy CTC（blank=0、收合重複）+ 平均信心，對齊 decode_ctc_top1。回傳 (text, prob)。 */
+    /** Greedy CTC (blank=0, collapse repeats) + average confidence, aligned with decode_ctc_top1. Returns (text, prob). */
     private fun ctcDecodeArr(arr: FloatArray, t: Int, d: Int): Pair<String, Float> {
         val sb = StringBuilder()
         var last = BLANK
@@ -395,7 +394,7 @@ class Ocr(
             if (best != last && best != BLANK) {
                 val ch = dictionary[best]
                 sb.append(if (ch == "<SP>") " " else ch)
-                // top-1 的 log_softmax＝bestV − logsumexp(row)＝−ln(Σ exp(x−bestV))
+                // Top-1 log_softmax = bestV - logsumexp(row) = -ln(sum exp(x-bestV))
                 var s = 0.0
                 for (c in 0 until d) s += Math.exp((arr[base + c] - bestV).toDouble())
                 logpSum += -Math.log(s)
@@ -407,7 +406,7 @@ class Ocr(
         return sb.toString() to prob
     }
 
-    /** SFX/非氣泡文字判定（ported from utils/bubble.py:is_ignore @ d5a3eee）：邊框混色（非乾淨氣泡底）或彩色 → 跳過。 */
+    /** SFX / non-bubble text determination (ported from utils/bubble.py:is_ignore @ d5a3eee): mixed border color (not clean bubble background) or colored -> skip. */
     private fun isIgnore(strip: Bitmap, ignoreBubble: Int): Boolean {
         val w = strip.width
         val h = strip.height
@@ -429,7 +428,7 @@ class Ocr(
         return checkColor(px)
     }
 
-    /** 彩色文字判定（ported from utils/bubble.py:check_color）：>10 個非灰階像素 → True。 */
+    /** Color text determination (ported from utils/bubble.py:check_color): >10 non-grayscale pixels -> True. */
     private fun checkColor(px: IntArray): Boolean {
         var n = 0
         for (p in px) {
@@ -454,6 +453,6 @@ class Ocr(
         private const val NUM_THREADS = 4
         private const val BLANK = 0
         private const val OUT_LOGITS = "char_logits"
-        private const val PAD_MARGIN = 16  // 每條右側白邊：讓 CTC 有 context、不截尾字
+        private const val PAD_MARGIN = 16  // White border on right side of each strip: gives CTC context, prevents truncating trailing chars
     }
 }

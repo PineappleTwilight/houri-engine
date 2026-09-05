@@ -11,41 +11,41 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * 文字行 → 氣泡區分群（翻譯前合併，避免逐行碎裂）。
+ * Text lines -> bubble region grouping (merge before translation, avoid per-line fragmentation).
  *
- * 移植自 manga_translator/textline_merge/__init__.py + utils/generic.py @ d5a3eee
- * （透過已驗證的 parity/mit_grouping.py 作規格本；§4 第一/二層：同輸入近輸出）。
+ * Ported from manga_translator/textline_merge/__init__.py + utils/generic.py @ d5a3eee
+ * (verified via parity/mit_grouping.py as spec; section 4 layer 1/2: same input near output).
  *
- * 兩階段（缺一就會「靠近的多顆氣泡黏成一大塊」＝色塊 + 文字疊住）：
- *   1. **連邊**：quadrilateralCanMergeRegion（寬鬆：同方向、字級相近、間距 < 1×字、邊對齊 < 3×字）。
- *   2. **MST 分裂**：splitTextRegion——對每個連通塊建最小生成樹，若最大邊（間距）相對其餘是離群值就在那裡切開、遞迴。
- *      這步把「被第 1 步過度連起來的相鄰氣泡」拆回去，是不過度合併的關鍵。
+ * Two stages (missing either causes "nearby bubbles merge into one large block" = color block + text overlap):
+ *   1. **Connect edges**: quadrilateralCanMergeRegion (loose: same direction, similar font size, gap < 1x char, edge alignment < 3x char).
+ *   2. **MST split**: splitTextRegion — for each connected component build MST, if max edge (gap) is outlier relative to rest, cut there, recurse.
+ *      This splits back "adjacent bubbles over-connected in step 1", key to not over-merge.
  *
- * 註：合併階段 m-i-t 的 assigned_direction 為 None（OCR 才設）→ distance 一律走 v 模式；此處照搬。
- *    區域文字色不在此算（Renderer 取去字後背景亮度判黑/白字）。
+ * Note: merging stage m-i-t assigned_direction is None (OCR sets it) -> distance always uses v mode; mirrored here.
+ * Region text color not computed here (Renderer determines black/white from post-inpaint background luminance).
  */
 class TextRegion(
     val lines: List<TextLine>,
     val direction: String,
-    /** 區域傾斜角（度，對齊 m-i-t TextBlock.angle）；排版沿此角度旋轉，<3° 視為 0。 */
+    /** Region tilt angle (degrees, aligned with m-i-t TextBlock.angle); typesetting rotates along this angle, <3 degrees treated as 0. */
     val angle: Float = 0f,
-    /** 區域中心（各行角點均值），旋轉排版的樞紐。 */
+    /** Region center (mean of all line corners), pivot for rotated typesetting. */
     val cx: Float = 0f,
     val cy: Float = 0f,
-    /** 去傾斜後（文字自然座標）的框尺寸，旋轉排版時當文字框用。 */
+    /** De-rotated (text natural coordinates) box size, used as text box for rotated typesetting. */
     val boxW: Float = 0f,
     val boxH: Float = 0f,
 ) {
     var translatedText: String = ""
 
-    /** 此區是否「壓在畫面上」(去字走 lama 重建，非乾淨白泡)。由 [Inpainter] 設、[Renderer] 據此給黑字粗白邊（busy 背景好讀）。 */
+    /** Whether this region is "on art" (inpaint uses lama reconstruction, not clean white bubble). Set by [Inpainter], [Renderer] uses it to give black text thick white outline (readable on busy background). */
     var onArt: Boolean = false
 
-    /** auto 路由除錯：此區背景量到的 std / 亮度均值（由 [Inpainter] auto 分支設；-1＝未量）。sandbox 去背比較標在框上、調門檻用，產品不讀。 */
+    /** Auto routing debug: measured background std / luminance mean for this region (set by [Inpainter] auto branch; -1 = not measured). Sandbox inpaint comparison shows on box for threshold tuning, product does not read. */
     var dbgStd: Float = -1f
     var dbgWhite: Float = -1f
 
-    /** 合併原文（lines 已依閱讀序排好）。日文無空白，直接相接。 */
+    /** Merged source text (lines already sorted in reading order). Japanese has no spaces, directly concatenated. */
     val sourceText: String get() = lines.joinToString("") { it.text }
 
     val x0: Float = lines.minOf { ln -> ln.quad.minOf { it.x } }
@@ -61,7 +61,12 @@ object Grouping {
         if (n == 0) return emptyList()
         val q = lines.map { GQuad(it) }
 
-        // step 1：寬鬆連邊 → union-find 連通塊
+        // Step 1: loose edge connection -> union-find connected components
+        // Hardened: limit total edges to prevent O(n^2) blow-up on dense pages (n>200)
+        if (n > 300) {
+            // Too many lines, likely noise or very dense page -> return each line as separate region to avoid destroying boxes via over-merging
+            return lines.mapIndexed { idx, _ -> TextRegion(listOf(lines[idx]), q[idx].direction) }
+        }
         val parent = IntArray(n) { it }
         fun find(x: Int): Int {
             var r = x
@@ -78,17 +83,17 @@ object Grouping {
         val comps = LinkedHashMap<Int, MutableList<Int>>()
         for (i in 0 until n) comps.getOrPut(find(i)) { mutableListOf() }.add(i)
 
-        // step 2：每個連通塊跑 MST 分裂
+        // Step 2: MST split for each connected component
         val regionIdx = ArrayList<List<Int>>()
         for (comp in comps.values) regionIdx.addAll(splitTextRegion(q, comp))
 
-        // step 3：每區內排閱讀序、定方向、算傾斜角 + 去傾斜框
+        // Step 3: sort reading order within each region, determine direction, compute tilt angle + de-rotated box
         return regionIdx.map { members ->
             val dir = majorityDir(q, members)
             val ordered = if (dir == "h") {
-                members.sortedBy { q[it].centroid.y }            // 橫書：上→下
+                members.sortedBy { q[it].centroid.y }            // Horizontal: top -> bottom
             } else {
-                members.sortedByDescending { q[it].centroid.x }  // 直書：右→左
+                members.sortedByDescending { q[it].centroid.x }  // Vertical: right -> left
             }
             val angle = regionAngle(q, members)
             val pts = members.flatMap { q[it].pts }
@@ -99,14 +104,14 @@ object Grouping {
         }
     }
 
-    /** 區域角度＝各行角度均值-90（度，對齊 textline_merge dispatch）；<3° 視為 0。 */
+    /** Region angle = mean of line angles -90 (degrees, aligned with textline_merge dispatch); <3 degrees treated as 0. */
     private fun regionAngle(q: List<GQuad>, members: List<Int>): Float {
         val meanRad = members.map { q[it].angle.toDouble() }.average()
         val deg = (Math.toDegrees(meanRad) - 90.0).toFloat()
         return if (abs(deg) < 3f) 0f else deg
     }
 
-    /** 把區域所有角點去傾斜（R(-angle)）後的軸對齊範圍＝文字自然座標下的框尺寸。 */
+    /** De-rotate all corner points of region by R(-angle) and compute axis-aligned range = box size in text natural coordinates. */
     private fun orientedBox(pts: List<Pt>, cx: Float, cy: Float, angleDeg: Float): Pair<Float, Float> {
         val rad = Math.toRadians(angleDeg.toDouble())
         val cos = cos(rad).toFloat()
@@ -123,7 +128,7 @@ object Grouping {
         return (maxX - minX) to (maxY - minY)
     }
 
-    // —— 連邊判定：quadrilateral_can_merge_region（merge_bboxes_text_region 用的參數）——
+    // Edge connection decision: quadrilateral_can_merge_region (parameters used for merge_bboxes_text_region)
     private fun canMerge(
         a: GQuad, b: GQuad,
         ratio: Float = 1.9f,
@@ -147,10 +152,10 @@ object Grouping {
                 if (abs(x1 + w1 / 2f - (x2 + w2 / 2f)) < charGapTolerance2) return true
                 if (w1 > h1 * ratio && h2 > w2 * ratio) return false
                 if (w2 > h2 * ratio && h1 > w1 * ratio) return false
-                if (w1 > h1 * ratio || w2 > h2 * ratio) {  // 橫
+                if (w1 > h1 * ratio || w2 > h2 * ratio) {  // Horizontal
                     return abs(x1 - x2) < charSize * charGapTolerance2 ||
                         abs(x1 + w1 - (x2 + w2)) < charSize * charGapTolerance2
-                } else if (h1 > w1 * ratio || h2 > w2 * ratio) {  // 直
+                } else if (h1 > w1 * ratio || h2 > w2 * ratio) {  // Vertical
                     return abs(y1 - y2) < charSize * charGapTolerance2 ||
                         abs(y1 + h1 - (y2 + h2)) < charSize * charGapTolerance2
                 }
@@ -158,7 +163,7 @@ object Grouping {
             }
             return false
         }
-        // 非軸對齊（旋轉框）分支
+        // Non-axis-aligned (rotated box) branch
         if (abs(a.angle - b.angle) < 15f * PI.toFloat() / 180f) {
             val fs = min(a.fontSize, b.fontSize)
             if (Geometry.polyDistance(a.pts, b.pts) > fs * charGapTolerance2) return false
@@ -168,7 +173,7 @@ object Grouping {
         return false
     }
 
-    // —— MST 分裂：split_text_region ——
+    // MST split: split_text_region
     private fun splitTextRegion(
         q: List<GQuad>, idx: List<Int>, gamma: Float = 0.5f, sigma: Float = 2f,
     ): List<List<Int>> {
@@ -179,7 +184,7 @@ object Grouping {
             val sameAngle = abs(q[idx[0]].angle - q[idx[1]].angle) < 0.2f * PI.toFloat()
             return if (close && sameAngle) listOf(idx) else listOf(listOf(idx[0]), listOf(idx[1]))
         }
-        // 完全圖 → Kruskal MST
+        // Complete graph -> Kruskal MST
         val edges = ArrayList<Edge>()
         for (a in idx.indices) for (b in a + 1 until idx.size) {
             edges.add(Edge(idx[a], idx[b], q[idx[a]].distance(q[idx[b]])))
@@ -204,7 +209,7 @@ object Grouping {
         val keep = (distances[0] <= mean + std * sigma || distances[0] <= fontsize * (1f + gamma)) &&
             (std < stdThreshold || (maxPolyDistance == 0f && maxCentroidAlignment < 5f))
         if (keep) return listOf(idx)
-        // 切掉最大邊（mst[0]）→ 其餘 MST 邊的連通塊 → 遞迴
+        // Cut largest edge (mst[0]) -> connected components of remaining MST edges -> recurse
         val par2 = HashMap<Int, Int>().apply { idx.forEach { put(it, it) } }
         fun find2(x: Int): Int { var r = x; while (par2[r] != r) r = par2[r]!!; return r }
         for (k in 1 until mst.size) { par2[find2(mst[k].u)] = find2(mst[k].v) }
@@ -219,7 +224,7 @@ object Grouping {
         val counts = members.groupingBy { q[it].direction }.eachCount()
         val top2 = counts.entries.sortedByDescending { it.value }
         if (top2.size == 1) return top2[0].key
-        if (top2[0].value == top2[1].value) {  // 平手 → 取長寬比最極端那行的方向
+        if (top2[0].value == top2[1].value) {  // Tie -> pick direction of line with most extreme aspect ratio
             var maxAr = -100f
             var dir = top2[0].key
             for (i in members) {
@@ -235,7 +240,7 @@ object Grouping {
     private data class Edge(val u: Int, val v: Int, val w: Float)
 }
 
-/** 一條文字行的幾何（對齊 generic.py:Quadrilateral 的 grouping 子集）。pts 排成 [左上,右上,右下,左下]。 */
+/** Geometry of a single text line (aligned with generic.py:Quadrilateral grouping subset). pts ordered as [top-left, top-right, bottom-right, bottom-left]. */
 private class GQuad(val line: TextLine) {
     val pts: List<Pt>
     val direction: String
@@ -246,13 +251,13 @@ private class GQuad(val line: TextLine) {
         direction = if (isV) "v" else "h"
     }
 
-    /** 四邊中點 p1,p2,p3,p4（截斷成整數座標，對齊 m-i-t structure 的 .astype(int)）。 */
+    /** Four edge midpoints p1,p2,p3,p4 (truncated to int coordinates, aligned with m-i-t structure .astype(int)). */
     private val structure: List<Pt> by lazy {
         fun mid(a: Pt, b: Pt) = Pt(((a.x + b.x) / 2f).toInt().toFloat(), ((a.y + b.y) / 2f).toInt().toFloat())
         listOf(mid(pts[0], pts[1]), mid(pts[2], pts[3]), mid(pts[1], pts[2]), mid(pts[3], pts[0]))
     }
 
-    /** [x, y, w, h]（軸對齊外接框）。 */
+    /** [x, y, w, h] (axis-aligned bounding box). */
     val aabb: FloatArray by lazy {
         val mnx = pts.minOf { it.x }; val mny = pts.minOf { it.y }
         floatArrayOf(mnx, mny, pts.maxOf { it.x } - mnx, pts.maxOf { it.y } - mny)
@@ -291,7 +296,7 @@ private class GQuad(val line: TextLine) {
         abs(u1.y) < 0.05f || abs(u1.x) < 0.05f || abs(u2.y) < 0.05f || abs(u2.x) < 0.05f
     }
 
-    /** distance_impl（assigned_direction=None → v 模式）：依頂/底邊較近者取對應角點距離。 */
+    /** distance_impl (assigned_direction=None -> v mode): pick top/bottom closer corner distance. */
     fun distance(other: GQuad, rho: Float = 0.5f): Float {
         val fs = max(fontSize, other.fontSize)
         val a1 = Geometry.polyArea(Geometry.convexHull(listOf(pts[0], pts[1], other.pts[0], other.pts[1]))) / fs
@@ -307,8 +312,7 @@ private class GQuad(val line: TextLine) {
     private fun ptDist(a: Pt, b: Pt) = hypot((a.x - b.x).toDouble(), (a.y - b.y).toDouble()).toFloat()
 }
 
-/** sort_pnts：用長邊向量定直/橫書，並把 4 點排成 [左上,右上,右下,左下]。對齊 generic.py:sort_pnts。 */
-private fun sortPnts(quad: List<Pt>): Pair<List<Pt>, Boolean> {
+/** sort_pnts: determine vertical/horizontal by long edge vector and order 4 points as [top-left, top-right, bottom-right, bottom-left]. Aligned with generic.py:sort_pnts. */
     val n = quad.size
     val norms = FloatArray(n * n)
     for (i in 0 until n) for (j in 0 until n) {
