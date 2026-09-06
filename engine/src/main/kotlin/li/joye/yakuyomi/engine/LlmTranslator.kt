@@ -153,17 +153,13 @@ class LlmTranslator(
         repeat(3) { attempt ->
             try {
                 client.newCall(req).execute().use { resp ->
-                    val text = resp.body.string() // okhttp5: body non-null
-                    // Include provider's error body: this string goes via TranslateResult.error -> Pipeline -> PageTranslator
-                    // into each chapter's .yakuyomi_errors.txt, the real cause of 400 (e.g., "Model Not Exist" for retired model,
-                    // 402 insufficient balance, 401 wrong key) is directly visible, not just generic "HTTP 400". Truncate 300 chars to avoid log flood.
+                    val text = resp.body.string()
                     if (!resp.isSuccessful) {
                         val isRetryable = resp.code == 429 || resp.code in 500..599
                         if (isRetryable && attempt < 2) throw RuntimeException("HTTP ${resp.code} ${text.take(300)} retryable")
                         throw RuntimeException("HTTP ${resp.code} ${text.take(300)}")
                     }
                     val obj = JSONObject(text)
-                    // Extract token usage (non-streaming = whole usage in body; missing/proxy not returning = null, caller treats as unknown).
                     val usage = obj.optJSONObject("usage")?.let { u ->
                         Usage(u.optInt("prompt_tokens", 0), u.optInt("completion_tokens", 0))
                     }
@@ -171,22 +167,18 @@ class LlmTranslator(
                     var content = msgObj.optString("content", "")
                     if (content.isBlank()) content = msgObj.optString("reasoning_content", "")
                     if (content.isBlank()) content = msgObj.optString("reasoning", "")
-                    // Strip markdown fences that some providers wrap around the translation block
-                    content = content.trim()
-                        .removePrefix("```")
-                        .removeSuffix("```")
-                        .trim()
+                    content = content.trim().removePrefix("```").removeSuffix("```").trim()
                     if (content.isBlank()) throw RuntimeException("Empty content from provider")
                     return@withContext content to usage
                 }
             } catch (t: Throwable) {
                 lastException = t
                 val msg = t.message ?: ""
-                val isTransient = msg.contains("429") || msg.contains("503") || msg.contains("timeout", true) || msg.contains("503")
+                val isTransient = msg.contains("429") || msg.contains("503") || msg.contains("timeout", true)
                 if (isTransient && attempt < 2) {
-                    Thread.sleep(800L * (attempt + 1))
+                    kotlinx.coroutines.delay(800L * (attempt + 1))
                 } else if (attempt < 2 && t is java.io.IOException) {
-                    Thread.sleep(500L * (attempt + 1))
+                    kotlinx.coroutines.delay(500L * (attempt + 1))
                 } else {
                     throw t
                 }

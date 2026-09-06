@@ -170,6 +170,37 @@ internal object Geometry {
         return inside
     }
 
+    /** Sutherland-Hodgman convex polygon intersection area (for NMS IoU). */
+    fun polyIntersectionArea(a: List<Pt>, b: List<Pt>): Float {
+        if (a.size < 3 || b.size < 3) return 0f
+        var output = a.toMutableList()
+        for (i in b.indices) {
+            if (output.isEmpty()) break
+            val input = output.toList()
+            output.clear()
+            val edgeA = b[i]
+            val edgeB = b[(i + 1) % b.size]
+            val edgeX = edgeB.x - edgeA.x
+            val edgeY = edgeB.y - edgeA.y
+            fun inside(p: Pt): Boolean = edgeX * (p.y - edgeA.y) - edgeY * (p.x - edgeA.x) >= -1e-6f
+            fun intersection(s: Pt, e: Pt): Pt {
+                val dSx = e.x - s.x; val dSy = e.y - s.y
+                val dEx = edgeB.x - edgeA.x; val dEy = edgeB.y - edgeA.y
+                val denom = dSx * dEy - dSy * dEx
+                if (kotlin.math.abs(denom) < 1e-9f) return s
+                val t = ((edgeA.x - s.x) * dEy - (edgeA.y - s.y) * dEx) / denom
+                return Pt(s.x + t * dSx, s.y + t * dSy)
+            }
+            var s = input.last()
+            for (e in input) {
+                val eIn = inside(e); val sIn = inside(s)
+                if (eIn) { if (!sIn) output.add(intersection(s, e)); output.add(e) } else if (sIn) { output.add(intersection(s, e)) }
+                s = e
+            }
+        }
+        return if (output.size >= 3) polyArea(output) else 0f
+    }
+
     /** Shortest distance between two convex polygons (intersect/contain = 0). Aligned with shapely Polygon(a).distance(Polygon(b)). */
     fun polyDistance(a: List<Pt>, b: List<Pt>): Float {
         for (i in a.indices) {

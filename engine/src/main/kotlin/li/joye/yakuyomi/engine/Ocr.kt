@@ -45,8 +45,20 @@ class Ocr(
     private val session: OrtSession
 
     init {
-        // Concurrent mode: one thread per line (intra-op=1), fill cores via N concurrent lines; sequential mode: one line uses NUM_THREADS (current).
+        require(dictionary.isNotEmpty()) { "OCR dictionary empty: $modelPath" }
+        require(dictionary.size in 100..20000) { "OCR dictionary size ${dictionary.size} out of [100,20000]" }
+        if (dictionary[0] != "<blank>" && dictionary[0] != "<BLANK>" && dictionary[0].isNotBlank()) {
+            Log.w(TAG, "OCR dictionary first entry '${dictionary[0]}' expected blank token")
+        }
+        val effectiveConcurrency = when {
+            !cfg.concurrent -> NUM_THREADS
+            cfg.adaptiveConcurrency -> Runtime.getRuntime().availableProcessors().coerceIn(2, 12)
+            else -> cfg.concurrency.coerceIn(1, 16)
+        }
         val threads = if (cfg.concurrent) 1 else NUM_THREADS
+        if (cfg.adaptiveConcurrency && cfg.concurrent) {
+            Log.i(TAG, "OCR adaptive concurrency $effectiveConcurrency cores")
+        }
         val options = OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(threads)
             if (cfg.useXnnpack) {
@@ -68,16 +80,25 @@ class Ocr(
     suspend fun recognize(
         page: Bitmap,
         lines: List<TextLine>,
-        bicubic: Boolean = cfg.useBicubic, // Crop scaling interpolation: true=hand-rolled bicubic (saves small kana), false=Canvas bilinear (current)
+        bicubic: Boolean = cfg.useBicubic,
     ): Unit = coroutineScope {
         val inputName = session.inputNames.first()
+        val conc = if (cfg.adaptiveConcurrency && cfg.concurrent) Runtime.getRuntime().availableProcessors().coerceIn(2, 12) else cfg.concurrency.coerceAtLeast(1)
         if (cfg.concurrent && lines.size > 1) {
-            val sem = Semaphore(cfg.concurrency.coerceAtLeast(1))
+            val sem = Semaphore(conc)
             lines.map { line ->
                 async(Dispatchers.Default) { sem.withPermit { recognizeOne(page, line, inputName, bicubic) } }
             }.awaitAll()
+            val empty = lines.count { it.text.isBlank() }
+            if (empty >= cfg.emptyReadLogThreshold && lines.size >= 4) {
+                Log.w(TAG, "OCR empty $empty/${lines.size} bicubic=$bicubic minProb=${cfg.minProb}")
+            }
         } else {
             for (line in lines) recognizeOne(page, line, inputName, bicubic)
+            val empty = lines.count { it.text.isBlank() }
+            if (empty >= cfg.emptyReadLogThreshold && lines.size >= 4) {
+                Log.w(TAG, "OCR empty $empty/${lines.size} bicubic=$bicubic minProb=${cfg.minProb}")
+            }
         }
     }
 

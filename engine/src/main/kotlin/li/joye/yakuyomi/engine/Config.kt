@@ -12,13 +12,51 @@ package li.joye.yakuyomi.engine
  * Granularity: §11 v1 global. Marked `[Settings]` = expected to be exposed in settings (frequently tuned, e.g., vertical/horizontal, provider/key/language);
  * unmarked = default, keep tunable headroom (still inside this structure), can be added to settings UI quickly when needed.
  */
+/** Pipeline-level timeouts and orchestration knobs (centralised from Pipeline hardcoded values). */
+data class PipelineConfig(
+    val detectTimeoutMs: Long = 15000L,      // NCNN detect can hang; 15s proven safe
+    val ocrTimeoutMs: Long = 12000L,         // ONNX OCR tiny-crop hang
+    val translateTimeoutMs: Long = 90000L,   // Single-page translate (in Pipeline); TranslationManager has its own outer 120s
+    val maxCharsPerChunk: Int = 2800,        // LLM chunk split budget (avoid token overflow on dense pages)
+    val maxRegionsPerChunk: Int = 22,
+    val hallucinationRatio: Float = 4f,      // Drop absurd expansion > ratio*src + 20 and >60 chars
+    val hallucinationMinLen: Int = 60,
+) {
+    fun validate(): List<String> = buildList {
+        if (detectTimeoutMs !in 3000..60000) add("detectTimeoutMs $detectTimeoutMs out of [3000,60000]")
+        if (ocrTimeoutMs !in 3000..60000) add("ocrTimeoutMs $ocrTimeoutMs out of [3000,60000]")
+        if (translateTimeoutMs !in 10000..180000) add("translateTimeoutMs $translateTimeoutMs out of [10000,180000]")
+        if (maxCharsPerChunk !in 500..8000) add("maxCharsPerChunk $maxCharsPerChunk out of [500,8000]")
+        if (maxRegionsPerChunk !in 5..50) add("maxRegionsPerChunk $maxRegionsPerChunk out of [5,50]")
+    }
+}
+
 data class EngineConfig(
     val detector: DetectorConfig = DetectorConfig(),
     val ocr: OcrConfig = OcrConfig(),
     val translator: TranslatorConfig = TranslatorConfig(),
     val inpainter: InpainterConfig = InpainterConfig(),
     val render: RenderConfig = RenderConfig(),
-)
+    val pipeline: PipelineConfig = PipelineConfig(),
+) {
+    /** Returns validation errors; empty = valid. Call before Pipeline creation. */
+    fun validate(): List<String> = buildList {
+        addAll(detector.validate())
+        addAll(ocr.validate())
+        addAll(translator.validate())
+        addAll(inpainter.validate())
+        addAll(render.validate())
+        addAll(pipeline.validate())
+        if (render.fontSizeMin > render.fontSizeMax) add("render fontSizeMin ${render.fontSizeMin} > fontSizeMax ${render.fontSizeMax}")
+        if (render.fontScale !in 0.5f..1.5f) add("render fontScale ${render.fontScale} out of [0.5,1.5]")
+    }
+
+    /** Throws [IllegalArgumentException] on first validation error. */
+    fun requireValid() {
+        val errs = validate()
+        require(errs.isEmpty()) { "EngineConfig invalid: ${errs.joinToString("; ")}" }
+    }
+}
 
 data class DetectorConfig(
     val minSide: Float = 3f,
@@ -32,13 +70,25 @@ data class DetectorConfig(
     val dbBinThreshold: Float = 0.5f,     // DB binarize: sigmoid(db ch0) > this (m-i-t text_threshold=0.5)
     val dbBoxThreshold: Float = 0.7f,     // DB score filter: component-mean prob < this dropped (m-i-t box_threshold=0.7)
     val dbUnclipRatio: Float = 2.3f,      // DB unclip expansion (m-i-t unclip_ratio=2.3)
-)
+    val nmsIouThreshold: Float = 0.4f,    // NMS IoU for duplicate box suppression (0.4 = merge near-duplicates, keep distinct bubbles)
+    val adaptiveRetry: Boolean = true,   // Enable relaxed-threshold retry when first pass yields 0 lines
+) {
+    fun validate(): List<String> = buildList {
+        if (segThreshold !in 0.05f..0.5f) add("segThreshold $segThreshold out of [0.05,0.5]")
+        if (dbnetInputSize !in 512..1536) add("dbnetInputSize $dbnetInputSize out of [512,1536]")
+        if (dbBinThreshold !in 0.2f..0.8f) add("dbBinThreshold $dbBinThreshold out of [0.2,0.8]")
+        if (dbBoxThreshold !in 0.3f..0.95f) add("dbBoxThreshold $dbBoxThreshold out of [0.3,0.95]")
+        if (nmsIouThreshold !in 0.1f..0.9f) add("nmsIouThreshold $nmsIouThreshold out of [0.1,0.9]")
+    }
+}
 
 data class OcrConfig(
     val textHeight: Int = 48,         // 48px CTC
     val minTextLength: Int = 0,       // config.ocr.min_text_length
     val ignoreBubble: Int = 0,        // [Settings] config.ocr.ignore_bubble: 1-50 enabled, skip colored/non-bubble SFX text (default 0=off)
     val minProb: Float = 0.5f,        // config.ocr.prob: drop OCR avg confidence < this (filter low-confidence misreads; m-i-t default 0.5)
+    val adaptiveConcurrency: Boolean = true, // Auto-size concurrency from Runtime.availableProcessors() when true
+    val emptyReadLogThreshold: Int = 8,      // Log warning when > this lines read empty (density hint)
     // Expand each side of detection quad by N px before OCR crop (RotRect.expand; only OCR crop, not detection box => inpaint mask via seg strokes unaffected).
     // Root cause: thin detection boxes clip glyphs -> 48px CTC empty read (model_48px_ctc drops 0-char boxes before prob threshold) -> region filtered by Pipeline textRegions -> left untranslated = user sees "missing bubble". Desktop 16 pages: pad=4 reads 345->398 (+15%), box count unchanged,
     // break 9 vs save 350; 006 "sono toori ja" box only 23px wide "tsu" clipped -> pad=0 empty, pad=12 correct p=0.993.
@@ -58,7 +108,15 @@ data class OcrConfig(
     // restores small kana that were blurred away (added v0.16.9). Default on = proven to restore small kana (no side effect on clean lines with p~1.0);
     // off = revert to no sharpening (strip blurrier, small kana may be missed). Was hard-coded always on, extracted to setting 2026-07-16 (advanced users can turn off).
     val ocrUnsharp: Boolean = true,
-)
+) {
+    fun validate(): List<String> = buildList {
+        if (textHeight !in 24..96) add("textHeight $textHeight out of [24,96]")
+        if (ignoreBubble !in 0..50) add("ignoreBubble $ignoreBubble out of [0,50]")
+        if (minProb !in 0.1f..0.95f) add("minProb $minProb out of [0.1,0.95]")
+        if (stripPad !in 0..12) add("stripPad $stripPad out of [0,12]")
+        if (concurrency !in 1..16) add("concurrency $concurrency out of [1,16]")
+    }
+}
 
 // Default few-shot (ja->cht): demonstrates <|i|> line format. When changing language pair, update toLangName/fromLangName together with corresponding translation.
 private const val DEFAULT_SAMPLE_SOURCE =
@@ -100,7 +158,14 @@ data class TranslatorConfig(
     val batchSize: Int = 8,              // m-i-t --batch-size: concurrent mode = max concurrent pages; merged mode = pages per prompt
     val batchConcurrent: Boolean = true, // m-i-t --batch-concurrent: true = separate requests per page, concurrent in batch (prevents truncation/hallucination); false = merged large prompt
     val filterText: String? = null,   // [Settings] config.filter_text: regex matching translation filters that region (e.g., ".*badtext.*")
-)
+) {
+    fun validate(): List<String> = buildList {
+        if (temperature !in -1.0..2.0) add("temperature $temperature out of [-1,2]")
+        if (batchSize !in 1..32) add("batchSize $batchSize out of [1,32]")
+        if (targetLang.isBlank()) add("targetLang blank")
+        filterText?.let { try { Regex(it) } catch (e: Exception) { add("filterText invalid regex: ${e.message}") } }
+    }
+}
 
 data class InpainterConfig(
     // [Settings] Inpainting method (proven on device = two options, both pure NCNN; LaMa/per-cell/auto per-region routing/GPU all retired):
@@ -112,7 +177,16 @@ data class InpainterConfig(
     // white outline remains outside -> white blocks remain after inpaint. Thickened to radius ~12 swallows outline, AOT surrounding context becomes background -> clean reconstruction (desktop inpaint_dev DIL=12 proven ~ MIT).
     val maskDilate: Float = 24f,      // Radius 12px: swallow text white outline (before 7=radius 4 left white blocks)
     val bboxPad: Int = 16,            // Inpaint allow region bbox rectangle expansion px: covers furigana at bbox edge (tight line box would miss)
-)
+    val featherRadius: Int = 1,       // Feather blend radius at inpaint seam (0=hard, 1=soft 1px anti-alias to hide seam)
+    val preserveAspect: Boolean = true, // When true, AOT input is scaled aspect-preserving inside tileSize (less distortion on tall pages)
+) {
+    fun validate(): List<String> = buildList {
+        if (method !in setOf("aot", "boxfill")) add("method $method not in [aot,boxfill]")
+        if (tileSize !in 256..1024) add("tileSize $tileSize out of [256,1024]")
+        if (maskDilate !in 4f..48f) add("maskDilate $maskDilate out of [4,48]")
+        if (featherRadius !in 0..4) add("featherRadius $featherRadius out of [0,4]")
+    }
+}
 
 data class RenderConfig(
     val orientation: TextOrientation = TextOrientation.AUTO, // [Settings] corresponds to config.render.direction=auto (CJK -> vertical)
@@ -134,4 +208,15 @@ data class RenderConfig(
     // Tate-chu-yoko: when vertical, merge consecutive short ASCII strings (2-4 chars digits/letters/!? ) into one cell displayed horizontally (age "20", year "2020", "!?" no longer stacked vertically). 
     // §4 third layer informed deviation: m-i-t/parity draws char-by-char, no such logic; only affects short ASCII strings inside vertical, CJK unchanged. Default on, can be turned off to char-by-char.
     val tateChuYoko: Boolean = true,
-)
+    val lineSpacing: Float = 1.05f,   // Vertical line spacing multiplier (1.05 = parity default; 1.1 more airy)
+    val adaptiveStroke: Boolean = true, // Scale stroke with font size more aggressively for tiny fonts
+    val rtlSupport: Boolean = false,  // Enable RTL mirroring for Arabic/Hebrew targets
+) {
+    fun validate(): List<String> = buildList {
+        if (fontSizeMax !in 20..120) add("fontSizeMax $fontSizeMax out of [20,120]")
+        if (fontSizeMin !in 6..30) add("fontSizeMin $fontSizeMin out of [6,30]")
+        if (expandW !in 1.0f..3.0f) add("expandW $expandW out of [1,3]")
+        if (lineSpacing !in 0.9f..2.0f) add("lineSpacing $lineSpacing out of [0.9,2]")
+        if (artStrokeRatio !in 0.05f..0.3f) add("artStrokeRatio $artStrokeRatio out of [0.05,0.3]")
+    }
+}

@@ -5,6 +5,7 @@ import android.util.Log
 import kotlin.math.exp
 import kotlin.math.min
 import kotlin.math.roundToInt
+import li.joye.yakuyomi.engine.EngineTrace
 
 /**
  * DBNet text line detector (m-i-t default detector, ResNet34+DB head; pure NCNN, product arm64 NCNN required).
@@ -75,17 +76,23 @@ class Detector(
             prob, inW, inH, pre.ratio, page.width, page.height,
             cfg.dbBinThreshold, cfg.dbBoxThreshold, cfg.dbUnclipRatio,
         )
-        if (lines.isEmpty() && cfg.dbBoxThreshold > 0.55f) {
+        lines = nmsFilter(lines, cfg.nmsIouThreshold)
+        if (lines.isEmpty() && cfg.adaptiveRetry && cfg.dbBoxThreshold > 0.55f) {
             val retry = linesFromProbMap(
                 prob, inW, inH, pre.ratio, page.width, page.height,
                 (cfg.dbBinThreshold - 0.05f).coerceAtLeast(0.35f),
                 (cfg.dbBoxThreshold - 0.15f).coerceAtLeast(0.5f),
                 cfg.dbUnclipRatio,
             )
-            if (retry.isNotEmpty()) {
-                Log.i(TAG, "Detector fallback rescued ${retry.size} lines (relaxed thresholds)")
-                lines = retry
+            val filtered = nmsFilter(retry, cfg.nmsIouThreshold)
+            if (filtered.isNotEmpty()) {
+                Log.i(TAG, "Detector fallback rescued ${filtered.size} lines (relaxed thresholds, NMS ${retry.size}→${filtered.size})")
+                lines = filtered
+            } else if (retry.isNotEmpty()) {
+                Log.i(TAG, "Detector fallback retry produced ${retry.size} lines but NMS removed all (iou=${cfg.nmsIouThreshold})")
             }
+        } else if (lines.isNotEmpty()) {
+            EngineTrace.log("detect.nms kept ${lines.size}")
         }
         // mask (already sigmoid) -> original-size stroke mask. mask space ratio = pre.ratio * mw/inW (half-res=ratio/2, full-res=ratio, dynamic).
         val textMask = segToMask(mask, mw, mh, pre.ratio * mw.toFloat() / inW, page.width, page.height)
@@ -225,6 +232,27 @@ class Detector(
             out.add(TextLine(quad, score))
         }
         return out
+    }
+
+    private fun nmsFilter(lines: List<TextLine>, iouThreshold: Float): List<TextLine> {
+        if (lines.size <= 1) return lines
+        val sorted = lines.sortedByDescending { it.score }
+        val kept = mutableListOf<TextLine>()
+        for (candidate in sorted) {
+            var suppressed = false
+            val ca = candidate.quad
+            val caArea = Geometry.polyArea(ca).let { if (it <= 0f) 1f else it }
+            for (prev in kept) {
+                val pa = prev.quad
+                val inter = Geometry.polyIntersectionArea(ca, pa)
+                if (inter <= 0f) continue
+                val paArea = Geometry.polyArea(pa).let { if (it <= 0f) 1f else it }
+                val iou = inter / (caArea + paArea - inter)
+                if (iou > iouThreshold) { suppressed = true; break }
+            }
+            if (!suppressed) kept.add(candidate)
+        }
+        return kept
     }
 
     override fun close() {

@@ -71,10 +71,6 @@ object Renderer {
         return out
     }
 
-    /**
-     * Estimate original font size (px) for a region: for each line take min(line box width, height) = stroke thickness (both vertical/horizontal), then median.
-     * This is the anchor for "translated text should be same size as original": short translations (e.g., short English vs long Japanese) no longer inflate to fill the bubble.
-     */
     private fun originalFontSize(region: TextRegion): Int {
         val thicknesses = ArrayList<Float>()
         for (line in region.lines) {
@@ -87,11 +83,16 @@ object Renderer {
             val wy = mid(q[1], q[2]).y - mid(q[3], q[0]).y
             val h = hypot(hx.toDouble(), hy.toDouble()).toFloat()
             val w = hypot(wx.toDouble(), wy.toDouble()).toFloat()
-            thicknesses.add(minOf(h, w))
+            val t = minOf(h, w)
+            if (t in 4f..300f) thicknesses.add(t)
         }
         if (thicknesses.isEmpty()) return 0
         thicknesses.sort()
-        return thicknesses[thicknesses.size / 2].roundToInt()
+        val median = thicknesses[thicknesses.size / 2]
+        val filtered = thicknesses.filter { it in median * 0.4f..median * 2.5f }
+        val use = if (filtered.size >= 2) filtered else thicknesses
+        use.sort()
+        return use[use.size / 2].roundToInt()
     }
 
     /** Text color (fill, outline): auto = pick from background luminance after inpaint (dark bg white text, light bg black text, aligned with parity auto_colors); mono = black text white outline; other = fixed color. */
@@ -129,7 +130,21 @@ object Renderer {
         o in 0x3040..0x30FF || o in 0x4E00..0x9FFF || o in 0x3400..0x4DBF || o in 0xFF00..0xFFEF
     }
 
-/** Vertical: columns right->left, cells top->bottom, top-aligned; size fills enlarged text box, each column trims colTrim chars. Each cell = 1 char or 1 tate-chu-yoko short string. */
+    private fun isRtl(text: String): Boolean = text.any {
+        val o = it.code
+        o in 0x0590..0x08FF || o in 0xFB1D..0xFDFF || o in 0xFE70..0xFEFF
+    }
+
+    private fun strokeWidthFor(size: Int, onArt: Boolean, cfg: RenderConfig): Float {
+        val base = if (onArt) cfg.artStrokeRatio else 0.10f
+        return if (!cfg.adaptiveStroke) maxOf(2f, size * base)
+        else when {
+            size <= 12 -> maxOf(1.5f, size * (base * 0.75f))
+            size >= 36 -> maxOf(2f, size * (base * 1.15f))
+            else -> maxOf(2f, size * base)
+        }
+    }
+
     private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
@@ -164,14 +179,14 @@ object Renderer {
             }
         }
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))  // Outline scales with font size; onArt uses thicker outline
-        val lh = size * 1.05f; val cw = size * 1.1f
+        stroke.strokeWidth = strokeWidthFor(size, onArt, cfg)
+        val lh = size * cfg.lineSpacing; val cw = size * 1.1f
         cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
         val columnsFinal = splitColumnsV(cells, cpc)
         val cols = columnsFinal.size
-        val tcx = (x0 + x1) / 2f                  // Position: horizontally centered at text box center
+        val tcx = (x0 + x1) / 2f
         val rightCx = tcx + cols * cw / 2f - cw / 2f
-        val blockH = columnsFinal.maxOf { it.size } * lh // Vertically centered: use longest column cell count as block height, centered in box
+        val blockH = columnsFinal.maxOf { it.size } * lh
         val startCy = (y0 + y1) / 2f - blockH / 2f
         for (col in 0 until cols) {
             val cx = rightCx - col * cw
@@ -246,10 +261,7 @@ object Renderer {
         canvas.restore()
     }
 
-    /** Horizontal: rows top->bottom, chars left->right, top-aligned; size fills enlarged text box. Portrait narrow box from vertical source is rotated 90 degrees so translation fills along long axis (no longer shrunk into a vertical pillar). Free-floating text on art (onArt) never rotates: follow detection direction to avoid horizontal source turned sideways. */
     private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
-        // For non-CJK English, even a tall narrow bubble from vertical source should not unconditionally rotate — keep horizontal readability.
-        // Only consider rotation when bubble is extremely tall (aspect >2.5) and not onArt, otherwise keep horizontal to avoid breaking text box.
         val aspect = if ((x1 - x0) > 1f) (y1 - y0) / (x1 - x0) else 1f
         val portrait = !onArt && aspect > 2.5f && !isCjk(text)
         val wrapW = if (portrait) (y1 - y0) else (x1 - x0)
@@ -262,49 +274,54 @@ object Renderer {
         var s = min(rowRoom.toInt(), cap)
         while (s >= cfg.fontSizeMin) {
             fill.textSize = s.toFloat()
-            // Narrow-box protection: rowTrim should not over-deduct for narrow boxes, otherwise usable width becomes too small and causes mid-word breakage
             val trimW = if (bw < s * 8f) cfg.rowTrim * s * 0.3f else cfg.rowTrim * s.toFloat()
-            val ls = wrapCjk(text, fill, (bw - trimW).coerceAtLeast(s * 2f))
+            val ls = wrapForHorizontal(text, fill, (bw - trimW).coerceAtLeast(s * 2f), cfg)
             val maxW = ls.maxOfOrNull { fill.measureText(it) } ?: 0f
             if (ls.size * s * 1.18f <= rowRoom && maxW <= bw) { size = s; lines = ls; break }
             s--
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))
+        stroke.strokeWidth = strokeWidthFor(size, onArt, cfg)
         val finalTrim = if (bw < size * 8f) cfg.rowTrim * size * 0.3f else cfg.rowTrim * size.toFloat()
-        lines = wrapCjk(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f))
+        lines = wrapForHorizontal(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f), cfg)
         var lh = size * 1.18f
         if (lines.size * lh > rowRoom || lines.any { fill.measureText(it) > bw }) {
             for (emergency in (size - 1) downTo 7) {
                 fill.textSize = emergency.toFloat()
                 val trimE = if (bw < emergency * 8f) cfg.rowTrim * emergency * 0.3f else cfg.rowTrim * emergency.toFloat()
-                val cand = wrapCjk(text, fill, (bw - trimE).coerceAtLeast(emergency * 2f))
+                val cand = wrapForHorizontal(text, fill, (bw - trimE).coerceAtLeast(emergency * 2f), cfg)
                 val maxW = cand.maxOfOrNull { fill.measureText(it) } ?: 0f
                 if (cand.size * emergency * 1.18f <= rowRoom && maxW <= bw) {
                     size = emergency
                     lines = cand
                     lh = size * 1.18f
                     fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-                    stroke.strokeWidth = maxOf(2f, size * (if (onArt) cfg.artStrokeRatio else STROKE_RATIO))
+                    stroke.strokeWidth = strokeWidthFor(size, onArt, cfg)
                     break
                 }
             }
         }
         if (portrait) {
-            // Portrait box: rotate 90 degrees around center (clockwise), translation laid horizontally along long axis, top-to-bottom, fills bubble length.
             canvas.save()
             canvas.rotate(90f, (x0 + x1) / 2f, (y0 + y1) / 2f)
         }
+        val mirrorRtl = cfg.rtlSupport && isRtl(text)
         val tcx = (x0 + x1) / 2f
-        var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT  // Vertically centered in box
+        var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT
         for (ln in lines) {
+            val display = if (mirrorRtl) "\u202B$ln\u202C" else ln
             val tx = tcx - fill.measureText(ln) / 2f
-            if (cfg.fontBorder) canvas.drawText(ln, tx, baseline, stroke)
-            canvas.drawText(ln, tx, baseline, fill)
+            if (cfg.fontBorder) canvas.drawText(display, tx, baseline, stroke)
+            canvas.drawText(display, tx, baseline, fill)
             baseline += lh
         }
         if (portrait) canvas.restore()
+    }
+
+    private fun wrapForHorizontal(text: String, paint: Paint, maxW: Float, cfg: RenderConfig): List<String> {
+        if (cfg.rtlSupport && isRtl(text)) return wrapCjk(text, paint, maxW)
+        return wrapCjk(text, paint, maxW)
     }
 
     private fun drawCharVertical(canvas: Canvas, ch: Char, cx: Float, cyc: Float, fill: Paint, stroke: Paint, border: Boolean) {

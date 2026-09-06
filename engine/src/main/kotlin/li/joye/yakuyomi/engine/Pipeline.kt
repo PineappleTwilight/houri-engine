@@ -7,19 +7,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 
-/**
- * Single-page translation result (§11: Translated overwrites + marker, Skipped keeps original with marker, Failed keeps original without marker for retry).
- * Engine only returns result, never touches files — overwriting/marker/resume handled by caller (download worker) (§3, §12.6).
- */
+enum class PipelineErrorCode { INVALID_BITMAP, DETECT_FAILED, OCR_FAILED, GROUP_FAILED, TRANSLATE_FAILED, ALL_FILTERED, INPAINT_FAILED, RENDER_FAILED, TIMEOUT, UNKNOWN }
+
 sealed interface PageResult {
-    /** Success: can overwrite original file + write "translated" marker. */
     data class Translated(val page: Bitmap, val stats: PageStats, val analysis: PageAnalysis? = null) : PageResult
-
-    /** Nothing to translate (no text detected / OCR empty / all translations filtered): keep original, mark skipped, **do not overwrite**. */
-    data class Skipped(val reason: String, val stats: PageStats) : PageResult
-
-    /** Error (network/429 after retries/exception): keep original, **no marker**, retry later. */
-    data class Failed(val reason: String) : PageResult
+    data class Skipped(val reason: String, val stats: PageStats, val code: PipelineErrorCode = PipelineErrorCode.UNKNOWN) : PageResult
+    data class Failed(val reason: String, val code: PipelineErrorCode = PipelineErrorCode.UNKNOWN) : PageResult
 }
 
 /**
@@ -74,9 +67,9 @@ class Pipeline(
 
     override suspend fun translatePage(page: Bitmap): PageResult = coroutineScope {
         val tWall = System.currentTimeMillis()
-        // Hardening: input validation - prevent destructive processing of empty/recycled bitmap
+        cfg.validate().takeIf { it.isNotEmpty() }?.let { errs -> return@coroutineScope PageResult.Failed("invalid config: ${errs.first()}", PipelineErrorCode.UNKNOWN) }
         if (page.isRecycled || page.width < 32 || page.height < 32 || page.width > 8000 || page.height > 8000) {
-            return@coroutineScope PageResult.Failed("invalid page bitmap ${page.width}x${page.height} recycled=${page.isRecycled}")
+            return@coroutineScope PageResult.Failed("invalid page bitmap ${page.width}x${page.height} recycled=${page.isRecycled}", PipelineErrorCode.INVALID_BITMAP)
         }
         // Pre-scale extremely large pages to protect memory and inpaint tiles
         val workPage = if (page.width > 4000 || page.height > 4000) {
@@ -86,41 +79,40 @@ class Pipeline(
             try { Bitmap.createScaledBitmap(page, nw, nh, true) } catch (_: Throwable) { page }
         } else page
         EngineTrace.log("pipe.page.enter ${workPage.width}x${workPage.height}")
-        // Detection - hardened with timeout
         val tDet = System.currentTimeMillis()
         val detection = try {
-            // 15s timeout to prevent Detector hang (NCNN occasional hang)
-            kotlinx.coroutines.withTimeout(15000) { detector.detect(workPage) }
+            kotlinx.coroutines.withTimeout(cfg.pipeline.detectTimeoutMs) { detector.detect(workPage) }
         } catch (t: Throwable) {
-            Log.e(TAG, "Detection failed", t); return@coroutineScope PageResult.Failed("detect: ${t.message}")
+            val isTimeout = t is kotlinx.coroutines.TimeoutCancellationException
+            Log.e(TAG, "Detection failed", t); return@coroutineScope PageResult.Failed("detect: ${t.message}", if (isTimeout) PipelineErrorCode.TIMEOUT else PipelineErrorCode.DETECT_FAILED)
         }
         val lines = detection.lines
         EngineTrace.log("pipe.detect.done lines=${lines.size}")
         val detectMs = System.currentTimeMillis() - tDet
         if (lines.isEmpty()) {
-            return@coroutineScope PageResult.Skipped("No text detected", PageStats(0, 0, 0, detectMs, 0, 0, 0, 0))
+            return@coroutineScope PageResult.Skipped("No text detected", PageStats(0, 0, 0, detectMs, 0, 0, 0, 0), PipelineErrorCode.DETECT_FAILED)
         }
 
         // OCR + grouping - hardened with timeout and fallback
         val tOcr = System.currentTimeMillis()
         EngineTrace.log("pipe.ocr.enter lines=${lines.size}")
         try {
-            // 12s timeout for OCR (ONNX occasional hang on tiny crops)
-            kotlinx.coroutines.withTimeout(12000) { ocr.recognize(page, lines) }
+            kotlinx.coroutines.withTimeout(cfg.pipeline.ocrTimeoutMs) { ocr.recognize(page, lines) }
         } catch (t: Throwable) {
-            Log.e(TAG, "OCR failed", t); return@coroutineScope PageResult.Failed("ocr: ${t.message}")
+            val isTimeout = t is kotlinx.coroutines.TimeoutCancellationException
+            Log.e(TAG, "OCR failed", t); return@coroutineScope PageResult.Failed("ocr: ${t.message}", if (isTimeout) PipelineErrorCode.TIMEOUT else PipelineErrorCode.OCR_FAILED)
         }
         EngineTrace.log("pipe.ocr.exit")
         val regions = try {
             Grouping.group(lines)
         } catch (t: Throwable) {
-            Log.e(TAG, "Grouping failed", t); return@coroutineScope PageResult.Failed("group: ${t.message}")
+            Log.e(TAG, "Grouping failed", t); return@coroutineScope PageResult.Failed("group: ${t.message}", PipelineErrorCode.GROUP_FAILED)
         }
         val ocrMs = System.currentTimeMillis() - tOcr
         // Inpaint set = regions with non-blank OCR source text (blank = likely false detection, skip inpaint to preserve image). Determined before translation => inpaint can run concurrently with translation.
         val textRegions = regions.filter { it.sourceText.isNotBlank() }
         if (textRegions.isEmpty()) {
-            return@coroutineScope PageResult.Skipped("OCR empty", PageStats(lines.size, regions.size, 0, detectMs, ocrMs, 0, 0, 0))
+            return@coroutineScope PageResult.Skipped("OCR empty", PageStats(lines.size, regions.size, 0, detectMs, ocrMs, 0, 0, 0), PipelineErrorCode.OCR_FAILED)
         }
 
         // Inpaint (CPU) || Translation (network) concurrent: both depend only on OCR, can run simultaneously (CPU inpaint while waiting for network).
@@ -148,7 +140,7 @@ class Pipeline(
             val cht = try {
                 // Dense pages (many bubbles or long text) hit provider token limits -> split into smaller
                 // requests. Each chunk keeps its own retry and token accounting, then merged in order.
-                val chunks = chunkByChars(textRegions, maxPerChunk = 22, maxCharsPerChunk = 2800)
+                val chunks = chunkByChars(textRegions, maxPerChunk = cfg.pipeline.maxRegionsPerChunk, maxCharsPerChunk = cfg.pipeline.maxCharsPerChunk)
                 val merged = mutableListOf<String>()
                 var anyError: String? = null
                 var anyRaw: String? = null
@@ -191,12 +183,10 @@ class Pipeline(
                         }
                         res ?: throw lastErr!!
                     }
-                    // Hallucination guard per chunk: drop absurd expansions (>4x source length and >60 chars)
-                    // and fall back to source for that region only — prevents a single bad line breaking layout.
                     for (i in chunkTranslations.indices) {
                         val src = sources.getOrNull(i) ?: ""
                         var tr = chunkTranslations.getOrNull(i) ?: src
-                        if (tr.length > src.length * 4 + 20 && tr.length > 60) tr = src
+                        if (tr.length > src.length * cfg.pipeline.hallucinationRatio + 20 && tr.length > cfg.pipeline.hallucinationMinLen) tr = src
                         merged.add(tr)
                     }
                 }
@@ -204,9 +194,10 @@ class Pipeline(
                 llmRaw = anyRaw
                 merged
             } catch (t: Throwable) {
+                val isTimeout = t is kotlinx.coroutines.TimeoutCancellationException || (t.message?.contains("timeout", true) == true)
                 Log.e(TAG, "Translation failed", t)
-                inpaintJob.cancelAndJoin() // Translation failed -> discard inpaint, keep original ( §11; native run cannot be interrupted, cancel actually waits then discards)
-                return@coroutineScope PageResult.Failed("translate: ${t.message}")
+                inpaintJob.cancelAndJoin()
+                return@coroutineScope PageResult.Failed("translate: ${t.message}", if (isTimeout) PipelineErrorCode.TIMEOUT else PipelineErrorCode.TRANSLATE_FAILED)
             }
             textRegions.forEachIndexed { j, r -> r.translatedText = cht.getOrElse(j) { r.sourceText } }
             translateMs = System.currentTimeMillis() - tTr
@@ -228,14 +219,14 @@ class Pipeline(
             //  - error != null (exception [network/HTTP] or partial parse) -> Failed: no marker, retry later, whole chapter red (caller drain marks ERROR).
             //  - error == null (LLM normally parsed but all content filtered, e.g., whole page sound effects returned as translated==source) -> Skipped: skip, do not retry infinitely.
             return@coroutineScope if (llmError != null) {
-                PageResult.Failed("All filtered (LLM failed $llmError) | raw=${llmRaw?.take(80)}")
+                PageResult.Failed("All filtered (LLM failed $llmError) | raw=${llmRaw?.take(80)}", PipelineErrorCode.ALL_FILTERED)
             } else {
                 PageResult.Skipped(
                     "All filtered aligned=$aligned/${textRegions.size} | raw=$llmRaw | $dbg",
                     PageStats(
                         lines.size, regions.size, 0, detectMs, ocrMs, translateMs, 0, 0,
                         promptTokens = promptTok, completionTokens = completionTok,
-                    ),
+                    ), PipelineErrorCode.ALL_FILTERED,
                 )
             }
         }
@@ -248,7 +239,7 @@ class Pipeline(
         val cleaned = try {
             inpaintJob.await()
         } catch (t: Throwable) {
-            Log.e(TAG, "Inpaint failed", t); return@coroutineScope PageResult.Failed("inpaint: ${t.message}")
+            Log.e(TAG, "Inpaint failed", t); return@coroutineScope PageResult.Failed("inpaint: ${t.message}", PipelineErrorCode.INPAINT_FAILED)
         }
 
         // Typesetting (all textRegions: kept with translated text, failed regions with original)
@@ -257,7 +248,7 @@ class Pipeline(
         val finalPage = try {
             Renderer.render(cleaned, textRegions, cfg.render, typeface)
         } catch (t: Throwable) {
-            Log.e(TAG, "Render failed", t); return@coroutineScope PageResult.Failed("render: ${t.message}")
+            Log.e(TAG, "Render failed", t); return@coroutineScope PageResult.Failed("render: ${t.message}", PipelineErrorCode.RENDER_FAILED)
         }
         val renderMs = System.currentTimeMillis() - tRn
         EngineTrace.log("pipe.page.done")
@@ -291,19 +282,21 @@ class Pipeline(
         maxPerChunk: Int,
         maxCharsPerChunk: Int,
     ): List<List<TextRegion>> {
+        if (regions.isEmpty()) return emptyList()
         if (regions.size <= maxPerChunk && regions.sumOf { it.sourceText.length } <= maxCharsPerChunk) return listOf(regions)
         val out = mutableListOf<List<TextRegion>>()
         var cur = mutableListOf<TextRegion>()
         var curChars = 0
         for (r in regions) {
-            val len = r.sourceText.length
-            if (cur.isNotEmpty() && (cur.size >= maxPerChunk || curChars + len > maxCharsPerChunk)) {
+            val len = r.sourceText.length.coerceAtLeast(1)
+            val wouldOverflow = cur.isNotEmpty() && (cur.size >= maxPerChunk || curChars + len > maxCharsPerChunk)
+            if (wouldOverflow) {
                 out.add(cur)
                 cur = mutableListOf()
                 curChars = 0
             }
             cur.add(r)
-            curChars += len
+            curChars += len + 6 // +6 accounts for <|n|> framing overhead per region
         }
         if (cur.isNotEmpty()) out.add(cur)
         return out

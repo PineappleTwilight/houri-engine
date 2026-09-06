@@ -233,14 +233,17 @@ class Inpainter(
 
     private class WinOut(val x0: Int, val y0: Int, val ww: Int, val wh: Int, val px: IntArray)
 
-    /**
-     * Run whole-page NCNN AOT-GAN once: scale whole page to square [cfg.tileSize] -> inference -> scale back to original size. Read-only page/maskBmp => concurrent safe.
-     * NCNN net has fixed square input, same-size reuse is safe (reuse across sizes would crash, so always whole page tileSize).
-     */
     private fun runWholeAot(page: Bitmap, maskBmp: Bitmap, w: Int, h: Int): WinOut? {
         val t = cfg.tileSize
-        val imgScaled = Bitmap.createScaledBitmap(page, t, t, true)
-        val maskScaled = Bitmap.createScaledBitmap(maskBmp, t, t, false)
+        val imgScaled: Bitmap
+        val maskScaled: Bitmap
+        if (cfg.preserveAspect) {
+            imgScaled = letterboxScale(page, t)
+            maskScaled = letterboxScale(maskBmp, t, filter = false)
+        } else {
+            imgScaled = Bitmap.createScaledBitmap(page, t, t, true)
+            maskScaled = Bitmap.createScaledBitmap(maskBmp, t, t, false)
+        }
         return try {
             val imgChw = aotImageChw(imgScaled, maskScaled, t)
             val maskArr = maskArr(maskScaled, t)
@@ -262,14 +265,28 @@ class Inpainter(
         }
     }
 
-    /** Raw NCHW array for AOT image [3*n*n]: RGB -> [-1,1], holes zeroed (m-i-t `img*(1-mask)`). */
+    private fun letterboxScale(src: Bitmap, tile: Int, filter: Boolean = true): Bitmap {
+        val sw = src.width; val sh = src.height
+        val scale = minOf(tile.toFloat() / sw, tile.toFloat() / sh)
+        val nw = (sw * scale).toInt().coerceAtLeast(1); val nh = (sh * scale).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(src, nw, nh, filter)
+        if (nw == tile && nh == tile) return scaled
+        val out = Bitmap.createBitmap(tile, tile, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.GRAY)
+        val dx = (tile - nw) / 2f; val dy = (tile - nh) / 2f
+        canvas.drawBitmap(scaled, dx, dy, null)
+        scaled.recycle()
+        return out
+    }
+
     private fun aotImageChw(imgBmp: Bitmap, maskBmp: Bitmap, n: Int): FloatArray {
         val area = n * n
         val px = IntArray(area); imgBmp.getPixels(px, 0, n, 0, 0, n, n)
         val mp = IntArray(area); maskBmp.getPixels(mp, 0, n, 0, 0, n, n)
         val chw = FloatArray(3 * area)
         for (i in 0 until area) {
-            if ((mp[i] and 0xFF) > 127) continue // Hole = 0
+            if ((mp[i] and 0xFF) > 127) continue
             val p = px[i]
             chw[i] = ((p shr 16) and 0xFF) / 127.5f - 1f
             chw[area + i] = ((p shr 8) and 0xFF) / 127.5f - 1f
@@ -278,7 +295,6 @@ class Inpainter(
         return chw
     }
 
-    /** Raw array for mask [n*n] (1=erase). */
     private fun maskArr(bmp: Bitmap, n: Int): FloatArray {
         val px = IntArray(n * n); bmp.getPixels(px, 0, n, 0, 0, n, n)
         val m = FloatArray(n * n)
@@ -286,7 +302,6 @@ class Inpainter(
         return m
     }
 
-    /** AOT output array [3*n*n] in [-1,1] -> Bitmap ((x+1)*127.5). */
     private fun aotArrToBitmap(arr: FloatArray, n: Int): Bitmap {
         val area = n * n
         val px = IntArray(area)
@@ -299,15 +314,46 @@ class Inpainter(
         return Bitmap.createBitmap(px, n, n, Bitmap.Config.ARGB_8888)
     }
 
-    /** Composite AOT output back to result, only replacing pixels inside mask (called sequentially, write-safe). */
     private fun compositePixels(result: Bitmap, maskPx: IntArray, o: WinOut) {
         val w = result.width
         val cur = IntArray(o.ww * o.wh)
         result.getPixels(cur, 0, o.ww, o.x0, o.y0, o.ww, o.wh)
-        for (y in 0 until o.wh) {
-            val maskRow = (o.y0 + y) * w + o.x0
-            val row = y * o.ww
-            for (x in 0 until o.ww) if ((maskPx[maskRow + x] and 0xFF) > 127) cur[row + x] = o.px[row + x]
+        val r = cfg.featherRadius.coerceIn(0, 4)
+        if (r == 0) {
+            for (y in 0 until o.wh) {
+                val maskRow = (o.y0 + y) * w + o.x0
+                val row = y * o.ww
+                for (x in 0 until o.ww) if ((maskPx[maskRow + x] and 0xFF) > 127) cur[row + x] = o.px[row + x]
+            }
+        } else {
+            for (y in 0 until o.wh) {
+                val maskRow = (o.y0 + y) * w + o.x0
+                val row = y * o.ww
+                for (x in 0 until o.ww) {
+                    if ((maskPx[maskRow + x] and 0xFF) <= 127) continue
+                    var edgeDist = r + 1
+                    for (dy in -r..r) for (dx in -r..r) {
+                        val nx = x + dx; val ny = y + dy
+                        if (nx !in 0 until o.ww || ny !in 0 until o.wh) continue
+                        if ((maskPx[(o.y0 + ny) * w + o.x0 + nx] and 0xFF) <= 127) {
+                            val d = kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                            if (d < edgeDist) edgeDist = d
+                        }
+                    }
+                    if (edgeDist > r) {
+                        cur[row + x] = o.px[row + x]
+                    } else {
+                        val alpha = edgeDist.toFloat() / (r + 1)
+                        val src = o.px[row + x]; val dst = cur[row + x]
+                        val sr = (src shr 16) and 0xFF; val sg = (src shr 8) and 0xFF; val sb = src and 0xFF
+                        val dr = (dst shr 16) and 0xFF; val dg = (dst shr 8) and 0xFF; val db = dst and 0xFF
+                        val mr = (sr * (1 - alpha) + dr * alpha).toInt()
+                        val mg = (sg * (1 - alpha) + dg * alpha).toInt()
+                        val mb = (sb * (1 - alpha) + db * alpha).toInt()
+                        cur[row + x] = Color.rgb(mr, mg, mb)
+                    }
+                }
+            }
         }
         result.setPixels(cur, 0, o.ww, o.x0, o.y0, o.ww, o.wh)
     }
