@@ -91,8 +91,8 @@ object Renderer {
         val median = thicknesses[thicknesses.size / 2]
         val filtered = thicknesses.filter { it in median * 0.4f..median * 2.5f }
         val use = if (filtered.size >= 2) filtered else thicknesses
-        use.sort()
-        return use[use.size / 2].roundToInt()
+        val sortedUse = use.sorted()
+        return sortedUse[sortedUse.size / 2].roundToInt()
     }
 
     /** Text color (fill, outline): auto = pick from background luminance after inpaint (dark bg white text, light bg black text, aligned with parity auto_colors); mono = black text white outline; other = fixed color. */
