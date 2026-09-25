@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.util.Log
+import kotlin.comparisons.maxOf
 import kotlin.math.roundToInt
 import kotlinx.coroutines.coroutineScope
 
@@ -53,30 +54,60 @@ class Inpainter(
             return@coroutineScope result
         }
 
-        // aot (default): whole page runs AOT-GAN whole-page reconstruction; mark onArt so Renderer gives black text thick white outline.
-        // Hardened: for bubble regions (not onArt) we still prefer boxfill to preserve bubble borders, only art regions use AOT
-        val bubbleRegions = regions.filter { !it.onArt }
-        val artRegions = regions.filter { it.onArt }
-        // If we have mixed, handle bubbles with boxfill first to preserve, then AOT for art
-        if (bubbleRegions.isNotEmpty() && artRegions.isNotEmpty()) {
-            val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
-            val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
-            for (r in bubbleRegions) {
-                val s = bgStats(px, tightPx, r, w, h)
-                flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
+        // aot (default): quality-first fast path. Uniform bubbles are solid-filled up front through a
+        // dedicated tight 1.025x polygon mask (never the expanded render mask, which would erase crisp
+        // bubble borders) and excluded from the AOT mask; only textured/art regions run AOT-GAN
+        // reconstruction and are marked onArt so Renderer uses the thick-white-outline style.
+        val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
+        val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
+        val artRegions = ArrayList<TextRegion>()
+        val uniformRegions = ArrayList<TextRegion>()
+        if (cfg.uniformFastPath) {
+            for (r in regions) {
+                if (BubbleUniformity.classify(px, w, h, r)) {
+                    r.onArt = false
+                    uniformRegions.add(r)
+                } else {
+                    r.onArt = true
+                    artRegions.add(r)
+                }
             }
+        } else {
+            regions.forEach { it.onArt = true }
+            artRegions.addAll(regions)
         }
-        regions.forEach { it.onArt = true }
+        // Tight fills, gated by the dedicated polygon mask; the same mask clears the AOT copy below,
+        // so filled and excluded areas are exactly identical. Non-uniform regions never enter this mask.
+        var uniPx: IntArray? = null
+        if (uniformRegions.isNotEmpty()) {
+            val uniBmp = buildUniformMask(uniformRegions, w, h)
+            val gate = IntArray(w * h)
+            uniBmp.getPixels(gate, 0, w, 0, 0, w, h)
+            uniBmp.recycle()
+            for (r in uniformRegions) {
+                val color = BubbleUniformity.meanColor(px, w, h, r) ?: bgStats(px, tightPx, r, w, h).color
+                val ref = maxOf(r.x1 - r.x0, r.y1 - r.y0)
+                flatFill(result, gate, r, color, RegionBounds.maskPad(cfg.bboxPad, 0f, ref), w, h)
+            }
+            uniPx = gate
+        }
+        if (artRegions.isEmpty()) return@coroutineScope result // All uniform: fills done, skip AOT entirely.
+        // AOT mask = full mask minus the solid-filled tight uniform areas (copy: flat-fill gating mask survives).
+        val aotMask = maskPx.copyOf()
+        val gate = uniPx
+        if (gate != null) {
+            for (i in gate.indices) if ((gate[i] and 0xFF) > 127) aotMask[i] = Color.BLACK
+        }
         val maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        maskBmp.setPixels(maskPx, 0, w, 0, 0, w, h)
+        maskBmp.setPixels(aotMask, 0, w, 0, 0, w, h)
         val aotResult = try { runWholeAot(page, maskBmp, w, h) } catch (t: Throwable) { Log.w(TAG, "AOT failed, keeping boxfill fallback", t); null }
         if (aotResult != null) {
-            compositePixels(result, maskPx, aotResult)
+            compositePixels(result, aotMask, aotResult)
         } else {
-            val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
-            val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
-            for (r in regions) {
-                val s = bgStats(px, tightPx, r, w, h)
+            // AOT failed: flat-fill only the remaining art regions; uniform fills stay untouched (never worse).
+            val fresh = IntArray(w * h); result.getPixels(fresh, 0, w, 0, 0, w, h)
+            for (r in artRegions) {
+                val s = bgStats(fresh, tightPx, r, w, h)
                 flatFill(result, maskPx, r, s.color, cfg.bboxPad, w, h)
             }
         }
@@ -119,23 +150,13 @@ class Inpainter(
      * SFX/untranslated regions (OCR source blank) not in regions -> remain untouched.
      */
     private fun buildSegMask(regions: List<TextRegion>, textMask: Bitmap, w: Int, h: Int, render: RenderConfig): IntArray {
-        val pad = cfg.bboxPad
         val allow = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         Canvas(allow).apply {
             drawColor(Color.BLACK)
             val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
             for (region in regions) {
-                val halfW = (region.x1 - region.x0) / 2f
-                val halfH = (region.y1 - region.y0) / 2f
-                // Same portrait check as drawHorizontal: long axis as layout width, short axis as row height.
-                // Hardened: use same 2.5 aspect threshold as Renderer to avoid over-expanding near-square bubbles
-                val aspect = if ((region.x1 - region.x0) > 1f) (region.y1 - region.y0) / (region.x1 - region.x0) else 1f
-                val portrait = aspect > 2.5f
-                val expW = if (portrait) render.expandH else render.expandW
-                val expH = if (portrait) render.expandW else render.expandH
-                val dx = halfW * (expW - 1f) + pad
-                val dy = halfH * (expH - 1f) + pad
-                drawRect(region.x0 - dx, region.y0 - dy, region.x1 + dx, region.y1 + dy, p)
+                val b = maskBox(region, render, w, h)
+                drawRect(b.x0, b.y0, b.x1, b.y1, p)
             }
         }
         val mask = IntArray(w * h)
@@ -143,6 +164,70 @@ class Inpainter(
         allow.recycle()
         dilate(mask, w, h, (cfg.maskDilate / 2f).roundToInt().coerceAtLeast(1))
         return mask
+    }
+
+    /**
+     * Expanded mask box for a region: [RegionBounds] expansion/clamping semantics (portrait
+     * 2.5 threshold, expandW/expandH swap, bbox pad) plus a bounded K3-inspired 2.5% ring margin.
+     * Single source of truth for mask drawing and uniform-fill clearing, so both cover the same area.
+     */
+    private fun maskBox(region: TextRegion, render: RenderConfig, w: Int, h: Int): RegionRect {
+        val ref = maxOf(region.x1 - region.x0, region.y1 - region.y0)
+        val pad = RegionBounds.maskPad(cfg.bboxPad, cfg.maskDilate, ref)
+        return RegionBounds.expandedClamped(region, w, h, render.expandW, render.expandH, pad)
+    }
+
+    /**
+     * Tight uniform-bubble mask (white = solid-fill now, exclude from AOT): one antialiased 1.025x
+     * polygon per uniform region, i.e. its line quads scaled about the region centroid. Regions with
+     * no usable quads fall back to a clamped 1.025x [RegionBounds] rectangle so every classified
+     * uniform region still gets a valid mask. Only uniform regions are drawn; art regions never enter.
+     *
+     * Why not the full render/inpaint mask ([buildSegMask]): that mask is deliberately oversized
+     * (up to 1.3x/1.5x plus bbox pad plus dilation) to cover the future translated-text landing area.
+     * Gating a solid fill through it paints past the bubble edge and erases crisp borders; the tight
+     * ring covers only the bubble itself.
+     */
+    private fun buildUniformMask(regions: List<TextRegion>, w: Int, h: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.BLACK)
+        val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true }
+        val s = BubbleUniformity.RING_SCALE
+        for (r in regions) {
+            var cx = 0f
+            var cy = 0f
+            var n = 0
+            for (line in r.lines) {
+                val q = line.quad
+                if (q.size < 4) continue
+                for (pt in q) {
+                    cx += pt.x
+                    cy += pt.y
+                    n++
+                }
+            }
+            if (n == 0) {
+                val b = RegionBounds.expandedClamped(r, w, h, s, s, 0)
+                canvas.drawRect(b.x0, b.y0, b.x1, b.y1, p)
+                continue
+            }
+            cx /= n
+            cy /= n
+            for (line in r.lines) {
+                val q = line.quad
+                if (q.size < 4) continue
+                val path = android.graphics.Path().apply {
+                    moveTo(cx + (q[0].x - cx) * s, cy + (q[0].y - cy) * s)
+                    lineTo(cx + (q[1].x - cx) * s, cy + (q[1].y - cy) * s)
+                    lineTo(cx + (q[2].x - cx) * s, cy + (q[2].y - cy) * s)
+                    lineTo(cx + (q[3].x - cx) * s, cy + (q[3].y - cy) * s)
+                    close()
+                }
+                canvas.drawPath(path, p)
+            }
+        }
+        return bmp
     }
 
     /** Binary mask separable dilation (horizontal then vertical max-filter), radius pixels. Covers stroke anti-aliased edges, gives inpaint margin. */

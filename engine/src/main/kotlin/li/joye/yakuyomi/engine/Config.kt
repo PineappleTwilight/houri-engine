@@ -179,6 +179,11 @@ data class InpainterConfig(
     val bboxPad: Int = 16,            // Inpaint allow region bbox rectangle expansion px: covers furigana at bbox edge (tight line box would miss)
     val featherRadius: Int = 1,       // Feather blend radius at inpaint seam (0=hard, 1=soft 1px anti-alias to hide seam)
     val preserveAspect: Boolean = true, // When true, AOT input is scaled aspect-preserving inside tileSize (less distortion on tall pages)
+    // Quality-first fast path (default on): in AOT mode, uniform bubbles (BubbleUniformity: >=99% ring
+    // samples within distance 15) are solid-filled with the ring mean color and excluded from the AOT mask;
+    // only textured/art regions run AOT-GAN and are marked onArt. Off = legacy: every region runs AOT.
+    // No effect in boxfill mode (all regions are flat-filled there). Boolean: no range to validate.
+    val uniformFastPath: Boolean = true,
 ) {
     fun validate(): List<String> = buildList {
         if (method !in setOf("aot", "boxfill")) add("method $method not in [aot,boxfill]")
