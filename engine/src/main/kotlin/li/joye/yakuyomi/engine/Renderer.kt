@@ -33,10 +33,23 @@ object Renderer {
         val out = page.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(out)
         val face = tf ?: Typeface.DEFAULT
-        val fill = Paint().apply { color = Color.BLACK; isAntiAlias = true; typeface = face }
+        val fill = Paint().apply {
+            color = Color.BLACK
+            isAntiAlias = true
+            isSubpixelText = true
+            typeface = face
+        }
         val stroke = Paint().apply {
-            color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 4f
-            isAntiAlias = true; typeface = face
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+            isAntiAlias = true
+            isSubpixelText = true
+            // Round joins/caps: a text halo must wrap the glyph, and MITER spikes on
+            // 'M'/'W'/'A'/'V' while BUTT leaves the outline visibly detached at stroke ends.
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+            typeface = face
         }
         for (region in regions) {
             val text = region.translatedText.ifBlank { region.sourceText }
@@ -45,6 +58,11 @@ object Renderer {
             val (fillColor, outlineColor) = textColors(page, region, cfg)
             fill.color = fillColor
             stroke.color = outlineColor
+            // A stroke the same colour as the fill adds no halo but still paints strokeWidth/2
+            // of extra ink on every glyph edge, which emboldens the text and closes the
+            // counters ('e', 'a', 'o') into blobs. colorMode="fixed" hits this on every
+            // light background (black fill + black outline), so draw no outline at all there.
+            val halo = outlineColor != fillColor
             val vertical = when (cfg.orientation) {
                 TextOrientation.AUTO -> region.direction == "v" && isCjk(text)
                 TextOrientation.VERTICAL -> true
@@ -64,8 +82,8 @@ object Renderer {
             }
             // Translation font size anchored to original height: short translations do not inflate to fontSizeMax, long ones do not shrink far below original (keep "same size before/after translation").
             val originalSize = originalFontSize(region)
-            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize)
-            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize)
+            if (vertical) drawVertical(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize, halo = halo)
+            else drawHorizontal(canvas, x0, y0, x1, y1, text, fill, stroke, cfg, onArt = region.onArt, originalSize = originalSize, halo = halo)
             if (rotate) canvas.restore()
         }
         return out
@@ -74,7 +92,7 @@ object Renderer {
     private fun originalFontSize(region: TextRegion): Int {
         val thicknesses = ArrayList<Float>()
         for (line in region.lines) {
-            val q = line.quad
+            val q = line.tightQuad ?: line.quad
             if (q.size < 4) continue
             fun mid(a: Pt, b: Pt) = Pt(((a.x + b.x) / 2f).toInt().toFloat(), ((a.y + b.y) / 2f).toInt().toFloat())
             val hx = mid(q[0], q[1]).x - mid(q[2], q[3]).x
@@ -135,17 +153,20 @@ object Renderer {
         o in 0x0590..0x08FF || o in 0xFB1D..0xFDFF || o in 0xFE70..0xFEFF
     }
 
+    /**
+     * Outline width as a fraction of the font size. The outline is a legibility aid for text on
+     * reconstructed artwork, never a second weight: past ~0.14em it grows inward faster than the
+     * glyph stem and closes the counters of 'e'/'a'/'o', which is what makes typeset translations
+     * look like fat marker lettering. Large sizes therefore stay at (or below) 1x rather than being
+     * boosted, and the result is hard-capped.
+     */
     private fun strokeWidthFor(size: Int, onArt: Boolean, cfg: RenderConfig): Float {
-        val base = if (onArt) cfg.artStrokeRatio else 0.10f
-        return if (!cfg.adaptiveStroke) maxOf(2f, size * base)
-        else when {
-            size <= 12 -> maxOf(1.5f, size * (base * 0.75f))
-            size >= 36 -> maxOf(2f, size * (base * 1.15f))
-            else -> maxOf(2f, size * base)
-        }
+        val base = if (onArt) cfg.artStrokeRatio else STROKE_RATIO
+        val ratio = if (!cfg.adaptiveStroke || size > 12) base else base * 0.75f
+        return maxOf(1.5f, size * ratio).coerceAtMost(size * MAX_STROKE_RATIO)
     }
 
-    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
+    private fun drawVertical(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0, halo: Boolean = true) {
         val chars = text.filter { it != '\n' }
         if (chars.isEmpty()) return
         val cells = toVerticalCells(chars, cfg.tateChuYoko)  // Split into cells: normal char one cell, short ASCII strings merge into one tate-chu-yoko cell
@@ -179,7 +200,8 @@ object Renderer {
             }
         }
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = strokeWidthFor(size, onArt, cfg)
+        stroke.strokeWidth = if (halo) strokeWidthFor(size, onArt, cfg) else 0f
+        val border = cfg.fontBorder && halo
         val lh = size * cfg.lineSpacing; val cw = size * 1.1f
         cpc = maxOf(1, (colRoom / lh).toInt() - cfg.colTrim)
         val columnsFinal = splitColumnsV(cells, cpc)
@@ -193,9 +215,9 @@ object Renderer {
             var cy = startCy
             for (cell in columnsFinal[col]) {
                 if (cell.length == 1) {
-                    drawCharVertical(canvas, cell[0], cx, cy + lh / 2f, fill, stroke, cfg.fontBorder)
+                    drawCharVertical(canvas, cell[0], cx, cy + lh / 2f, fill, stroke, border)
                 } else {
-                    drawTateChuYoko(canvas, cell, cx, cy + lh / 2f, cw, fill, stroke, cfg.fontBorder)
+                    drawTateChuYoko(canvas, cell, cx, cy + lh / 2f, cw, fill, stroke, border)
                 }
                 cy += lh
             }
@@ -261,7 +283,7 @@ object Renderer {
         canvas.restore()
     }
 
-    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0) {
+    private fun drawHorizontal(canvas: Canvas, x0: Float, y0: Float, x1: Float, y1: Float, text: String, fill: Paint, stroke: Paint, cfg: RenderConfig, onArt: Boolean = false, originalSize: Int = 0, halo: Boolean = true) {
         val aspect = if ((x1 - x0) > 1f) (y1 - y0) / (x1 - x0) else 1f
         val portrait = !onArt && aspect > 2.5f && !isCjk(text)
         val wrapW = if (portrait) (y1 - y0) else (x1 - x0)
@@ -282,7 +304,8 @@ object Renderer {
         }
         size = maxOf(cfg.fontSizeMin, (size * cfg.fontScale).roundToInt())
         fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-        stroke.strokeWidth = strokeWidthFor(size, onArt, cfg)
+        stroke.strokeWidth = if (halo) strokeWidthFor(size, onArt, cfg) else 0f
+        val border = cfg.fontBorder && halo
         val finalTrim = if (bw < size * 8f) cfg.rowTrim * size * 0.3f else cfg.rowTrim * size.toFloat()
         lines = wrapForHorizontal(text, fill, (bw - finalTrim).coerceAtLeast(size * 2f), cfg)
         var lh = size * 1.18f
@@ -297,7 +320,7 @@ object Renderer {
                     lines = cand
                     lh = size * 1.18f
                     fill.textSize = size.toFloat(); stroke.textSize = size.toFloat()
-                    stroke.strokeWidth = strokeWidthFor(size, onArt, cfg)
+                    stroke.strokeWidth = if (halo) strokeWidthFor(size, onArt, cfg) else 0f
                     break
                 }
             }
@@ -308,11 +331,16 @@ object Renderer {
         }
         val mirrorRtl = cfg.rtlSupport && isRtl(text)
         val tcx = (x0 + x1) / 2f
-        var baseline = (y0 + y1) / 2f - lines.size * lh / 2f + size * ASCENT
+        // First baseline = block top + real ascent (not a hardcoded 0.82em, which is wrong for
+        // every typeface but Roboto and leaves text sitting low), minus half the outline so a
+        // thick on-art halo cannot spill past the bubble edge.
+        val fm = fill.fontMetrics
+        val firstBaseline = (y0 + y1) / 2f - lines.size * lh / 2f + (-fm.ascent) - stroke.strokeWidth / 2f
+        var baseline = firstBaseline
         for (ln in lines) {
             val display = if (mirrorRtl) "\u202B$ln\u202C" else ln
             val tx = tcx - fill.measureText(ln) / 2f
-            if (cfg.fontBorder) canvas.drawText(display, tx, baseline, stroke)
+            if (border) canvas.drawText(display, tx, baseline, stroke)
             canvas.drawText(display, tx, baseline, fill)
             baseline += lh
         }
@@ -373,8 +401,8 @@ object Renderer {
         return lines
     }
 
-    private const val ASCENT = 0.82f
     private const val STROKE_RATIO = 0.10f  // Stroke width = font size * this ratio (scales with size)
+    private const val MAX_STROKE_RATIO = 0.14f  // Hard ceiling on the outline as a fraction of font size (see strokeWidthFor)
     private const val MAX_TCY = 4  // Max ASCII chars merged into one tate-chu-yoko cell (covers 2-digit age, 4-digit year; longer falls back to char-by-char to avoid over-compression)
     private const val ROTATE_CHARS = "ー－—―‐~〜～…‥（）()「」『』【】〔〕［］｛｝〈〉《》＜＞<>｜|：;"
     // Line-start kinsoku: must not appear at column/line start (closing punctuation, small kana) -> merge back to previous column/line (kinsoku)

@@ -54,10 +54,10 @@ class Inpainter(
             return@coroutineScope result
         }
 
-        // aot (default): quality-first fast path. Uniform bubbles are solid-filled up front through a
-        // dedicated tight 1.025x polygon mask (never the expanded render mask, which would erase crisp
-        // bubble borders) and excluded from the AOT mask; only textured/art regions run AOT-GAN
-        // reconstruction and are marked onArt so Renderer uses the thick-white-outline style.
+        // aot (default): quality-first fast path. Uniform bubbles are solid-filled up front through the
+        // glyph mask (never the whole expanded box, which would erase crisp bubble borders) and excluded
+        // from the AOT mask; only textured/art regions run AOT-GAN reconstruction and are marked onArt so
+        // Renderer uses the white-outline style.
         val px = IntArray(w * h); result.getPixels(px, 0, w, 0, 0, w, h)
         val tightPx = IntArray(w * h); textMask.getPixels(tightPx, 0, w, 0, 0, w, h)
         val artRegions = ArrayList<TextRegion>()
@@ -76,18 +76,14 @@ class Inpainter(
             regions.forEach { it.onArt = true }
             artRegions.addAll(regions)
         }
-        // Tight fills, gated by the dedicated polygon mask; the same mask clears the AOT copy below,
-        // so filled and excluded areas are exactly identical. Non-uniform regions never enter this mask.
+        // Filled and excluded areas are the same set by construction: both derive from maskPx, the only
+        // difference being which regions. Non-uniform regions never enter the fill mask.
         var uniPx: IntArray? = null
         if (uniformRegions.isNotEmpty()) {
-            val uniBmp = buildUniformMask(uniformRegions, w, h)
-            val gate = IntArray(w * h)
-            uniBmp.getPixels(gate, 0, w, 0, 0, w, h)
-            uniBmp.recycle()
+            val gate = regionMask(maskPx, uniformRegions, w, h, render)
             for (r in uniformRegions) {
                 val color = BubbleUniformity.meanColor(px, w, h, r) ?: bgStats(px, tightPx, r, w, h).color
-                val ref = maxOf(r.x1 - r.x0, r.y1 - r.y0)
-                flatFill(result, gate, r, color, RegionBounds.maskPad(cfg.bboxPad, 0f, ref), w, h)
+                flatFill(result, gate, r, color, cfg.bboxPad, w, h)
             }
             uniPx = gate
         }
@@ -143,27 +139,79 @@ class Inpainter(
     }
 
     /**
-     * Inpaint mask = entire "expanded text box" (white = to be inpainted). Region box expanded per Renderer expandW/expandH
-     * (vertical box swaps long/short axis, matching drawHorizontal 90° rotation), then dilate by maskDilate.
-     * Changed from "seg thin strokes ∩ box" to whole box: new translated text will fill the expanded box (especially long LTR text in vertical boxes),
-     * only whole-box reconstruction ensures translated text lands on clean background (text on art no longer covers un-inpainted original).
-     * SFX/untranslated regions (OCR source blank) not in regions -> remain untouched.
+     * Inpaint mask (white = to be inpainted) = the **glyph strokes** of each region, clipped to that
+     * region's expanded box, dilated by [InpainterConfig.maskDilate].
+     *
+     * Only the letters are removed, which is what makes the repair invisible: AOT-GAN fills a thin
+     * glyph-shaped hole from its immediate surroundings, so hair, screentone and panel edges come
+     * back intact, and a flat fill merely repaints the bubble it already sits in. Masking the whole
+     * expanded box instead (the previous behaviour) handed AOT-GAN a rectangle several times the
+     * glyph area — a 30x200 line is detected as ~90x260 by DBNet's 2.3x unclip, and the box
+     * expands that again — which is a hole no tile-768 pass can reconstruct faithfully, so it came
+     * back as the flat light patch over artwork.
+     *
+     * The region box is kept as a containment guard, and as a per-region fallback when a region has
+     * readable text but the detector's stroke mask somehow missed it — leaving that text behind is
+     * worse than removing a slightly oversized area. The fallback is deliberately **not** granted to
+     * regions with no readable text: those are exactly the false detections (a face, a panel border),
+     * and blanketing their whole box would chew holes in the artwork. Without readable text, glyph
+     * coverage is the only evidence of real text, and no coverage means nothing is removed.
      */
     private fun buildSegMask(regions: List<TextRegion>, textMask: Bitmap, w: Int, h: Int, render: RenderConfig): IntArray {
+        val radius = (cfg.maskDilate / 2f).roundToInt().coerceAtLeast(1)
+
+        val glyph = IntArray(w * h)
+        textMask.getPixels(glyph, 0, w, 0, 0, w, h)
+        for (i in glyph.indices) if ((glyph[i] and 0xFF) <= 127) glyph[i] = Color.BLACK
+        dilate(glyph, w, h, radius)
+
+        val boxes = ArrayList<RegionRect>(regions.size)
         val allow = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         Canvas(allow).apply {
             drawColor(Color.BLACK)
             val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
             for (region in regions) {
                 val b = maskBox(region, render, w, h)
+                boxes.add(b)
                 drawRect(b.x0, b.y0, b.x1, b.y1, p)
             }
         }
-        val mask = IntArray(w * h)
-        allow.getPixels(mask, 0, w, 0, 0, w, h)
+        val boxPx = IntArray(w * h)
+        allow.getPixels(boxPx, 0, w, 0, 0, w, h)
         allow.recycle()
-        dilate(mask, w, h, (cfg.maskDilate / 2f).roundToInt().coerceAtLeast(1))
+
+        val mask = IntArray(w * h)
+        for (i in mask.indices) {
+            val on = (glyph[i] and 0xFF) > 127 && (boxPx[i] and 0xFF) > 127
+            mask[i] = if (on) Color.WHITE else Color.BLACK
+        }
+        for ((index, region) in regions.withIndex()) {
+            if (region.sourceText.isBlank()) continue
+            if (countMaskIn(mask, w, h, boxes[index]) > MIN_GLYPH_PIXELS) continue
+            val b = RegionBounds.clamped(RegionBounds.expanded(region, render.expandW, render.expandH, cfg.bboxPad), w, h)
+            val x0 = b.x0.toInt().coerceIn(0, w - 1)
+            val y0 = b.y0.toInt().coerceIn(0, h - 1)
+            val x1 = b.x1.toInt().coerceIn(x0 + 1, w)
+            val y1 = b.y1.toInt().coerceIn(y0 + 1, h)
+            for (y in y0 until y1) {
+                val row = y * w
+                for (x in x0 until x1) mask[row + x] = Color.WHITE
+            }
+        }
         return mask
+    }
+
+    private fun countMaskIn(mask: IntArray, w: Int, h: Int, b: RegionRect): Int {
+        val x0 = b.x0.toInt().coerceIn(0, w - 1)
+        val y0 = b.y0.toInt().coerceIn(0, h - 1)
+        val x1 = b.x1.toInt().coerceIn(x0 + 1, w)
+        val y1 = b.y1.toInt().coerceIn(y0 + 1, h)
+        var n = 0
+        for (y in y0 until y1) {
+            val row = y * w
+            for (x in x0 until x1) if ((mask[row + x] and 0xFF) > 127) n++
+        }
+        return n
     }
 
     /**
@@ -178,56 +226,29 @@ class Inpainter(
     }
 
     /**
-     * Tight uniform-bubble mask (white = solid-fill now, exclude from AOT): one antialiased 1.025x
-     * polygon per uniform region, i.e. its line quads scaled about the region centroid. Regions with
-     * no usable quads fall back to a clamped 1.025x [RegionBounds] rectangle so every classified
-     * uniform region still gets a valid mask. Only uniform regions are drawn; art regions never enter.
-     *
-     * Why not the full render/inpaint mask ([buildSegMask]): that mask is deliberately oversized
-     * (up to 1.3x/1.5x plus bbox pad plus dilation) to cover the future translated-text landing area.
-     * Gating a solid fill through it paints past the bubble edge and erases crisp borders; the tight
-     * ring covers only the bubble itself.
+     * Restricts a mask to the given regions' [maskBox] rectangles, so a flat fill only ever touches
+     * the bubbles it was routed for. Because the source is already the glyph mask, both removal
+     * paths clear the same area and neither can paint past a bubble edge.
      */
-    private fun buildUniformMask(regions: List<TextRegion>, w: Int, h: Int): Bitmap {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(Color.BLACK)
-        val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL; isAntiAlias = true }
-        val s = BubbleUniformity.RING_SCALE
-        for (r in regions) {
-            var cx = 0f
-            var cy = 0f
-            var n = 0
-            for (line in r.lines) {
-                val q = line.quad
-                if (q.size < 4) continue
-                for (pt in q) {
-                    cx += pt.x
-                    cy += pt.y
-                    n++
-                }
-            }
-            if (n == 0) {
-                val b = RegionBounds.expandedClamped(r, w, h, s, s, 0)
-                canvas.drawRect(b.x0, b.y0, b.x1, b.y1, p)
-                continue
-            }
-            cx /= n
-            cy /= n
-            for (line in r.lines) {
-                val q = line.quad
-                if (q.size < 4) continue
-                val path = android.graphics.Path().apply {
-                    moveTo(cx + (q[0].x - cx) * s, cy + (q[0].y - cy) * s)
-                    lineTo(cx + (q[1].x - cx) * s, cy + (q[1].y - cy) * s)
-                    lineTo(cx + (q[2].x - cx) * s, cy + (q[2].y - cy) * s)
-                    lineTo(cx + (q[3].x - cx) * s, cy + (q[3].y - cy) * s)
-                    close()
-                }
-                canvas.drawPath(path, p)
+    private fun regionMask(base: IntArray, regions: List<TextRegion>, w: Int, h: Int, render: RenderConfig): IntArray {
+        val allow = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(allow).apply {
+            drawColor(Color.BLACK)
+            val p = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+            for (region in regions) {
+                val b = maskBox(region, render, w, h)
+                drawRect(b.x0, b.y0, b.x1, b.y1, p)
             }
         }
-        return bmp
+        val boxPx = IntArray(w * h)
+        allow.getPixels(boxPx, 0, w, 0, 0, w, h)
+        allow.recycle()
+        val out = IntArray(w * h)
+        for (i in out.indices) {
+            val on = (base[i] and 0xFF) > 127 && (boxPx[i] and 0xFF) > 127
+            out[i] = if (on) Color.WHITE else Color.BLACK
+        }
+        return out
     }
 
     /** Binary mask separable dilation (horizontal then vertical max-filter), radius pixels. Covers stroke anti-aliased edges, gives inpaint margin. */
@@ -449,5 +470,7 @@ class Inpainter(
 
     companion object {
         private const val TAG = "Inpainter"
+
+        private const val MIN_GLYPH_PIXELS = 16
     }
 }

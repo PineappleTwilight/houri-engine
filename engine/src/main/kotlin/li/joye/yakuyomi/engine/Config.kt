@@ -196,7 +196,7 @@ data class InpainterConfig(
 data class RenderConfig(
     val orientation: TextOrientation = TextOrientation.AUTO, // [Settings] corresponds to config.render.direction=auto (CJK -> vertical)
     val fontBorder: Boolean = true,                              // [Settings] config.render.disable_font_border=false
-    val artStrokeRatio: Float = 0.16f,                           // White outline width for onArt areas (aot reconstructed, onArt) = font size * this (thicker than normal 0.10; better readability for black text with thick white outline on busy background)
+    val artStrokeRatio: Float = 0.11f,                           // White outline width for onArt areas (aot reconstructed, onArt) = font size * this, capped at 0.14 (see Renderer.strokeWidthFor); a legibility halo, not a second weight — a thicker one closes glyph counters and reads as fat marker lettering
     val fontSizeMax: Int = 60,
     val fontSizeMin: Int = 9,
     // Layout geometry (pure text box method, aligned with parity/typeset_parity.py; rarely changed, keep tunable headroom)

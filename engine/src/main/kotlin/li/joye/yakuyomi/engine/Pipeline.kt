@@ -78,6 +78,10 @@ class Pipeline(
             val nh = (page.height * scale).toInt().coerceAtLeast(32)
             try { Bitmap.createScaledBitmap(page, nw, nh, true) } catch (_: Throwable) { page }
         } else page
+        // Every stage below runs in workPage space, because the line quads and stroke mask they consume
+        // are expressed in the bitmap that was detected; handing a later stage the unscaled original
+        // would place every box, crop and mask at the wrong scale. The result is scaled back on exit.
+        val scaled = workPage !== page
         EngineTrace.log("pipe.page.enter ${workPage.width}x${workPage.height}")
         val tDet = System.currentTimeMillis()
         val detection = try {
@@ -97,7 +101,7 @@ class Pipeline(
         val tOcr = System.currentTimeMillis()
         EngineTrace.log("pipe.ocr.enter lines=${lines.size}")
         try {
-            kotlinx.coroutines.withTimeout(cfg.pipeline.ocrTimeoutMs) { ocr.recognize(page, lines) }
+            kotlinx.coroutines.withTimeout(cfg.pipeline.ocrTimeoutMs) { ocr.recognize(workPage, lines) }
         } catch (t: Throwable) {
             val isTimeout = t is kotlinx.coroutines.TimeoutCancellationException
             Log.e(TAG, "OCR failed", t); return@coroutineScope PageResult.Failed("ocr: ${t.message}", if (isTimeout) PipelineErrorCode.TIMEOUT else PipelineErrorCode.OCR_FAILED)
@@ -109,11 +113,21 @@ class Pipeline(
             Log.e(TAG, "Grouping failed", t); return@coroutineScope PageResult.Failed("group: ${t.message}", PipelineErrorCode.GROUP_FAILED)
         }
         val ocrMs = System.currentTimeMillis() - tOcr
-        // Inpaint set = regions with non-blank OCR source text (blank = likely false detection, skip inpaint to preserve image). Determined before translation => inpaint can run concurrently with translation.
+        // Translation set = regions with non-blank OCR source text. Blank means SFX or a read the OCR
+        // could not make, neither of which is worth a translation request.
         val textRegions = regions.filter { it.sourceText.isNotBlank() }
         if (textRegions.isEmpty()) {
             return@coroutineScope PageResult.Skipped("OCR empty", PageStats(lines.size, regions.size, 0, detectMs, ocrMs, 0, 0, 0), PipelineErrorCode.OCR_FAILED)
         }
+
+        // Removal set = *every* detected region, matching the reference (parity/inpaint_parity.py masks
+        // "all detection boxes"). Unreadable text is still text, and erasing it is what stops the page
+        // coming out half-translated with raw source script beside the English. Nothing is re-typeset for
+        // those regions, so the page is uniformly re-set. Still decided before translation, so removal
+        // keeps overlapping the request.
+        val removalRegions = regions
+        val unreadable = removalRegions.size - textRegions.size
+        if (unreadable > 0) Log.i(TAG, "removing $unreadable region(s) with no readable text (SFX or OCR miss)")
 
         // Inpaint (CPU) || Translation (network) concurrent: both depend only on OCR, can run simultaneously (CPU inpaint while waiting for network).
         // §11 change: failed regions no longer "keep source image", but "re-paste OCR source text after inpaint" (user decision: re-pasting is cheap, no source image state needed) => inpaint and translation decoupled.
@@ -121,8 +135,8 @@ class Pipeline(
         var inpaintMs = 0L
         val inpaintJob = async {
             val t0 = System.currentTimeMillis()
-            EngineTrace.log("pipe.inpaint.enter regions=${textRegions.size}")
-            val r = inpainter.inpaint(page, textRegions, detection.textMask, cfg.render)
+            EngineTrace.log("pipe.inpaint.enter regions=${removalRegions.size}")
+            val r = inpainter.inpaint(workPage, removalRegions, detection.textMask, cfg.render)
             EngineTrace.log("pipe.inpaint.exit")
             inpaintMs = System.currentTimeMillis() - t0
             r
@@ -253,13 +267,26 @@ class Pipeline(
         val renderMs = System.currentTimeMillis() - tRn
         EngineTrace.log("pipe.page.done")
 
+        val outPage = if (scaled) {
+            val up = try { Bitmap.createScaledBitmap(finalPage, page.width, page.height, true) } catch (_: Throwable) { null }
+            if (up != null && up !== finalPage) { finalPage.recycle(); up } else finalPage
+        } else {
+            finalPage
+        }
+        val outMask = if (scaled) {
+            val up = try { Bitmap.createScaledBitmap(detection.textMask, page.width, page.height, false) } catch (_: Throwable) { null }
+            if (up != null && up !== detection.textMask) { detection.textMask.recycle(); up } else detection.textMask
+        } else {
+            detection.textMask
+        }
+
         PageResult.Translated(
-            finalPage,
+            outPage,
             PageStats(
                 lines.size, regions.size, kept.size, detectMs, ocrMs, translateMs, inpaintMs, renderMs,
                 System.currentTimeMillis() - tWall, promptTok, completionTok,
             ),
-            PageAnalysis(detection.textMask, textRegions),
+            PageAnalysis(outMask, textRegions),
         )
     }
 

@@ -229,7 +229,13 @@ class Detector(
                     (it.y / ratio).coerceIn(0f, origH.toFloat()),
                 )
             }
-            out.add(TextLine(quad, score))
+            val tight = rect.corners().map {
+                Pt(
+                    (it.x / ratio).coerceIn(0f, origW.toFloat()),
+                    (it.y / ratio).coerceIn(0f, origH.toFloat()),
+                )
+            }
+            out.add(TextLine(quad, score).also { it.tightQuad = tight })
         }
         return out
     }

@@ -9,4 +9,12 @@ class TextLine(val quad: List<Pt>, val score: Float) {
     var direction: String = "h" // 'h' horizontal / 'v' vertical (determined by OCR sortPnts)
     var text: String = ""        // OCR source text (e.g., Japanese)
     var translatedText: String = "" // Translated text (e.g., target language)
+
+    /**
+     * Detection rectangle *before* DBNet's unclip expansion, in page coordinates. The unclip ratio is
+     * 2.3 scaled by area/perimeter, which on a typical text line adds 15-30px of padding on every
+     * side, so [quad] alone overstates the glyph size several times over. Typesetting sizes the
+     * translation from this instead. Null when the detector could not supply it.
+     */
+    var tightQuad: List<Pt>? = null
 }
