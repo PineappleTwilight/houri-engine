@@ -72,6 +72,18 @@ data class DetectorConfig(
     val dbUnclipRatio: Float = 2.3f,      // DB unclip expansion (m-i-t unclip_ratio=2.3)
     val nmsIouThreshold: Float = 0.4f,    // NMS IoU for duplicate box suppression (0.4 = merge near-duplicates, keep distinct bubbles)
     val adaptiveRetry: Boolean = true,   // Enable relaxed-threshold retry when first pass yields 0 lines
+    // ---- Dense-page rescue ------------------------------------------------------------------
+    // A dense page's text is small relative to the page, so at dbnetInputSize (1024, 4x cheaper
+    // than upstream's 2048) those glyphs fall under minSide / dbBoxThreshold and are dropped.
+    // Detection then returns *some* lines, so the old `lines.isEmpty()` retry never fired. This
+    // re-detects at a larger size when the probability map still shows a lot of text mass that
+    // did not survive into lines - i.e. under-detection, not a genuinely sparse page.
+    val denseRetryEnabled: Boolean = true,
+    val denseRetryInputSize: Int = 1536,
+    /** Binarized text mass (fraction of the prob map) that makes a page count as dense. */
+    val denseMassFraction: Float = 0.015f,
+    /** Mass fraction at/above which a low line count is treated as under-detection. */
+    val denseLinesBelow: Int = 12,
 ) {
     fun validate(): List<String> = buildList {
         if (segThreshold !in 0.05f..0.5f) add("segThreshold $segThreshold out of [0.05,0.5]")

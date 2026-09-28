@@ -42,14 +42,74 @@ class Detector(
         require(!page.isRecycled) { "Cannot detect on recycled bitmap" }
         require(page.width in 32..8000 && page.height in 32..8000) { "Page size out of bounds ${page.width}x${page.height}" }
         if (ncnnHandle == 0L) throw IllegalStateException("Detector native handle not initialized")
+
+        var best = runPass(page, cfg.dbnetInputSize)
+
+        // Dense-page rescue. Text mass in the prob map is independent of the box filters, so
+        // "much mass but few surviving lines" is the under-detection signature of a page whose
+        // glyphs are too small at the cheap input size. A genuinely sparse page carries little
+        // mass and never pays for the second forward.
+        if (cfg.denseRetryEnabled && cfg.denseRetryInputSize > cfg.dbnetInputSize &&
+            best.massFraction >= cfg.denseMassFraction && best.lines.size < cfg.denseLinesBelow
+        ) {
+            val hi = runCatching { runPass(page, cfg.denseRetryInputSize) }.getOrNull()
+            if (hi != null) {
+                val log = "mass ${"%.3f".format(best.massFraction)}"
+                if (hi.lines.size > best.lines.size) {
+                    Log.i(TAG, "Dense-page rescue: ${best.lines.size} lines at ${cfg.dbnetInputSize} -> ${hi.lines.size} at ${cfg.denseRetryInputSize} ($log)")
+                    best.mask.recycle()
+                    best = hi
+                } else {
+                    Log.i(TAG, "Dense-page rescue skipped: ${best.lines.size} lines already >= ${hi.lines.size} at ${cfg.denseRetryInputSize} ($log)")
+                    hi.mask.recycle()
+                }
+            }
+        }
+
+        // Relaxed-threshold retry, on whichever pass won. Reuses that pass's prob map, so it is a
+        // re-threshold rather than another forward.
+        if (best.lines.size < cfg.denseLinesBelow && cfg.adaptiveRetry && cfg.dbBoxThreshold > 0.55f) {
+            val retry = linesFromProbMap(
+                best.prob, best.gridW, best.gridH, best.ratio, page.width, page.height,
+                (cfg.dbBinThreshold - 0.05f).coerceAtLeast(0.35f),
+                (cfg.dbBoxThreshold - 0.15f).coerceAtLeast(0.5f),
+                cfg.dbUnclipRatio,
+            )
+            val filtered = nmsFilter(retry, cfg.nmsIouThreshold)
+            if (filtered.size > best.lines.size) {
+                Log.i(TAG, "Detector fallback rescued ${filtered.size} lines (relaxed thresholds, NMS ${retry.size} -> ${filtered.size})")
+                best = Pass(filtered, best.mask, best.prob, best.gridW, best.gridH, best.ratio, best.massFraction)
+            } else if (retry.isNotEmpty()) {
+                Log.i(TAG, "Detector fallback retry produced ${retry.size} lines but none beat the ${best.lines.size} already kept")
+            }
+        } else if (best.lines.isNotEmpty()) {
+            EngineTrace.log("detect.nms kept ${best.lines.size}")
+        }
+
+        Log.i(TAG, "DBNet detected ${best.lines.size} lines (grid ${best.gridW}x${best.gridH}, mass ${"%.3f".format(best.massFraction)})")
+        return Detection(best.lines, best.mask)
+    }
+
+    /** One full forward at [size], plus the raw outputs the retries and the dense check reuse. */
+    private class Pass(
+        val lines: List<TextLine>,
+        val mask: Bitmap,
+        val prob: FloatArray,
+        val gridW: Int,
+        val gridH: Int,
+        val ratio: Float,
+        val massFraction: Float,
+    )
+
+    private fun runPass(page: Bitmap, size: Int): Pass {
         val pre = try {
-            ImageOps.detectorChwDbnet(page, cfg.dbnetInputSize, cfg.detectUnsharp)
+            ImageOps.detectorChwDbnet(page, size, cfg.detectUnsharp)
         } catch (t: Throwable) {
             throw IllegalStateException("Failed to preprocess page for detection: ${t.message}", t)
         }
         val inW = pre.w
         val inH = pre.h
-        require(inW in 32..2048 && inH in 32..2048) { "Preprocessed size out of bounds ${inW}x${inH}" }
+        require(inW in 32..2048 && inH in 32..2048) { "Preprocessed size out of bounds ${inW}x$inH" }
         val area = inW * inH
         require(area in 1..(2048 * 2048)) { "Area too large $area" }
         val db = FloatArray(2 * area)
@@ -72,32 +132,24 @@ class Detector(
         // db ch0 = raw logits -> sigmoid -> prob (ctd out0 already sigmoid, DBNet not); grid = rectangle inW x inH
         val prob = FloatArray(area)
         for (i in 0 until area) prob[i] = 1f / (1f + exp(-db[i]))
-        var lines = linesFromProbMap(
+        var above = 0
+        for (i in 0 until area) if (prob[i] > cfg.dbBinThreshold) above++
+        val raw = linesFromProbMap(
             prob, inW, inH, pre.ratio, page.width, page.height,
             cfg.dbBinThreshold, cfg.dbBoxThreshold, cfg.dbUnclipRatio,
         )
-        lines = nmsFilter(lines, cfg.nmsIouThreshold)
-        if (lines.isEmpty() && cfg.adaptiveRetry && cfg.dbBoxThreshold > 0.55f) {
-            val retry = linesFromProbMap(
-                prob, inW, inH, pre.ratio, page.width, page.height,
-                (cfg.dbBinThreshold - 0.05f).coerceAtLeast(0.35f),
-                (cfg.dbBoxThreshold - 0.15f).coerceAtLeast(0.5f),
-                cfg.dbUnclipRatio,
-            )
-            val filtered = nmsFilter(retry, cfg.nmsIouThreshold)
-            if (filtered.isNotEmpty()) {
-                Log.i(TAG, "Detector fallback rescued ${filtered.size} lines (relaxed thresholds, NMS ${retry.size}→${filtered.size})")
-                lines = filtered
-            } else if (retry.isNotEmpty()) {
-                Log.i(TAG, "Detector fallback retry produced ${retry.size} lines but NMS removed all (iou=${cfg.nmsIouThreshold})")
-            }
-        } else if (lines.isNotEmpty()) {
-            EngineTrace.log("detect.nms kept ${lines.size}")
-        }
+        val lines = nmsFilter(raw, cfg.nmsIouThreshold)
         // mask (already sigmoid) -> original-size stroke mask. mask space ratio = pre.ratio * mw/inW (half-res=ratio/2, full-res=ratio, dynamic).
         val textMask = segToMask(mask, mw, mh, pre.ratio * mw.toFloat() / inW, page.width, page.height)
-        Log.i(TAG, "DBNet detected ${lines.size} lines (in ${inW}x$inH mask ${mw}x$mh)")
-        return Detection(lines, textMask)
+        return Pass(
+            lines = lines,
+            mask = textMask,
+            prob = prob,
+            gridW = inW,
+            gridH = inH,
+            ratio = pre.ratio,
+            massFraction = above.toFloat() / area.toFloat(),
+        )
     }
 
     /**
