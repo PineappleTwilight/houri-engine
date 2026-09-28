@@ -107,6 +107,11 @@ data class OcrConfig(
     // Default 4 = device A/B proven (sandbox 6 pages 161 boxes, matched by detection box index): save 2 (including 006), break 0, effectively fix ~14 (e.g., 'to ichi mo...'), cost = minor noise ('!'->'—', one kana, LLM tolerant; same tradeoff as useBicubic). Also ~20% faster OCR (wider box -> shorter CTC sequence).
     // pad=8/12 regress (8: break 2; 12: break 1) => 4 is sweet spot. Desktop m-i-t warp sim gave +15% reads, device only +2 (engine bicubic warp baseline already 98%), so device value cannot be copied from desktop.
     val stripPad: Int = 4,
+    // The fixed stripPad is measured for typical manga text. Stroke width scales with the text,
+    // so on a large box a missed edge stroke can be wider than 4px and still clip; this adds
+    // that margin. Only ever raises the pad - the 4px floor stays, since lowering it is what
+    // the "2 rescued, 0 regressions" measurement was taken against.
+    val stripPadFraction: Float = 0.12f,
     val useXnnpack: Boolean = false,  // Default off: XNNPACK miscomputes 48px CTC model (device proven empty), pure CPU is correct
     // Per-line concurrent OCR: small tiles (48px high, narrow) under-utilize intra-op 4 threads -> use "1 thread per line, N lines concurrent" to fill cores.
     // concurrent=true -> session intra-op =1 (one line one thread), via Semaphore(concurrency); false -> one line uses NUM_THREADS, sequential.

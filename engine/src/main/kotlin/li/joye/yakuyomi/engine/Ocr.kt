@@ -122,7 +122,7 @@ class Ocr(
     /** Single-line OCR: crop -> preprocess -> CTC -> fill text. Thread-safe: only writes own line, session.run can be concurrent, rest is local/read-only. */
     private fun recognizeOne(page: Bitmap, line: TextLine, inputName: String, bicubic: Boolean) {
         // First expand, then sortPnts: sortPnts determines point order for warp, expand then sort avoids disorder (expansion itself does not change vertical/horizontal determination).
-        val quad = if (cfg.stripPad > 0) expandQuad(line.quad, cfg.stripPad, page.width, page.height) else line.quad
+        val quad = if (cfg.stripPad > 0) expandQuad(line.quad, stripPadFor(line.quad), page.width, page.height) else line.quad
         val (ordered, isV) = sortPnts(quad)
         line.direction = if (isV) "v" else "h"
         val strip = transformedRegion(page, ordered, isV, cfg.textHeight, bicubic) ?: return
@@ -145,6 +145,24 @@ class Ocr(
         } finally {
             strip.recycle()
         }
+    }
+
+    /**
+     * Pad for the OCR crop: [OcrConfig.stripPad], raised to a fraction of the box's own short
+     * side. Stroke width tracks text size, so a fixed 4px is roomy on small text but can still
+     * clip a missed edge stroke on a large box - and a clipped edge makes the CTC head return
+     * an empty string, which drops the whole region and leaves a hole.
+     *
+     * Only ever raises. The 4px floor is what the "2 rescued, 0 regressions" measurement was
+     * taken against, so the fraction is additive margin, never a reduction.
+     */
+    private fun stripPadFor(quad: List<Pt>): Int {
+        val base = cfg.stripPad
+        if (base <= 0) return 0
+        val rect = Geometry.minAreaRect(quad) ?: return base
+        val shortest = min(rect.w, rect.h)
+        if (!shortest.isFinite() || shortest <= 0f) return base
+        return max(base, (shortest * cfg.stripPadFraction).roundToInt())
     }
 
     /**
