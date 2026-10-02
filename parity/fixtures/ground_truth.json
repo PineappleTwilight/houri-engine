@@ -52,5 +52,24 @@
       "cer": 0.1739
     },
     "conclusion": "On this hand-lettered vertical-Japanese page the bundled int8 model is the more accurate of the two (CER 0.051 vs 0.174). PP-OCRv5's residual errors are real misreads - ka/kana substitutions such as 髪->髮, じゃあ->じあ - not punctuation width, which accounts for only 4 of 24. PP-OCRv5 stays optional and is NOT promoted as a default."
+  },
+  "open_questions": {
+    "_note": "Measured on ONE page of 30 vertical hand-lettered lines. Not grounds for a code change; each needs device confirmation.",
+    "pad_margin": {
+      "finding": "Adding stripToTensor's 16px white right margin appears to HURT the bundled model on this fixture: CER 0.051 (no margin) vs 0.116 (16px), monotonically worse up to 48px.",
+      "counter_evidence": "PAD_MARGIN is a deliberate constant documented as preventing trailing-char truncation ('Saka' -> 'Sakamoto', 'neene' -> 'neenee'), presumably measured on device.",
+      "why_not_changed": "parity build_strips does not apply the margin at all, so this compares a no-margin harness against the production path on 30 lines. The harness also differs from the app (no stripPad, no unsharp). Contradicting a device-tuned constant on one page is not evidence.",
+      "how_to_settle": "Run the app on device with PAD_MARGIN=0 vs 16 over several chapters and compare lines read / CER."
+    },
+    "ppocrv5_vs_bundled": {
+      "finding": "Bundled int8 CER 0.051 vs PP-OCRv5 0.174 on this page. PP-OCRv5 is smaller (16.6MB vs 43.6MB) but less accurate on hand-lettered text.",
+      "not_settled": "One page, vertical text only, no horizontal, no printed-text control (no CJK font available on the host to render the same strings). PP-OCRv5 may well be better on printed or cleaner text.",
+      "how_to_settle": "Score both on a few pages of each: hand-lettered and digitally-lettered, vertical and horizontal."
+    },
+    "punctuation_width": {
+      "finding": "PP-OCRv5 emits half-width ? ! . , while the bundled model and normal Japanese use full-width. Folding half to full accounts for 4 of 24 errors (CER 0.174 -> 0.145).",
+      "both_forms_present": "ppocrv5_dict.txt contains BOTH '?' (id 16177) and '？' (id 16372), likewise !/！ and ./。 - so this is a model preference, not a vocabulary gap.",
+      "not_changed": "Folding is a display/normalisation decision affecting the translation prompt, not an OCR fix. Needs a decision on whether OCR output should be normalised or left as the model read it."
+    }
   }
 }
