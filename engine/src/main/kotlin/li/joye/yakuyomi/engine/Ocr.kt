@@ -435,42 +435,8 @@ class Ocr(
         return ctcDecodeArr(arr, t, d)
     }
 
-    /** Greedy CTC (blank=0, collapse repeats) + average confidence, aligned with decode_ctc_top1. Returns (text, prob). */
-    private fun ctcDecodeArr(arr: FloatArray, t: Int, d: Int): Pair<String, Float> {
-        if (dictionary.isEmpty() || t <= 0 || d <= 0) return "" to 0f
-        if (arr.size < t * d) return "" to 0f
-        if (d != dictionary.size) Log.w(TAG, "CTC dict size mismatch: logits d=$d vs dict ${dictionary.size}")
-        val dictSize = dictionary.size
-        val sb = StringBuilder()
-        var last = BLANK
-        var logpSum = 0.0
-        var nChars = 0
-        for (ti in 0 until t) {
-            val base = ti * d
-            if (base + d > arr.size) break
-            var best = 0
-            var bestV = arr[base]
-            for (c in 1 until d) {
-                val v = arr[base + c]
-                if (v > bestV) { bestV = v; best = c }
-            }
-            if (best != last && best != BLANK) {
-                if (best >= dictSize) {
-                    Log.w(TAG, "CTC best id $best out of dict bounds $dictSize, skipping")
-                } else {
-                    val ch = dictionary[best]
-                    sb.append(if (ch == "<SP>") " " else ch)
-                    var s = 0.0
-                    for (c in 0 until d) s += Math.exp((arr[base + c] - bestV).toDouble())
-                    logpSum += -Math.log(s)
-                    nChars++
-                }
-            }
-            last = best
-        }
-        val prob = if (nChars > 0) Math.exp(logpSum / nChars).toFloat().coerceIn(0f, 1f) else 0f
-        return sb.toString() to prob
-    }
+    /** Greedy CTC (blank=0, collapse repeats) + average confidence. Delegates to [CtcDecode]. */
+    private fun ctcDecodeArr(arr: FloatArray, t: Int, d: Int): Pair<String, Float> = CtcDecode.greedy(arr, t, d, dictionary)
 
     /** SFX / non-bubble text determination (ported from utils/bubble.py:is_ignore @ d5a3eee): mixed border color (not clean bubble background) or colored -> skip. */
     private fun isIgnore(strip: Bitmap, ignoreBubble: Int): Boolean {
