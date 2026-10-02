@@ -39,8 +39,25 @@ class LogitsOutputTest {
     }
 
     @Test
-    fun firstRankThreeWinsWhenSeveralQualify() {
-        val shapes = listOf(logitsShape(1), logitsShape(2), logitsShape(3))
+    fun anAuxiliaryRankThreeHeadIsNotMistakenForTheLogits() {
+        // The bundled model's real output signature: [N,T,19264] alongside a [N,T,6] color head.
+        // Both are rank 3, so declaration order alone is not a rule - reading the color head would
+        // decode a 6-wide vocabulary into fluent-looking nonsense.
+        val shapes = listOf(logitsShape(19264), intArrayOf(1, 39, 6))
+        assertEquals(0, LogitsOutput.select(shapes))
+    }
+
+    @Test
+    fun theWidestRankThreeWinsRegardlessOfPosition() {
+        // Same two outputs with the auxiliary head declared first, which is what an exporter
+        // reordering its graph would produce.
+        val shapes = listOf(intArrayOf(1, 39, 6), logitsShape(19264))
+        assertEquals(1, LogitsOutput.select(shapes))
+    }
+
+    @Test
+    fun theWidestOfSeveralRankThreeOutputsWins() {
+        val shapes = listOf(logitsShape(3), logitsShape(2), logitsShape(1))
         assertEquals(0, LogitsOutput.select(shapes))
     }
 
