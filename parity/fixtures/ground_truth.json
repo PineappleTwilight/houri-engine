@@ -1,0 +1,56 @@
+{
+  "_comment": "Expected text for the 30 frozen quads in faithful_boxes.json, transcribed by reading a contact sheet of the cropped strips. Used to score CER so accuracy changes are measured rather than eyeballed. Both models read the SAME strips, so any difference is the model's, not the crop's.",
+  "_provenance": {
+    "transcribed_by": "reading parity-strip contact sheets (one image, 2x zoom, index + direction label per strip)",
+    "method": "vertical strips rotated CCW to horizontal, so text reads left-to-right in the sheet",
+    "confidence": "hand-transcribed, not machine-derived. Glyphs that were ambiguous are marked with a leading '~' and are excluded from strict CER.",
+    "caveat": "Review before trusting: this is one human (AI) reading of 30 short lines. It is a better yardstick than eyeballing decoded output, but it is not a published transcript."
+  },
+  "_fuzzy_prefix": "~",
+  "texts": {
+    "0": "ふふっ",
+    "1": "他には？",
+    "2": "わあ、いいね",
+    "3": "髪型変えた",
+    "4": "すぐに気付いて",
+    "5": "くれてっ",
+    "6": "店の店員さんとかに",
+    "7": "敬語使ってて偉いな",
+    "8": "とか",
+    "9": "うんうん",
+    "10": "反応がいちいち",
+    "11": "面白いなーとが",
+    "12": "あっ、あ",
+    "13": "こないだね",
+    "14": "わ、私はー",
+    "15": "別にそんな",
+    "16": "え？",
+    "17": "メシアは",
+    "18": "じゃあ",
+    "19": "どうなの",
+    "20": "坂本",
+    "21": "くん？",
+    "22": "え",
+    "23": "それだけー？",
+    "24": "ねえね",
+    "25": "めいは坂本のこと",
+    "26": "どう思う？",
+    "27": "優しいよ",
+    "28": "そうだなあ",
+    "29": "うん"
+  },
+  "baseline_2026_10_02": {
+    "_note": "Measured on this fixture with no right-margin (parity harness build_strips omits stripToTensor's PAD_MARGIN). Re-measure after touching the crop or the alphabets.",
+    "bundled_int8": {
+      "errors": 7,
+      "chars": 138,
+      "cer": 0.0507
+    },
+    "ppocrv5": {
+      "errors": 24,
+      "chars": 138,
+      "cer": 0.1739
+    },
+    "conclusion": "On this hand-lettered vertical-Japanese page the bundled int8 model is the more accurate of the two (CER 0.051 vs 0.174). PP-OCRv5's residual errors are real misreads - ka/kana substitutions such as 髪->髮, じゃあ->じあ - not punctuation width, which accounts for only 4 of 24. PP-OCRv5 stays optional and is NOT promoted as a default."
+  }
+}
