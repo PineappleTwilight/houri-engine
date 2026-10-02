@@ -133,9 +133,8 @@ class Ocr(
         try {
             stripToTensor(strip).use { input ->
                 session.run(mapOf(inputName to input)).use { res ->
-                    val logits = res.get(OUT_LOGITS).orElseThrow {
-                        IllegalStateException("Missing output $OUT_LOGITS")
-                    } as OnnxTensor
+                    val logits = resolveLogits(res)
+                        ?: throw IllegalStateException("No tensor output (session reported ${res.outputNames()})")
                     val (text, prob) = ctcDecode(logits)
                     if (prob >= cfg.minProb) line.text = text  // Low-confidence misread -> discard
                 }
@@ -405,6 +404,25 @@ class Ocr(
         return OnnxTensor.createTensor(
             env, FloatBuffer.wrap(chw), longArrayOf(1, 3, h.toLong(), w.toLong()),
         )
+    }
+
+    /**
+     * Picks the logits tensor regardless of what the exporter named it.
+     *
+     * The bundled 48px model emits "char_logits", but PP-OCRv5's ONNX conversion emits
+     * "fetch_name_0" for the same tensor, so a hard-coded name makes an otherwise compatible model
+     * fail at the first line. Falls back to the single tensor output, which is unambiguous here
+     * because this model has exactly one.
+     */
+    private fun resolveLogits(res: OrtSession.Result): OnnxTensor? {
+        res.get(OUT_LOGITS)?.let { return it as OnnxTensor }
+        val names = res.outputNames()
+        for (n in names) {
+            val t = res.get(n) as? OnnxTensor ?: continue
+            val rank = (t.info as? TensorInfo)?.shape?.size ?: 0
+            if (rank == 3) return t
+        }
+        return names.firstNotNullOfOrNull { res.get(it) as? OnnxTensor }
     }
 
     /** Greedy CTC (single [1,T,d]) -> read arr then delegate to [ctcDecodeArr]. */
