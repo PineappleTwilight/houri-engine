@@ -134,7 +134,7 @@ class Ocr(
             stripToTensor(strip).use { input ->
                 session.run(mapOf(inputName to input)).use { res ->
                     val logits = resolveLogits(res)
-                        ?: throw IllegalStateException("No tensor output (session reported ${res.outputNames()})")
+                        ?: throw IllegalStateException("No tensor output (session reported ${res.size()} output(s))")
                     val (text, prob) = ctcDecode(logits)
                     if (prob >= cfg.minProb) line.text = text  // Low-confidence misread -> discard
                 }
@@ -415,14 +415,11 @@ class Ocr(
      * because this model has exactly one.
      */
     private fun resolveLogits(res: OrtSession.Result): OnnxTensor? {
-        res.get(OUT_LOGITS)?.let { return it as OnnxTensor }
-        val names = res.outputNames()
-        for (n in names) {
-            val t = res.get(n) as? OnnxTensor ?: continue
-            val rank = (t.info as? TensorInfo)?.shape?.size ?: 0
-            if (rank == 3) return t
+        for (i in 0 until res.size()) {
+            val t = res.get(i) as? OnnxTensor ?: continue
+            if ((t.info as? TensorInfo)?.shape?.size == 3) return t
         }
-        return names.firstNotNullOfOrNull { res.get(it) as? OnnxTensor }
+        return if (res.size() > 0) res.get(0) as? OnnxTensor else null
     }
 
     /** Greedy CTC (single [1,T,d]) -> read arr then delegate to [ctcDecodeArr]. */
@@ -483,8 +480,6 @@ class Ocr(
     companion object {
         private const val TAG = "Ocr"
         private const val NUM_THREADS = 4
-        private const val BLANK = 0
-        private const val OUT_LOGITS = "char_logits"
         private const val PAD_MARGIN = 16  // White border on right side of each strip: gives CTC context, prevents truncating trailing chars
     }
 }
