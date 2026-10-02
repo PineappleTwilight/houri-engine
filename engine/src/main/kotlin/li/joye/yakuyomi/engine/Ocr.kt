@@ -407,19 +407,17 @@ class Ocr(
     }
 
     /**
-     * Picks the logits tensor regardless of what the exporter named it.
-     *
-     * The bundled 48px model emits "char_logits", but PP-OCRv5's ONNX conversion emits
-     * "fetch_name_0" for the same tensor, so a hard-coded name makes an otherwise compatible model
-     * fail at the first line. Falls back to the single tensor output, which is unambiguous here
-     * because this model has exactly one.
+     * Picks the logits tensor regardless of what the exporter named it, and delegates the choice
+     * itself to [LogitsOutput]. The bundled 48px model emits "char_logits" while PP-OCRv5's ONNX
+     * conversion emits "fetch_name_0" for the same tensor, and `OrtSession.Result` in ORT 1.20 has
+     * no name accessor at all, so the tensor is found by rank instead.
      */
     private fun resolveLogits(res: OrtSession.Result): OnnxTensor? {
-        for (i in 0 until res.size()) {
-            val t = res.get(i) as? OnnxTensor ?: continue
-            if ((t.info as? TensorInfo)?.shape?.size == 3) return t
+        val shapes = (0 until res.size()).map { i ->
+            ((res.get(i) as? OnnxTensor)?.info as? TensorInfo)?.shape
         }
-        return if (res.size() > 0) res.get(0) as? OnnxTensor else null
+        val index = LogitsOutput.select(shapes) ?: return null
+        return res.get(index) as? OnnxTensor
     }
 
     /** Greedy CTC (single [1,T,d]) -> read arr then delegate to [ctcDecodeArr]. */
