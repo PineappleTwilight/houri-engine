@@ -71,5 +71,43 @@
       "both_forms_present": "ppocrv5_dict.txt contains BOTH '?' (id 16177) and '？' (id 16372), likewise !/！ and ./。 - so this is a model preference, not a vocabulary gap.",
       "not_changed": "Folding is a display/normalisation decision affecting the translation prompt, not an OCR fix. Needs a decision on whether OCR output should be normalised or left as the model read it."
     }
+  },
+  "error_mode_analysis": {
+    "_note": "Where the bundled model's 7 errors actually come from, and what was tried against them. Measured on the same 30 frozen quads.",
+    "error_modes": {
+      "truncation": 5,
+      "substitution": 1,
+      "addition": 0,
+      "mixed": 1,
+      "examples": {
+        "truncated": [
+          "他には？ -> 他には",
+          "とか -> と",
+          "反応がいちいち -> 反応がいちい",
+          "坂本 -> 坂",
+          "くん？ -> くん"
+        ],
+        "substitution": [
+          "ふふっ -> ふふ口"
+        ],
+        "mixed": [
+          "うん -> うーん"
+        ]
+      },
+      "reading": "5 of 7 are TRUNCATION, not misrecognition. The characters are being cut off at the end of the strip, not read wrong. That is a crop/context problem, so it should be fixable without touching the model."
+    },
+    "right_margin_tradeoff": {
+      "finding": "PAD_MARGIN=16 removes ALL 5 truncations but introduces ~11 hallucinated characters, so CER rises 0.051 -> 0.116. Verified line by line: 他には -> 他には？ (fixed), 髪型変えた -> 髪型変えたら, 敬語使ってて偉いな -> 敬語使ってて偉いな！.",
+      "mechanism": "The margin gives the CTC the trailing context it needs to finish a word, and it then keeps decoding into the blank space past the end of the text. The engine's own comment names this tradeoff ('Saka' -> 'Sakamoto'), so the two failures are the same decision.",
+      "ink_trim_failed": "Suppressing characters decoded past the last inked column does NOT help (CER identical to untrimmed at every margin). Reason: ocr_parity.build_strips crops tight to the quad, so ink already reaches the final column; the hallucinated characters decode from whitespace INSIDE the crop, not from the appended margin."
+    },
+    "things_tried_that_did_not_help": {
+      "right_pad_to_320_or_384": "no change (CER 0.174 for PP-OCRv5; PP-OCRv5 trains at rec_image_shape [3,48,320] but the graph accepts variable width)",
+      "pad_to_multiple_of_8": "marginal, 0.174 -> 0.167, within noise",
+      "unsharp_a0.5": "no change; a1.0 worse (0.174 -> 0.188)",
+      "input_height_64": "REJECTED by the graph - height is fixed at 48",
+      "margin8_plus_logprob_floor_-0.7": "CER 0.0507 -> 0.0435, but line-level it FIXES 4 and BREAKS 3, net +1 on 30 lines. That is noise, not a win, and is NOT proposed."
+    },
+    "what_this_points_at": "The remaining lever is the crop, not the decode. Truncation means the last glyph is partly outside the quad the detector produced, so the fix belongs in detection box expansion (stripPad) or in re-cropping with a right bound that stops at the neighbouring glyph - neither of which can be settled on one page."
   }
 }
