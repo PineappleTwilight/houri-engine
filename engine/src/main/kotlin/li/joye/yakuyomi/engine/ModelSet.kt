@@ -28,7 +28,10 @@ data class ModelSet(
                 val n = name.lowercase()
                 n.endsWith(ext) && keys.any { n.contains(it) }
             }?.second
-            val ocr = find(".onnx", "ocr") ?: return null
+            // PP-OCRv5 is tried first: when both it and the bundled int8 model are installed, a
+            // plain "first match wins" would pick whichever the filesystem happened to list first,
+            // silently switching the reader between models. loadAlphabet keys off the same choice.
+            val ocr = find(".onnx", "ppocr", "ocrv5") ?: find(".onnx", "ocr") ?: return null
             val detNcnn = find(".param", "dbnet") ?: return null
             val aotNcnn = find(".param", "aot") ?: return null
             return ModelSet(ocr = ocr, detectorNcnn = detNcnn, aotInpainterNcnn = aotNcnn)
