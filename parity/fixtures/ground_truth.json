@@ -109,5 +109,18 @@
       "margin8_plus_logprob_floor_-0.7": "CER 0.0507 -> 0.0435, but line-level it FIXES 4 and BREAKS 3, net +1 on 30 lines. That is noise, not a win, and is NOT proposed."
     },
     "what_this_points_at": "The remaining lever is the crop, not the decode. Truncation means the last glyph is partly outside the quad the detector produced, so the fix belongs in detection box expansion (stripPad) or in re-cropping with a right bound that stops at the neighbouring glyph - neither of which can be settled on one page."
+  },
+  "strip_pad_sweep": {
+    "_note": "Swept Ocr.kt's own crop (stripPadFor -> expandQuad -> warp -> rot90 -> PAD_MARGIN) over stripPad 0..12 x fraction 0..0.25, scored on the same 30 quads. Script: parity/sweep_strip_pad.py.",
+    "result": "The shipped default (stripPad=4, fraction=0.12) is already optimal: CER 0.0942, 13 bad lines, 0 truncations. The nominal best (stripPad=2, fraction=0.12) TIES it exactly. No change recommended.",
+    "table": {
+      "stripPad 4 / 0.12 (default)": "0.0942 (13 bad, 0 trunc)",
+      "stripPad 0 (no padding)": "0.1087 (15 bad)",
+      "stripPad 2 / 0.12": "0.0942 (13 bad) - tie",
+      "stripPad 8 / 0.18": "0.1159 (15 bad)",
+      "stripPad 12 (any)": "0.1304 (16 bad)"
+    },
+    "fraction_matters_less_than_base": "Beyond stripPad=2 the fraction term is nearly inert; the pad=8 row is the only one that reintroduces a truncation (1). Wider padding is monotonically worse, so the crop is not the lever.",
+    "CORRECTS_earlier_note": "The earlier '5 of 7 errors are truncation' figure was measured on ocr_parity.build_strips, which crops tight to the quad with NO stripPad and NO PAD_MARGIN. On the production path the default has 0 truncations. Those 5 were an artefact of the harness omitting stripPad, not a defect in the shipped crop. The harness remains valid for model-vs-model comparison but is NOT representative of production cropping."
   }
 }
