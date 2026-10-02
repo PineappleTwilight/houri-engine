@@ -14,7 +14,7 @@ import org.junit.Test
 class LogitsOutputTest {
 
     /** A real strip decode is [1, T, vocab]; the vocabulary width differs per model. */
-    private fun logitsShape(vocab: Int) = intArrayOf(1, 80, vocab)
+    private fun logitsShape(vocab: Int) = longArrayOf(1, 80, vocab.toLong())
 
     @Test
     fun singleLogitsOutputIsUsed() {
@@ -31,8 +31,8 @@ class LogitsOutputTest {
     @Test
     fun rankThreeIsPreferredOverEarlierOutputs() {
         val shapes = listOf(
-            intArrayOf(4),
-            intArrayOf(1, 3, 80, 80),
+            longArrayOf(4),
+            longArrayOf(1, 3, 80, 80),
             logitsShape(18385),
         )
         assertEquals(2, LogitsOutput.select(shapes))
@@ -43,7 +43,7 @@ class LogitsOutputTest {
         // The bundled model's real output signature: [N,T,19264] alongside a [N,T,6] color head.
         // Both are rank 3, so declaration order alone is not a rule - reading the color head would
         // decode a 6-wide vocabulary into fluent-looking nonsense.
-        val shapes = listOf(logitsShape(19264), intArrayOf(1, 39, 6))
+        val shapes = listOf(logitsShape(19264), longArrayOf(1, 39, 6))
         assertEquals(0, LogitsOutput.select(shapes))
     }
 
@@ -51,7 +51,7 @@ class LogitsOutputTest {
     fun theWidestRankThreeWinsRegardlessOfPosition() {
         // Same two outputs with the auxiliary head declared first, which is what an exporter
         // reordering its graph would produce.
-        val shapes = listOf(intArrayOf(1, 39, 6), logitsShape(19264))
+        val shapes = listOf(longArrayOf(1, 39, 6), logitsShape(19264))
         assertEquals(1, LogitsOutput.select(shapes))
     }
 
@@ -63,18 +63,18 @@ class LogitsOutputTest {
 
     @Test
     fun fallsBackToTheOnlyCandidateWhenNoneIsRankThree() {
-        assertEquals(0, LogitsOutput.select(listOf(intArrayOf(1, 2))))
+        assertEquals(0, LogitsOutput.select(listOf(longArrayOf(1, 2))))
     }
 
     @Test
     fun nullEntriesAreSkippedWhenFallingBack() {
-        val shapes = listOf(null, null, intArrayOf(5))
+        val shapes = listOf(null, null, longArrayOf(5))
         assertEquals(2, LogitsOutput.select(shapes))
     }
 
     @Test
     fun nullEntriesAreSkippedWhenPreferring() {
-        val shapes = listOf(null, logitsShape(18385), intArrayOf(9))
+        val shapes = listOf(null, logitsShape(18385), longArrayOf(9))
         assertEquals(1, LogitsOutput.select(shapes))
     }
 
@@ -91,7 +91,7 @@ class LogitsOutputTest {
     @Test
     fun rankThreeDetectionIsExact() {
         // 2-D and 4-D neighbours of the real shape must not be mistaken for it.
-        assertEquals(1, LogitsOutput.select(listOf(intArrayOf(80, 18385), intArrayOf(1, 80, 18385))))
-        assertEquals(1, LogitsOutput.select(listOf(intArrayOf(1, 1, 80, 18385), intArrayOf(1, 80, 18385))))
+        assertEquals(1, LogitsOutput.select(listOf(longArrayOf(80, 18385), longArrayOf(1, 80, 18385))))
+        assertEquals(1, LogitsOutput.select(listOf(longArrayOf(1, 1, 80, 18385), longArrayOf(1, 80, 18385))))
     }
 }

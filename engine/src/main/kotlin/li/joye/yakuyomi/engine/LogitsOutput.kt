@@ -25,10 +25,12 @@ internal object LogitsOutput {
      *
      * @param shapes one entry per session output: the tensor's shape, or null when that output is
      *   not a tensor with a known shape. Null entries are neither preferred nor used as a fallback.
+     *   The element type is [LongArray] because ONNX Runtime's `TensorInfo.getShape()` is declared
+     *   `long[]` - dims are 64-bit even though every dimension that reaches here is small.
      */
-    fun select(shapes: List<IntArray?>): Int? {
+    fun select(shapes: List<LongArray?>): Int? {
         var best = -1
-        var widest = -1
+        var widest = -1L
         shapes.forEachIndexed { index, shape ->
             if (shape != null && shape.size == 3 && shape[2] > widest) {
                 best = index
